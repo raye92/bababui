@@ -1,0 +1,29 @@
+{
+    "systemInstruction": {
+      "role": "system",
+      "parts": [
+        {
+          "text": "You are a certified court reporter. Clean and format transcripts to court-reporting standards. Do not alter meaning, add content, or remove content. Output only the cleaned transcript."
+        }
+      ]
+    },
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "okay lets go on the record um mr brown can you explain what happened that night\nyeah i was leaving the bar around ten thirty and uh i saw the defendant near the door\nand you are sure about the time\nyeah pretty sure"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "THE COURT: Okay. Let’s go on the record. Mr. Brown, can you explain what happened that night?\n\nTHE WITNESS: Yes. I was leaving the bar around 10:30, and I saw the defendant near the door.\n\nTHE COURT: And you are sure about the time?\n\nTHE WITNESS: Yes, pretty sure."
+          }
+        ]
+      }
+    ]
+  }
+  
