@@ -198,10 +198,18 @@ class TranscriptEditor(QMainWindow):
                 page_counter += 1
             else:
                 line_counter += 1
-
-        # Handle the footer for the very last partial page
-        if line_counter > 1:
-             final_output += f"\n{page_counter:>75}"
+                # --- Ensure we have exactly 25 lines per page ---
+        # If we finished the text but haven't reached line 25, fill the rest.
+        # We check if line_counter > 1 (meaning we are mid-page).
+        if line_counter > 1 and line_counter <= LINES_PER_PAGE:
+            while line_counter <= LINES_PER_PAGE:
+                # Print just the number and indentation, but no text
+                prefix_number = f"{line_counter:>11}"
+                final_output += f"{prefix_number}    \n\n"
+                line_counter += 1
+            
+            # After filling the page, add the final footer
+            final_output += f"\n{page_counter:>75}"
 
         self.editor.setPlainText(final_output)
         self.statusBar().showMessage(f"Applied standards: {page_counter} pages generated.")
