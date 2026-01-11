@@ -1,14 +1,17 @@
 import sys
-import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPlainTextEdit, 
-                               QVBoxLayout, QWidget, QToolBar)
+                               QVBoxLayout, QWidget, QToolBar, QMessageBox)
 from PySide6.QtGui import QFont, QAction
+from formatter import Formatter
 
 class TranscriptEditor(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BABABUI")
         self.resize(1000, 800)
+        
+        # Initialize formatter
+        self.formatter = Formatter()
 
         # Main Layout container
         central_widget = QWidget()
@@ -35,6 +38,12 @@ class TranscriptEditor(QMainWindow):
         sample_action = QAction("Insert Sample", self)
         sample_action.triggered.connect(self.insert_sample_text)
         toolbar.addAction(sample_action)
+        
+        # Action: Batch Strip Formatting
+        batch_strip_action = QAction("Batch Strip (original → stripped)", self)
+        batch_strip_action.setStatusTip("Process all .txt files in 'original' folder")
+        batch_strip_action.triggered.connect(self.batch_strip_formatting)
+        toolbar.addAction(batch_strip_action)
 
         # --- Text Editor ---
         self.editor = QPlainTextEdit()
@@ -114,37 +123,8 @@ class TranscriptEditor(QMainWindow):
         Ignores the 5-line headers during the strip process.
         """
         raw_text = self.editor.toPlainText()
-        lines = raw_text.split('\n')
-        cleaned_lines = []
-
-        # Regex: Start + Whitespace + Digits + EXACTLY 4 spaces + Content
-        # This catches "          1    Text" and "         10    Text"
-        pattern = re.compile(r"^\s*\d+ {4}(.*)")
-        
-        # Regex: Page numbers (solitary digits)
-        page_footer_pattern = re.compile(r"^\s*\d+\s*$")
-
-        for line in lines:
-            # Skip purely empty lines (this removes the 5-line headers and double spacing)
-            if not line.strip():
-                continue
-
-            match = pattern.match(line)
-            if match:
-                # Group 2 is the text AFTER the 4 spaces.
-                # This preserves internal spacing (like indentation for Q/A).
-                content = match.group(1) 
-                cleaned_lines.append(content)
-            
-            elif page_footer_pattern.match(line):
-                continue
-            
-            else:
-                # Keep lines that appear to be raw text already
-                cleaned_lines.append(line)
-
-        # Join with single newline for clean editing
-        self.editor.setPlainText("\n".join(cleaned_lines))
+        cleaned_text = self.formatter.strip_formatting(raw_text)
+        self.editor.setPlainText(cleaned_text)
         self.statusBar().showMessage("Formatting stripped.")
 
     def apply_formatting(self):
@@ -156,47 +136,52 @@ class TranscriptEditor(QMainWindow):
         4. Pagination footer.
         """
         raw_text = self.editor.toPlainText()
-        lines = raw_text.split('\n')
-        
-        # We build the string manually to handle distinct header vs text spacing
-        final_output = ""
-        
-        line_counter = 1
-        page_counter = 1
-        LINES_PER_PAGE = 25
-
-        # Initial Header for Page 1
-        final_output += "\n" * 5
-
-        for line in lines:
-            if not line.strip():
-                continue
-
-            # Format line with right-aligned number (11 chars) + 4 spaces + content + double spacing
-            final_output += f"{line_counter:>11}    {line}\n\n"
-
-            if line_counter == LINES_PER_PAGE:
-                # Page footer with form feed
-                final_output += f"\n{page_counter:>72}\n\f"
-                # Start next page with 5 newlines header
-                final_output += "\n" * 5
-                line_counter = 1
-                page_counter += 1
-            else:
-                line_counter += 1
-
-        # --- Ensure we have exactly 25 lines per page ---
-        # If we finished the text but haven't reached line 25, fill the rest.
-        if line_counter > 1 and line_counter <= LINES_PER_PAGE:
-            while line_counter <= LINES_PER_PAGE:
-                final_output += f"{line_counter:>11}\n\n"
-                line_counter += 1
+        formatted_text, page_count = self.formatter.apply_formatting(raw_text)
+        self.editor.setPlainText(formatted_text)
+        self.statusBar().showMessage(f"Applied standards: {page_count} pages generated.")
+    
+    def batch_strip_formatting(self):
+        """
+        Batch processes all .txt files from 'original' folder
+        and saves stripped versions to 'stripped' folder.
+        """
+        try:
+            results = self.formatter.batch_strip_formatting('original', 'stripped')
             
-            # After filling the page, add the final footer
-            final_output += f"\n{page_counter:>72}"
-
-        self.editor.setPlainText(final_output)
-        self.statusBar().showMessage(f"Applied standards: {page_counter} pages generated.")
+            # Build summary message
+            message_parts = []
+            
+            if results['processed']:
+                message_parts.append(f"Successfully processed {len(results['processed'])} file(s):")
+                for item in results['processed']:
+                    filename = item['input'].split('\\')[-1].split('/')[-1]
+                    message_parts.append(f"  ✓ {filename}")
+            
+            if results['failed']:
+                message_parts.append(f"\nFailed to process {len(results['failed'])} file(s):")
+                for item in results['failed']:
+                    filename = item['file'].split('\\')[-1].split('/')[-1]
+                    message_parts.append(f"  ✗ {filename}: {item['error']}")
+            
+            if results['skipped']:
+                message_parts.append("\n" + "\n".join(results['skipped']))
+            
+            message = "\n".join(message_parts)
+            
+            # Show results in message box
+            if results['failed']:
+                QMessageBox.warning(self, "Batch Strip - Partial Success", message)
+            else:
+                QMessageBox.information(self, "Batch Strip - Complete", message)
+            
+            self.statusBar().showMessage(f"Batch strip complete: {len(results['processed'])} processed, {len(results['failed'])} failed")
+            
+        except FileNotFoundError as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self.statusBar().showMessage("Batch strip failed: folder not found")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+            self.statusBar().showMessage("Batch strip failed")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
