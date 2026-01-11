@@ -172,44 +172,28 @@ class TranscriptEditor(QMainWindow):
             if not line.strip():
                 continue
 
-            # 1. Format the Line Number (Right aligned to 11 chars)
-            # This ensures "          1" and "         10" end at the same column.
-            prefix_number = f"{line_counter:>11}"
-            
-            # 2. Add strict 4 spaces separator
-            formatted_line = f"{prefix_number}    {line}"
-            
-            # 3. Add to output with Double Spacing
-            final_output += formatted_line + "\n\n"
+            # Format line with right-aligned number (11 chars) + 4 spaces + content + double spacing
+            final_output += f"{line_counter:>11}    {line}\n\n"
 
-            # 4. Check for Page Break
             if line_counter == LINES_PER_PAGE:
-                # Add Page Footer (Page number far right)
-                # We add extra \n before the number to push it to bottom
-                footer = f"\n{page_counter:>75}" 
-                
-                # Add Form Feed (\f) for printer page break
-                final_output += footer + "\n\f"
-                
-                # Start Next Page: Add 5 Newlines Header
+                # Page footer with form feed
+                final_output += f"\n{page_counter:>72}\n\f"
+                # Start next page with 5 newlines header
                 final_output += "\n" * 5
-                
                 line_counter = 1
                 page_counter += 1
             else:
                 line_counter += 1
-                # --- Ensure we have exactly 25 lines per page ---
+
+        # --- Ensure we have exactly 25 lines per page ---
         # If we finished the text but haven't reached line 25, fill the rest.
-        # We check if line_counter > 1 (meaning we are mid-page).
         if line_counter > 1 and line_counter <= LINES_PER_PAGE:
             while line_counter <= LINES_PER_PAGE:
-                # Print just the number and indentation, but no text
-                prefix_number = f"{line_counter:>11}"
-                final_output += f"{prefix_number}    \n\n"
+                final_output += f"{line_counter:>11}\n\n"
                 line_counter += 1
             
             # After filling the page, add the final footer
-            final_output += f"\n{page_counter:>75}"
+            final_output += f"\n{page_counter:>72}"
 
         self.editor.setPlainText(final_output)
         self.statusBar().showMessage(f"Applied standards: {page_counter} pages generated.")
