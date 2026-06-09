@@ -65,6 +65,15 @@ def parse_zoom_transcript(
     )
 
 
+def parse_zoom_line(line: str) -> tuple[str | None, str | None, str]:
+    """Parse one Zoom transcript line into timestamp, speaker, and text."""
+    match = _SPEAKER_LINE.match(line.strip())
+    if not match:
+        return None, None, line.strip()
+    timestamp, speaker, text = match.groups()
+    return timestamp, speaker.strip(), text.strip()
+
+
 def serialize_zoom_segment(segment: Segment) -> str:
     """Serialize one segment back to Zoom transcript line format."""
     if segment.speaker:

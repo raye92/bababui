@@ -30,7 +30,7 @@ from transcript_pipeline import (
     render_segments,
     sync_document_source_text,
 )
-from ui.inline_suggestion_review import InlineSuggestionReviewView
+from ui.sequential_suggestion_review import SequentialSuggestionReviewView
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ORIGINAL_FILE = os.path.join(BASE_DIR, "original.txt")
@@ -197,7 +197,7 @@ class TranscriptEditor(QMainWindow):
         self.zoom_input.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.transcript_stack.addWidget(self.zoom_input)
 
-        self.suggestion_review = InlineSuggestionReviewView()
+        self.suggestion_review = SequentialSuggestionReviewView()
         self.suggestion_review.counts_changed.connect(self._update_review_status)
         self.suggestion_review.transcript_changed.connect(self._on_canonical_transcript_changed)
         self.transcript_stack.addWidget(self.suggestion_review)
