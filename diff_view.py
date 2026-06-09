@@ -1,13 +1,21 @@
 import difflib
 from PySide6.QtWidgets import (QScrollArea, QWidget, QFrame, QPlainTextEdit,
-                               QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+                               QVBoxLayout, QHBoxLayout, QLabel,
                                QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QRect
 from PySide6.QtGui import QFont, QPainter, QColor
 
+from ui.styles import (
+    ACTION_BAR_BG,
+    CAPTION_COLOR,
+    MARKER_WIDTH,
+    make_action_button,
+    make_diff_row,
+)
+
 # Width of the existing left margin shared by the +/- markers and the line
 # numbers — reused here rather than adding a new gutter.
-GUTTER_WIDTH = 24
+GUTTER_WIDTH = MARKER_WIDTH
 
 
 class _LineNumberArea(QWidget):
@@ -201,45 +209,7 @@ class DiffView(QScrollArea):
         return block
 
     def _make_line_row(self, text, kind):
-        if kind == 'delete':
-            bg = '#ffd7d5'
-            fg = '#82071e'
-            mark = '\u2212'
-        elif kind == 'insert':
-            bg = '#ccffd8'
-            fg = '#116329'
-            mark = '+'
-        else:
-            # Equal lines: no background tint, no forced text color — inherit
-            # whatever the palette provides so they look identical to the editor.
-            bg = None
-            fg = None
-            mark = ' '
-
-        row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(0)
-
-        marker = QLabel(mark)
-        marker.setFont(self._mono)
-        marker.setFixedWidth(24)
-        marker.setAlignment(Qt.AlignCenter)
-        if bg:
-            marker.setStyleSheet(f"background-color:{bg}; color:{fg};")
-
-        # An empty string would collapse the row height, so keep a space.
-        content = QLabel(text if text != '' else ' ')
-        content.setFont(self._mono)
-        content.setTextFormat(Qt.PlainText)
-        content.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        if bg:
-            content.setStyleSheet(f"background-color:{bg}; color:{fg};")
-
-        h.addWidget(marker)
-        h.addWidget(content)
-        return row
+        return make_diff_row(text, kind, self._mono)
 
     def _make_hunk(self, tag, i1, i2, j1, j2):
         # No border or margin — the block sits flush in the document flow so
@@ -259,29 +229,19 @@ class DiffView(QScrollArea):
         # Inline action bar — sits directly below the highlighted lines,
         # no surrounding box so it flows with the rest of the content.
         bar = QWidget()
-        bar.setStyleSheet("background:#f6f8fa;")
+        bar.setStyleSheet(f"background:{ACTION_BAR_BG};")
         h = QHBoxLayout(bar)
         h.setContentsMargins(28, 3, 8, 3)
         h.setSpacing(6)
 
         caption = QLabel("Incoming change")
-        caption.setStyleSheet("color:#57606a; font-size:11px;")
+        caption.setStyleSheet(f"color:{CAPTION_COLOR}; font-size:11px;")
 
-        accept = QPushButton("\u2713 Accept")
-        accept.setCursor(Qt.PointingHandCursor)
-        accept.setFixedHeight(22)
-        accept.setStyleSheet(
-            "border:none; background:#1f883d; color:white;"
-            " padding:0 10px; border-radius:3px; font-size:11px;")
+        accept = make_action_button("\u2713 Accept", "accept")
         accept.clicked.connect(
             lambda _=False, a=i1, b=i2, c=j1, d=j2: self._accept(a, b, c, d))
 
-        deny = QPushButton("\u2717 Deny")
-        deny.setCursor(Qt.PointingHandCursor)
-        deny.setFixedHeight(22)
-        deny.setStyleSheet(
-            "border:none; background:#cf222e; color:white;"
-            " padding:0 10px; border-radius:3px; font-size:11px;")
+        deny = make_action_button("\u2717 Deny", "reject")
         deny.clicked.connect(
             lambda _=False, a=i1, b=i2, c=j1, d=j2: self._deny(a, b, c, d))
 
