@@ -63,3 +63,22 @@ def parse_zoom_transcript(
         segments=segments,
         metadata=dict(metadata or {}),
     )
+
+
+def serialize_zoom_segment(segment: Segment) -> str:
+    """Serialize one segment back to Zoom transcript line format."""
+    if segment.speaker:
+        prefix = f"{segment.timestamp} " if segment.timestamp else ""
+        return f"{prefix}{segment.speaker}: {segment.text}"
+    return segment.text
+
+
+def serialize_zoom_transcript(document: TranscriptDocument) -> str:
+    """Rebuild the canonical Zoom transcript string from segments."""
+    return "\n".join(serialize_zoom_segment(segment) for segment in document.segments)
+
+
+def sync_document_source_text(document: TranscriptDocument) -> str:
+    """Update document.source_text from segments and return it."""
+    document.source_text = serialize_zoom_transcript(document)
+    return document.source_text

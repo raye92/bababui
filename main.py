@@ -24,12 +24,13 @@ from formatter import Formatter
 from diff_view import DiffView
 from transcript_pipeline import (
     ReviewSession,
-    apply_suggestions,
     export_txt,
     generate_suggestions,
     parse_zoom_transcript,
+    render_segments,
+    sync_document_source_text,
 )
-from ui.suggestion_review_view import SuggestionReviewView
+from ui.inline_suggestion_review import InlineSuggestionReviewView
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ORIGINAL_FILE = os.path.join(BASE_DIR, "original.txt")
@@ -92,10 +93,14 @@ class TranscriptEditor(QMainWindow):
         reject_all_action.triggered.connect(self.reject_all_suggestions)
         toolbar.addAction(reject_all_action)
 
-        apply_action = QAction("Apply to Editor", self)
-        apply_action.setStatusTip("Apply accepted suggestions to the transcript editor")
-        apply_action.triggered.connect(self.apply_to_editor)
+        apply_action = QAction("Copy to Court Editor", self)
+        apply_action.setStatusTip("Copy the current Zoom transcript into the court editor")
+        apply_action.triggered.connect(self.copy_to_court_editor)
         toolbar.addAction(apply_action)
+
+        self.edit_raw_action = QAction("Edit Raw Transcript", self)
+        self.edit_raw_action.triggered.connect(self.switch_to_raw_transcript)
+        toolbar.addAction(self.edit_raw_action)
 
         export_action = QAction("Export .txt", self)
         export_action.triggered.connect(self.export_transcript)
@@ -167,32 +172,37 @@ class TranscriptEditor(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        input_row = QHBoxLayout()
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("Zoom Transcript"))
+        header_row.addStretch(1)
 
-        zoom_panel = QVBoxLayout()
-        zoom_panel.addWidget(QLabel("Zoom Transcript"))
-        self.zoom_input = QPlainTextEdit()
-        self.zoom_input.setPlaceholderText("Paste a Zoom transcript here…")
-        zoom_font = QFont("Courier New", 11)
+        zoom_font = QFont("Courier New", 12)
         zoom_font.setStyleHint(QFont.Monospace)
-        self.zoom_input.setFont(zoom_font)
-        zoom_panel.addWidget(self.zoom_input)
 
         speakers_panel = QVBoxLayout()
         speakers_panel.addWidget(QLabel("Official Speakers (one per line)"))
         self.speakers_input = QPlainTextEdit()
         self.speakers_input.setPlainText(DEFAULT_SPEAKERS)
         self.speakers_input.setFont(zoom_font)
+        self.speakers_input.setMaximumHeight(100)
         speakers_panel.addWidget(self.speakers_input)
+        header_row.addLayout(speakers_panel, stretch=1)
+        layout.addLayout(header_row)
 
-        input_row.addLayout(zoom_panel, stretch=3)
-        input_row.addLayout(speakers_panel, stretch=1)
-        layout.addLayout(input_row)
+        self.transcript_stack = QStackedWidget()
 
-        self.suggestion_review = SuggestionReviewView()
+        self.zoom_input = QPlainTextEdit()
+        self.zoom_input.setPlaceholderText("Paste a Zoom transcript here…")
+        self.zoom_input.setFont(zoom_font)
+        self.zoom_input.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.transcript_stack.addWidget(self.zoom_input)
+
+        self.suggestion_review = InlineSuggestionReviewView()
         self.suggestion_review.counts_changed.connect(self._update_review_status)
-        layout.addWidget(self.suggestion_review, stretch=1)
+        self.suggestion_review.transcript_changed.connect(self._on_canonical_transcript_changed)
+        self.transcript_stack.addWidget(self.suggestion_review)
 
+        layout.addWidget(self.transcript_stack, stretch=1)
         self.stack.addWidget(page)
 
     def _read_file(self, path):
@@ -326,7 +336,10 @@ class TranscriptEditor(QMainWindow):
                 context={"official_speakers": speakers},
             )
             self.review_session = ReviewSession(document=document, suggestions=suggestions)
+            sync_document_source_text(document)
             self.suggestion_review.set_session(self.review_session)
+            self.transcript_stack.setCurrentIndex(1)
+            self.edit_raw_action.setEnabled(True)
             self.stack.setCurrentIndex(2)
             self.review_view_btn.setText("\u25c2 Back to Editor")
             self._update_review_status(self.review_session.summary())
@@ -347,6 +360,20 @@ class TranscriptEditor(QMainWindow):
             return
         self.suggestion_review.reject_all_pending()
         self._update_review_status(self.review_session.summary())
+
+    def _on_canonical_transcript_changed(self, text: str):
+        self.statusBar().showMessage("Transcript updated.")
+
+    def switch_to_raw_transcript(self):
+        if self.review_session is not None:
+            self.zoom_input.setPlainText(self.review_session.document.source_text)
+        self.transcript_stack.setCurrentIndex(0)
+        self.statusBar().showMessage("Editing raw Zoom transcript.")
+
+    def _current_zoom_transcript(self) -> str:
+        if self.transcript_stack.currentIndex() == 1 and self.review_session is not None:
+            return self.review_session.document.source_text
+        return self.zoom_input.toPlainText()
 
     def _update_review_status(self, summary: dict):
         pending = summary.get("pending", 0)
@@ -373,56 +400,40 @@ class TranscriptEditor(QMainWindow):
         box.exec()
         return box.clickedButton() == continue_btn
 
-    def apply_to_editor(self):
+    def copy_to_court_editor(self):
         if self.review_session is None:
-            QMessageBox.warning(self, "Apply to Editor", "Analyze a transcript first.")
+            QMessageBox.warning(self, "Copy to Court Editor", "Analyze a transcript first.")
             return
 
-        if not self._confirm_pending_suggestions("Apply to Editor"):
+        if not self._confirm_pending_suggestions("Copy to Court Editor"):
             return
 
-        try:
-            result = apply_suggestions(
-                self.review_session.document,
-                self.review_session.suggestions,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Apply to Editor", str(exc))
-            return
-
+        text = render_segments(self.review_session.document)
         self._suppress_mirror = True
-        self.editor.setPlainText(result.working_text)
-        self.incoming_editor.setPlainText(result.working_text)
+        self.editor.setPlainText(text)
+        self.incoming_editor.setPlainText(text)
         self._suppress_mirror = False
-        self._write_file(ORIGINAL_FILE, result.working_text)
-        self._write_file(INCOMING_FILE, result.working_text)
+        self._write_file(ORIGINAL_FILE, text)
+        self._write_file(INCOMING_FILE, text)
 
         self.stack.setCurrentIndex(0)
         self.review_view_btn.setText("Review Suggestions \u25b8")
         self.original_stack.setCurrentWidget(self.editor)
-        self.statusBar().showMessage(
-            f"Applied {len(result.applied_suggestion_ids)} suggestion(s) to editor."
-        )
+        self.statusBar().showMessage("Copied Zoom transcript into court editor.")
 
     def export_transcript(self):
-        editor = self._active_editor()
-        if editor is None:
-            if self.stack.currentIndex() == 2 and self.review_session is not None:
+        if self.stack.currentIndex() == 2:
+            if self.review_session is None:
+                text = self.zoom_input.toPlainText()
+            else:
                 if not self._confirm_pending_suggestions("Export"):
                     return
-                try:
-                    result = apply_suggestions(
-                        self.review_session.document,
-                        self.review_session.suggestions,
-                    )
-                    text = result.working_text
-                except Exception as exc:
-                    QMessageBox.critical(self, "Export .txt", str(exc))
-                    return
-            else:
-                self.statusBar().showMessage("Open the editor to export, or review suggestions first.")
-                return
+                text = self.review_session.document.source_text
         else:
+            editor = self._active_editor()
+            if editor is None:
+                self.statusBar().showMessage("Open the editor to export.")
+                return
             text = editor.toPlainText()
 
         path, _ = QFileDialog.getSaveFileName(

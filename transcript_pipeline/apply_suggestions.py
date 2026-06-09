@@ -12,6 +12,7 @@ from transcript_pipeline.models import (
     suggestion_sort_key,
     validate_suggestions,
 )
+from transcript_pipeline.parser import sync_document_source_text
 from transcript_pipeline.segment_renderer import render_segments
 
 
@@ -20,6 +21,31 @@ def _copy_segments(document: TranscriptDocument) -> dict[str, Segment]:
         segment.id: copy.copy(segment)
         for segment in document.segments
     }
+
+
+def apply_accepted_suggestion(
+    document: TranscriptDocument,
+    suggestion: Suggestion,
+) -> None:
+    """Apply a single accepted suggestion to the live document segments."""
+    if suggestion.status != SuggestionStatus.ACCEPTED:
+        return
+
+    validate_suggestions(document, [suggestion])
+
+    segments = iter_segments_by_id(document)
+    segment = segments[suggestion.location.segment_id]
+
+    if suggestion.location.field == "speaker":
+        segment.speaker = suggestion.replacement_text
+    else:
+        start = suggestion.location.start_offset
+        end = suggestion.location.end_offset
+        segment.text = (
+            segment.text[:start]
+            + suggestion.replacement_text
+            + segment.text[end:]
+        )
 
 
 def apply_suggestions(
@@ -62,9 +88,10 @@ def apply_suggestions(
 
     working_document = TranscriptDocument(
         source_text=document.source_text,
-        segments=list(segments.values()),
+        segments=[segments[segment.id] for segment in document.segments],
         metadata=dict(document.metadata),
     )
+    sync_document_source_text(working_document)
 
     return AppliedTranscript(
         source_text=document.source_text,

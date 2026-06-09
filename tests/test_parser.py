@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from transcript_pipeline.parser import parse_zoom_transcript
+from transcript_pipeline.parser import (
+    parse_zoom_transcript,
+    serialize_zoom_transcript,
+    sync_document_source_text,
+)
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
@@ -28,6 +32,16 @@ def test_parse_continuation_lines_append_to_previous_segment():
 
     assert len(document.segments) == 2
     assert "continues the same utterance" in document.segments[0].text
+
+
+def test_serialize_zoom_transcript_after_speaker_accept():
+    source = "00:00:20 Mary Johnson: My name is Mary Johnson."
+    document = parse_zoom_transcript(source)
+    document.segments[0].speaker = "MS. JOHNSON"
+    sync_document_source_text(document)
+
+    assert document.source_text == "00:00:20 MS. JOHNSON: My name is Mary Johnson."
+    assert serialize_zoom_transcript(document) == document.source_text
 
 
 def test_parse_assigns_stable_ids_on_repeat():
