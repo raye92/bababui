@@ -1,0 +1,25 @@
+{
+  "official_speakers": [
+    "THE COURT",
+    "MR. SMITH",
+    "MS. JOHNSON",
+    "THE WITNESS"
+  ],
+  "expected_corrections": [
+    {
+      "original_text": "John Smith",
+      "replacement_text": "MR. SMITH",
+      "segment_count": 3
+    },
+    {
+      "original_text": "Mary Johnson",
+      "replacement_text": "MS. JOHNSON",
+      "segment_count": 1
+    },
+    {
+      "original_text": "Speaker 2",
+      "replacement_text": "THE COURT",
+      "segment_count": 1
+    }
+  ]
+}
