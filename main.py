@@ -1,8 +1,18 @@
 import sys
-from PySide6.QtWidgets import (QApplication, QMainWindow, QPlainTextEdit, 
-                               QVBoxLayout, QWidget, QToolBar, QMessageBox)
+import os
+from PySide6.QtWidgets import (QApplication, QMainWindow, QPlainTextEdit,
+                               QVBoxLayout, QWidget, QToolBar, QMessageBox,
+                               QStackedWidget, QPushButton, QSizePolicy)
 from PySide6.QtGui import QFont, QAction
+from PySide6.QtCore import Qt
 from formatter import Formatter
+from diff_view import DiffView
+
+# Both files live in the repo root, next to this script.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ORIGINAL_FILE = os.path.join(BASE_DIR, "original.txt")
+INCOMING_FILE = os.path.join(BASE_DIR, "incoming.txt")
+
 
 class TranscriptEditor(QMainWindow):
     def __init__(self):
@@ -13,10 +23,8 @@ class TranscriptEditor(QMainWindow):
         # Initialize formatter
         self.formatter = Formatter()
 
-        # Main Layout container
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        # Guards textChanged handlers while we set text programmatically.
+        self._suppress_mirror = False
 
         # --- Toolbar ---
         toolbar = QToolBar("Formatting")
@@ -45,6 +53,36 @@ class TranscriptEditor(QMainWindow):
         batch_strip_action.triggered.connect(self.batch_strip_formatting)
         toolbar.addAction(batch_strip_action)
 
+        # Spacer pushes the reveal button to the far right of the toolbar.
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+
+        # Top-right button: reveals the hidden incoming view (full-window swap).
+        self.toggle_view_btn = QPushButton("Show Incoming \u25b8")
+        self.toggle_view_btn.clicked.connect(self.toggle_view)
+        toolbar.addWidget(self.toggle_view_btn)
+
+        # --- Views ---
+        # The central area swaps wholesale between the original view and the
+        # hidden incoming view (no tabs).
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self._build_original_view()   # main stack index 0
+        self._build_incoming_view()   # main stack index 1
+
+        self._load_files()
+
+    def _build_original_view(self):
+        """Original view: the transcript editor, which flips to an inline diff
+        whenever the incoming text differs from the original."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.original_stack = QStackedWidget()
+
         # --- Text Editor ---
         self.editor = QPlainTextEdit()
         
@@ -53,8 +91,143 @@ class TranscriptEditor(QMainWindow):
         font.setStyleHint(QFont.Monospace)
         self.editor.setFont(font)
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap) 
-        
-        layout.addWidget(self.editor)
+        self.editor.textChanged.connect(self._on_editor_changed)
+
+        # Inline diff display (green = added, red = removed) with accept/deny.
+        self.diff_view = DiffView()
+        self.diff_view.resolved.connect(self._on_diff_resolved)
+        # Live edits in equal blocks: just persist, no view switch or re-render.
+        self.diff_view.autosaved.connect(self._on_diff_autosaved)
+
+        self.original_stack.addWidget(self.editor)      # index 0: edit mode
+        self.original_stack.addWidget(self.diff_view)   # index 1: diff mode
+
+        layout.addWidget(self.original_stack)
+        self.stack.addWidget(page)
+
+    def _build_incoming_view(self):
+        """Hidden incoming view: editing here is what creates variance between
+        the original and the incoming text."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.incoming_editor = QPlainTextEdit()
+        font = QFont("Courier New", 12)
+        font.setStyleHint(QFont.Monospace)
+        self.incoming_editor.setFont(font)
+        self.incoming_editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.incoming_editor.textChanged.connect(self._on_incoming_changed)
+        layout.addWidget(self.incoming_editor)
+
+        self.stack.addWidget(page)
+
+    # ------------------------------------------------------------------
+    # File helpers
+    # ------------------------------------------------------------------
+    def _read_file(self, path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    def _write_file(self, path, text):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def _load_files(self):
+        original = self._read_file(ORIGINAL_FILE)
+        incoming = self._read_file(INCOMING_FILE)
+
+        # Incoming starts as a mirror of the original until it is edited.
+        if incoming == "" and original != "":
+            incoming = original
+            self._write_file(INCOMING_FILE, incoming)
+
+        self._suppress_mirror = True
+        self.editor.setPlainText(original)
+        self.incoming_editor.setPlainText(incoming)
+        self._suppress_mirror = False
+
+        self._refresh_original_view()
+
+    # ------------------------------------------------------------------
+    # Mirroring and diffing
+    # ------------------------------------------------------------------
+    def _on_editor_changed(self):
+        if self._suppress_mirror:
+            return
+        # Editing the transcript editor mirrors straight into incoming, so
+        # ordinary edits never create a difference between the two.
+        text = self.editor.toPlainText()
+        self._write_file(ORIGINAL_FILE, text)
+        self._write_file(INCOMING_FILE, text)
+
+    def _on_incoming_changed(self):
+        if self._suppress_mirror:
+            return
+        # Edits in the hidden view only touch incoming -> this is the variance.
+        self._write_file(INCOMING_FILE, self.incoming_editor.toPlainText())
+
+    def toggle_view(self):
+        if self.stack.currentIndex() == 0:
+            # Reveal the hidden incoming text, loaded fresh from disk.
+            self._suppress_mirror = True
+            self.incoming_editor.setPlainText(self._read_file(INCOMING_FILE))
+            self._suppress_mirror = False
+            self.stack.setCurrentIndex(1)
+            self.toggle_view_btn.setText("\u25c2 Back to Original")
+        else:
+            self.stack.setCurrentIndex(0)
+            self.toggle_view_btn.setText("Show Incoming \u25b8")
+            self._refresh_original_view()
+
+    def _refresh_original_view(self):
+        """Show the plain editor when the two sides match, otherwise show the
+        inline diff with accept/deny controls."""
+        original = self._read_file(ORIGINAL_FILE)
+        incoming = self._read_file(INCOMING_FILE)
+
+        if original == incoming:
+            self._suppress_mirror = True
+            self.editor.setPlainText(original)
+            self._suppress_mirror = False
+            self.original_stack.setCurrentWidget(self.editor)
+        else:
+            self.diff_view.set_texts(original, incoming)
+            self.original_stack.setCurrentWidget(self.diff_view)
+
+    def _on_diff_autosaved(self, new_original, new_incoming):
+        # Equal-block edit in the diff view: persist both files and keep the
+        # hidden incoming editor in sync, but don't switch views or re-render.
+        self._write_file(ORIGINAL_FILE, new_original)
+        self._write_file(INCOMING_FILE, new_incoming)
+        self._suppress_mirror = True
+        self.incoming_editor.setPlainText(new_incoming)
+        self._suppress_mirror = False
+
+    def _on_diff_resolved(self, new_original, new_incoming):
+        # An accept/deny was applied: persist both sides.
+        self._write_file(ORIGINAL_FILE, new_original)
+        self._write_file(INCOMING_FILE, new_incoming)
+
+        if new_original == new_incoming:
+            # Everything reconciled -> hand control back to the editor.
+            self._suppress_mirror = True
+            self.editor.setPlainText(new_original)
+            self.incoming_editor.setPlainText(new_incoming)
+            self._suppress_mirror = False
+            self.original_stack.setCurrentWidget(self.editor)
+
+    def _active_editor(self):
+        """Return the editor the toolbar actions should operate on, or None
+        when the original view is currently showing an unresolved diff."""
+        if self.stack.currentIndex() == 1:
+            return self.incoming_editor
+        if self.original_stack.currentWidget() is self.editor:
+            return self.editor
+        return None
 
     def insert_sample_text(self):
         """Inserts the sample text provided in your prompt."""
@@ -115,16 +288,24 @@ class TranscriptEditor(QMainWindow):
 
 
                                                                        1"""
-        self.editor.setPlainText(sample)
+        editor = self._active_editor()
+        if editor is None:
+            self.statusBar().showMessage("Resolve the incoming changes first.")
+            return
+        editor.setPlainText(sample)
 
     def strip_formatting(self):
         """
         Removes line numbers 1-25 and page numbering.
         Ignores the 5-line headers during the strip process.
         """
-        raw_text = self.editor.toPlainText()
+        editor = self._active_editor()
+        if editor is None:
+            self.statusBar().showMessage("Resolve the incoming changes first.")
+            return
+        raw_text = editor.toPlainText()
         cleaned_text = self.formatter.strip_formatting(raw_text)
-        self.editor.setPlainText(cleaned_text)
+        editor.setPlainText(cleaned_text)
         self.statusBar().showMessage("Formatting stripped.")
 
     def apply_formatting(self):
@@ -135,9 +316,13 @@ class TranscriptEditor(QMainWindow):
         3. Double spacing between text lines.
         4. Pagination footer.
         """
-        raw_text = self.editor.toPlainText()
+        editor = self._active_editor()
+        if editor is None:
+            self.statusBar().showMessage("Resolve the incoming changes first.")
+            return
+        raw_text = editor.toPlainText()
         formatted_text, page_count = self.formatter.apply_formatting(raw_text)
-        self.editor.setPlainText(formatted_text)
+        editor.setPlainText(formatted_text)
         self.statusBar().showMessage(f"Applied standards: {page_count} pages generated.")
     
     def batch_strip_formatting(self):
