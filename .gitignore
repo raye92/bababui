@@ -34,3 +34,9 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Project data
+original/
+stripped/
+original.txt
+incoming.txt
+

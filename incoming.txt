@@ -1,8 +1,0 @@
-line1
-line6
-
-
-line2
-line3
-newas
-line5
