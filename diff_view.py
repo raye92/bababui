@@ -68,9 +68,21 @@ class _EqualBlock(QPlainTextEdit):
         self.saved.emit(self.toPlainText().split('\n'))
 
     def _sync_height(self):
-        fm = self.fontMetrics()
-        lines = max(1, self.document().blockCount())
-        self.setFixedHeight(fm.lineSpacing() * lines + 6)
+        # Size to the *actual* laid-out content height. fontMetrics().lineSpacing()
+        # under-estimates what QPlainTextEdit really renders, so with both
+        # scrollbars forced off the trailing lines were getting clipped (only
+        # reachable by drag-selecting). Summing the real block heights guarantees
+        # every line is visible and pushes the following diff rows down properly.
+        doc = self.document()
+        height = 0.0
+        block = doc.firstBlock()
+        while block.isValid():
+            height += self.blockBoundingRect(block).height()
+            block = block.next()
+        if height <= 0:
+            # Document not laid out yet (pre-show): fall back to a metrics estimate.
+            height = self.fontMetrics().lineSpacing() * max(1, doc.blockCount())
+        self.setFixedHeight(int(round(height + 2 * doc.documentMargin())) + 2)
 
     def _on_update_request(self, rect, dy):
         if dy:
