@@ -34,6 +34,11 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
 # Project data
 original/
 stripped/

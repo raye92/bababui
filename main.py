@@ -7,6 +7,7 @@ from PySide6.QtGui import QFont, QAction
 from PySide6.QtCore import Qt
 from formatter import Formatter
 from diff_view import DiffView
+from deepseek import DeepSeekClient
 
 # Both files live in the repo root, next to this script.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,10 @@ class TranscriptEditor(QMainWindow):
         
         # Initialize formatter
         self.formatter = Formatter()
+
+        # DeepSeek client (reads credentials from .env). Created up front but
+        # only used when the DEEPSEEK action is triggered.
+        self.deepseek = DeepSeekClient()
 
         # Guards textChanged handlers while we set text programmatically.
         self._suppress_mirror = False
@@ -52,6 +57,13 @@ class TranscriptEditor(QMainWindow):
         batch_strip_action.setStatusTip("Process all .txt files in 'original' folder")
         batch_strip_action.triggered.connect(self.batch_strip_formatting)
         toolbar.addAction(batch_strip_action)
+
+        # Button: DEEPSEEK — runs the active transcript through the LLM.
+        # Sits immediately to the right of the Batch Strip action.
+        self.deepseek_btn = QPushButton("DEEPSEEK")
+        self.deepseek_btn.setStatusTip("Send the current transcript to DeepSeek")
+        self.deepseek_btn.clicked.connect(self.run_deepseek)
+        toolbar.addWidget(self.deepseek_btn)
 
         # Spacer pushes the reveal button to the far right of the toolbar.
         spacer = QWidget()
@@ -325,6 +337,21 @@ class TranscriptEditor(QMainWindow):
         editor.setPlainText(formatted_text)
         self.statusBar().showMessage(f"Applied standards: {page_count} pages generated.")
     
+    def run_deepseek(self):
+        """Entry point for the DEEPSEEK toolbar button.
+
+        Functionality is not implemented yet — this only resolves the editor
+        the request should operate on and is the single place to wire up the
+        DeepSeek call once the client is fleshed out.
+        """
+        editor = self._active_editor()
+        if editor is None:
+            self.statusBar().showMessage("Resolve the incoming changes first.")
+            return
+        # TODO: build a prompt from editor.toPlainText(), call
+        # self.deepseek.complete(...), and apply the result.
+        self.statusBar().showMessage("DEEPSEEK is not implemented yet.")
+
     def batch_strip_formatting(self):
         """
         Batch processes all .txt files from 'original' folder
