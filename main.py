@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QPlainTextEdit,
                                QVBoxLayout, QWidget, QToolBar, QMessageBox,
                                QStackedWidget, QPushButton, QSizePolicy)
 from PySide6.QtGui import QFont, QAction
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from formatter import Formatter
 from diff_view import DiffView
 from deepseek import DeepSeekClient
@@ -13,6 +13,24 @@ from deepseek import DeepSeekClient
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ORIGINAL_FILE = os.path.join(BASE_DIR, "original.txt")
 INCOMING_FILE = os.path.join(BASE_DIR, "incoming.txt")
+
+
+class _DeepSeekWorker(QThread):
+    """Runs a DeepSeek completion off the UI thread."""
+
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, client, prompt):
+        super().__init__()
+        self._client = client
+        self._prompt = prompt
+
+    def run(self):
+        try:
+            self.succeeded.emit(self._client.complete(self._prompt))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class TranscriptEditor(QMainWindow):
@@ -58,10 +76,9 @@ class TranscriptEditor(QMainWindow):
         batch_strip_action.triggered.connect(self.batch_strip_formatting)
         toolbar.addAction(batch_strip_action)
 
-        # Button: DEEPSEEK — runs the active transcript through the LLM.
-        # Sits immediately to the right of the Batch Strip action.
+        # Button: DEEPSEEK — sends original.txt to DeepSeek and writes the
+        # response into incoming.txt. Progress/errors print to the console.
         self.deepseek_btn = QPushButton("DEEPSEEK")
-        self.deepseek_btn.setStatusTip("Send the current transcript to DeepSeek")
         self.deepseek_btn.clicked.connect(self.run_deepseek)
         toolbar.addWidget(self.deepseek_btn)
 
@@ -338,19 +355,37 @@ class TranscriptEditor(QMainWindow):
         self.statusBar().showMessage(f"Applied standards: {page_count} pages generated.")
     
     def run_deepseek(self):
-        """Entry point for the DEEPSEEK toolbar button.
-
-        Functionality is not implemented yet — this only resolves the editor
-        the request should operate on and is the single place to wire up the
-        DeepSeek call once the client is fleshed out.
-        """
-        editor = self._active_editor()
-        if editor is None:
-            self.statusBar().showMessage("Resolve the incoming changes first.")
+        """Send original.txt to DeepSeek and put the response into incoming.txt,
+        surfacing it as a diff to review."""
+        original = self._read_file(ORIGINAL_FILE)
+        if not original.strip():
+            print("DeepSeek: original.txt is empty — nothing to send.")
             return
-        # TODO: build a prompt from editor.toPlainText(), call
-        # self.deepseek.complete(...), and apply the result.
-        self.statusBar().showMessage("DEEPSEEK is not implemented yet.")
+        if not self.deepseek.is_ready():
+            print("DeepSeek: not configured — set DEEPSEEK_API_KEY in .env")
+            return
+
+        self.deepseek_btn.setEnabled(False)
+        self._deepseek_worker = _DeepSeekWorker(self.deepseek, original)
+        self._deepseek_worker.succeeded.connect(self._on_deepseek_succeeded)
+        self._deepseek_worker.failed.connect(self._on_deepseek_failed)
+        self._deepseek_worker.start()
+
+    def _on_deepseek_succeeded(self, response):
+        # DeepSeek's reply becomes the proposed incoming version.
+        self.deepseek_btn.setEnabled(True)
+        self._write_file(INCOMING_FILE, response)
+        self._suppress_mirror = True
+        self.incoming_editor.setPlainText(response)
+        self._suppress_mirror = False
+        # Refresh so the original view shows the new diff straight away.
+        if self.stack.currentIndex() == 0:
+            self._refresh_original_view()
+        print(f"DeepSeek: incoming.txt updated ({len(response)} chars).")
+
+    def _on_deepseek_failed(self, message):
+        self.deepseek_btn.setEnabled(True)
+        print(f"DeepSeek failed: {message}")
 
     def batch_strip_formatting(self):
         """

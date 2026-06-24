@@ -6,7 +6,10 @@ chat-completions endpoint. The request logic is intentionally stubbed for now
 network/parsing code can be filled in later without touching callers.
 """
 
+import json
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -14,6 +17,9 @@ from dotenv import load_dotenv
 # Read `.env` from the repo root once on import. Values already present in the
 # real environment win over the file, which is the usual dotenv contract.
 load_dotenv()
+
+# System prompt sent above the transcript on every DeepSeek call
+SYSTEM_PROMPT = "Return the text as it is, except add 10 random numbers 0-9 randomly throughout the text."
 
 
 class DeepSeekError(Exception):
@@ -61,19 +67,58 @@ class DeepSeekClient:
         """True when the client has enough configuration to make a request."""
         return self._config.is_configured()
 
-    def complete(self, prompt: str, system_prompt: str | None = None) -> str:
+    def complete(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
         """Return the model completion for a single prompt.
 
         Args:
             prompt: The user message / text to send to the model.
-            system_prompt: Optional system instruction prepended to the chat.
+            system_prompt: System instruction prepended to the chat. Defaults
+                to the module-level SYSTEM_PROMPT.
 
         Returns:
             The model's text response.
 
         Raises:
             DeepSeekError: If the client is not configured or the request fails.
-
-        NOTE: Not implemented yet — see module docstring.
         """
-        raise NotImplementedError("DeepSeek completion is not implemented yet.")
+        if not self.is_ready():
+            raise DeepSeekError(
+                "DeepSeek is not configured. Set DEEPSEEK_API_KEY in your .env file.")
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = json.dumps({
+            "model": self._config.model,
+            "messages": messages,
+            "stream": False,
+        }).encode("utf-8")
+
+        url = self._config.base_url.rstrip("/") + "/chat/completions"
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._config.api_key}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise DeepSeekError(f"DeepSeek API error {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise DeepSeekError(f"Could not reach DeepSeek: {exc.reason}") from exc
+
+        try:
+            data = json.loads(body)
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, ValueError) as exc:
+            raise DeepSeekError(
+                f"Unexpected DeepSeek response: {body[:500]}") from exc
