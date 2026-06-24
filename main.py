@@ -1,12 +1,12 @@
 import sys
 import os
-from PySide6.QtWidgets import (QApplication, QMainWindow, QPlainTextEdit,
+from PySide6.QtWidgets import (QApplication, QMainWindow,
                                QVBoxLayout, QWidget, QToolBar, QMessageBox,
                                QStackedWidget, QPushButton, QSizePolicy)
 from PySide6.QtGui import QFont, QAction
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from formatter import Formatter
-from diff_view import DiffView
+from diff_view import DiffView, LineNumberedEditor
 from deepseek import DeepSeekClient
 
 # Both files live in the repo root, next to this script.
@@ -113,13 +113,11 @@ class TranscriptEditor(QMainWindow):
         self.original_stack = QStackedWidget()
 
         # --- Text Editor ---
-        self.editor = QPlainTextEdit()
-        
         # Monospace font is critical for alignment
         font = QFont("Courier New", 12)
         font.setStyleHint(QFont.Monospace)
-        self.editor.setFont(font)
-        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap) 
+        # Line-numbered editor so the plain view matches the diff view exactly.
+        self.editor = LineNumberedEditor(font)
         self.editor.textChanged.connect(self._on_editor_changed)
 
         # Inline diff display (green = added, red = removed) with accept/deny.
@@ -141,11 +139,10 @@ class TranscriptEditor(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.incoming_editor = QPlainTextEdit()
         font = QFont("Courier New", 12)
         font.setStyleHint(QFont.Monospace)
-        self.incoming_editor.setFont(font)
-        self.incoming_editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        # Identical line-numbered editor to the original view.
+        self.incoming_editor = LineNumberedEditor(font)
         self.incoming_editor.textChanged.connect(self._on_incoming_changed)
         layout.addWidget(self.incoming_editor)
 
@@ -199,18 +196,36 @@ class TranscriptEditor(QMainWindow):
         # Edits in the hidden view only touch incoming -> this is the variance.
         self._write_file(INCOMING_FILE, self.incoming_editor.toPlainText())
 
+    def _view_center_line(self, view):
+        """Best-effort 0-based line at the vertical center of a view."""
+        getter = getattr(view, 'center_line', None)
+        return getter() if getter else 0
+
+    def _apply_center_line(self, view, line):
+        """Scroll `view` so `line` is centered, after layout has settled."""
+        setter = getattr(view, 'scroll_to_center_line', None)
+        if setter:
+            # Defer: child geometry / scrollbar range aren't final until the
+            # freshly shown view has been laid out.
+            QTimer.singleShot(0, lambda: setter(line))
+
     def toggle_view(self):
         if self.stack.currentIndex() == 0:
+            # Remember where we were so the incoming view opens on the same line.
+            line = self._view_center_line(self.original_stack.currentWidget())
             # Reveal the hidden incoming text, loaded fresh from disk.
             self._suppress_mirror = True
             self.incoming_editor.setPlainText(self._read_file(INCOMING_FILE))
             self._suppress_mirror = False
             self.stack.setCurrentIndex(1)
             self.toggle_view_btn.setText("\u25c2 Back to Original")
+            self._apply_center_line(self.incoming_editor, line)
         else:
+            line = self._view_center_line(self.incoming_editor)
             self.stack.setCurrentIndex(0)
             self.toggle_view_btn.setText("Show Incoming \u25b8")
             self._refresh_original_view()
+            self._apply_center_line(self.original_stack.currentWidget(), line)
 
     def _refresh_original_view(self):
         """Show the plain editor when the two sides match, otherwise show the
