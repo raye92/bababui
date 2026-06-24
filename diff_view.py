@@ -108,6 +108,11 @@ class _EqualBlock(QPlainTextEdit):
             bottom = top + self.blockBoundingRect(block).height()
             block_number += 1
 
+    def wheelEvent(self, event):
+        # Unchanged blocks are not scrollable: let the wheel fall through to
+        # the outer diff scroll area so the whole page scrolls instead.
+        event.ignore()
+
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_height()
