@@ -11,6 +11,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -19,7 +20,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # System prompt sent above the transcript on every DeepSeek call
-SYSTEM_PROMPT = "Return the text as it is, except add 10 random numbers 0-9 randomly throughout the text."
+_PROMPT_FILE = Path(__file__).resolve().parent / "AI Quality Analysis Prompt.md"
+SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8")
 
 
 class DeepSeekError(Exception):
