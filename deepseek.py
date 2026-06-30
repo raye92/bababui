@@ -20,8 +20,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # System prompt sent above the transcript on every DeepSeek call
-_PROMPT_FILE = Path(__file__).resolve().parent / "AI Quality Analysis Prompt.md"
-SYSTEM_PROMPT = _PROMPT_FILE.read_text(encoding="utf-8")
+_REPO_ROOT = Path(__file__).resolve().parent
+_PROMPT_FILE = _REPO_ROOT / "AI Quality Analysis Prompt.md"
+_RULES_FILE = _REPO_ROOT / "courtreportingrules.md"
+SYSTEM_PROMPT = (
+    _PROMPT_FILE.read_text(encoding="utf-8")
+    + "\n\n---\n\n# COURT REPORTING RULES DOCUMENT\n\n"
+    + _RULES_FILE.read_text(encoding="utf-8")
+)
 
 
 class DeepSeekError(Exception):
