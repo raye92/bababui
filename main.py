@@ -53,7 +53,7 @@ class TranscriptEditor(QMainWindow):
         font.setStyleHint(QFont.Monospace)
         self.editor.setFont(font)
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap) 
-        
+        # 
         layout.addWidget(self.editor)
 
     def insert_sample_text(self):
