@@ -1,0 +1,2 @@
+{"id":"synthetic-greeting","input":"     Q    hello\n     A    yes","output":"     Q    Hello.\n     A    Yes.","split":"development"}
+{"id":"synthetic-holdout","input":"     Q    are you ready\n     A    yes i am","output":"     Q    Are you ready?\n     A    Yes, I am.","split":"holdout"}
