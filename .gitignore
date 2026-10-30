@@ -34,3 +34,27 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Local environments and secrets (all apps)
+.venv/
+.env
+.env.*
+!.env.example
+**/.streamlit/secrets.toml
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local transcript files
+/app/**/original/
+/app/**/stripped/
+/app/**/original.txt
+/app/**/incoming.txt
+
+# Evaluation datasets and run history
+/evaluation/data/
+

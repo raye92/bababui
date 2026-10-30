@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Read `.env` from the repo root once on import. Values already present in the
+# Read `app/.env` from the app folder once on import. Values already present in the
 # real environment win over the file, which is the usual dotenv contract.
 _SRC_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SRC_DIR.parent
