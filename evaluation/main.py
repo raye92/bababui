@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import streamlit as st
@@ -18,6 +19,31 @@ from evaluation.core import (Store, SEPARATOR, parse_jsonl, parse_text_pairs, cr
 
 def label(record):
     return f"{record['name']} · {record['created_at'][:16]} · {record['id'][:8]}"
+
+
+@st.fragment
+def folder_label(title, folder):
+    folder = folder.resolve()
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.markdown(title, width="content")
+        clicked = st.button(str(Path(folder.parent.name) / folder.name), icon=":material/folder_open:",
+                            type="tertiary", key=f"open_folder_{title}", help=f"Open `{folder}`")
+    if clicked:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(folder)
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen([opener, str(folder)])
+        except OSError as exc:
+            st.error(f"Could not open {folder}: {exc}")
+
+
+def record_selector(title, folder, options, *, multiple=False, **kwargs):
+    folder_label(title, folder)
+    widget = st.multiselect if multiple else st.selectbox
+    return widget(title, options, label_visibility="collapsed", **kwargs)
 
 
 def datasets_page(store):
@@ -56,9 +82,9 @@ def datasets_page(store):
         destination, pair = st.session_state.pop("dataset_navigation")
         st.session_state["dataset_selection"] = destination
         st.session_state[f"pair_{destination}"] = pair
-    selected = st.selectbox("Dataset to view or extend", list(options),
-                            format_func=lambda key: "New dataset" if key == "new" else label(options[key]),
-                            key="dataset_selection")
+    selected = record_selector("Dataset to view or extend", store.root / "datasets", list(options),
+                               format_func=lambda key: "New dataset" if key == "new" else label(options[key]),
+                               key="dataset_selection")
     dataset = options[selected]
     if dataset:
         st.dataframe([{"id": c["id"], "split": c["split"], "input_characters": len(c["input"]),
@@ -97,7 +123,8 @@ def prompts_page(store):
     st.caption("Each saved version contains both instructions and rules. Changes create a new version.")
     prompts = store.list("prompts")
     sources = {p["id"]: p for p in prompts}
-    selected = st.selectbox("Copy from version", list(sources), format_func=lambda key: label(sources[key])) if sources else None
+    selected = record_selector("Copy from version", store.root / "prompts", list(sources),
+                               format_func=lambda key: label(sources[key]), disabled=not sources)
     source = sources.get(selected, {"instructions": "", "rules": ""})
     # Reset drafts only when the selected source changes; retain unsaved typing on reruns.
     if st.session_state.get("prompt_source") != selected or "instructions_edit" not in st.session_state:
@@ -137,13 +164,14 @@ def runs_page(store):
         st.info("Add DEEPSEEK_API_KEY to evaluation/.env to enable API runs. Saved results remain available.")
     datasets, prompts = store.list("datasets"), store.list("prompts")
     dataset_map, prompt_map = {d["id"]: d for d in datasets}, {p["id"]: p for p in prompts}
-    selected_dataset = st.selectbox("Evaluation dataset", list(dataset_map),
-                                   format_func=lambda key: label(dataset_map[key]), disabled=not datasets)
+    selected_dataset = record_selector("Evaluation dataset", store.root / "datasets", list(dataset_map),
+                                       format_func=lambda key: label(dataset_map[key]), disabled=not datasets)
     split = st.radio("Evaluation split", ["development", "holdout"], horizontal=True)
     if split == "holdout":
         st.info("Holdout selected explicitly. Keep these results separate from routine prompt tuning.")
-    selected_prompts = st.multiselect("Prompt versions to run", list(prompt_map),
-                                     default=list(prompt_map)[:1], format_func=lambda key: label(prompt_map[key]))
+    selected_prompts = record_selector("Prompt versions to run", store.root / "prompts", list(prompt_map),
+                                       multiple=True, default=list(prompt_map)[:1],
+                                       format_func=lambda key: label(prompt_map[key]))
     dataset = dataset_map.get(selected_dataset)
     count = sum(c["split"] == split for c in dataset["cases"]) if dataset else 0
     st.write(f"{count} cases × {len(selected_prompts)} prompt versions = **{count * len(selected_prompts)} API calls**")
@@ -160,7 +188,8 @@ def runs_page(store):
         st.info("No runs yet. Import a dataset, save a prompt version, and start an evaluation.")
         return
     run_map = {r["id"]: r for r in runs}
-    selected_run = st.selectbox("Inspect run", list(run_map), format_func=lambda key: run_label(run_map[key]))
+    selected_run = record_selector("Inspect run", store.root / "runs", list(run_map),
+                                   format_func=lambda key: run_label(run_map[key]))
     run = run_map[selected_run]
     st.subheader("Compare compatible runs")
     compatible = [r for r in runs if comparison_key(r) == comparison_key(run) and summary(r)["complete"]]
@@ -169,8 +198,8 @@ def runs_page(store):
     else:
         st.dataframe(sorted([summary(r) for r in compatible], key=lambda row: row["similarity"], reverse=True), hide_index=True)
         candidates = {r["id"]: r for r in compatible if r["id"] != run["id"]}
-        candidate_id = st.selectbox("Compare against inspected run", list(candidates),
-                                   format_func=lambda key: run_label(candidates[key]))
+        candidate_id = record_selector("Compare against inspected run", store.root / "runs", list(candidates),
+                                       format_func=lambda key: run_label(candidates[key]))
         comparison = compare_runs(run, candidates[candidate_id])
         st.caption("Positive change means the candidate improved over the inspected run.")
         st.dataframe(comparison, hide_index=True)
@@ -219,8 +248,8 @@ def runs_page(store):
 
 def main():
     st.set_page_config(page_title="Transcript evaluation", page_icon="◈", layout="wide")
-    st.title("Transcript evaluation")
-    st.caption("Compare prompt versions against reviewed transcript excerpts.")
+    st.sidebar.title("Transcript evaluation")
+    st.sidebar.caption("Compare prompt versions against reviewed transcript excerpts.")
     store = Store(Path(os.environ.get("EVALUATION_DATA_DIR", str(ROOT / "data"))))
     if not store.list("prompts"):
         source = ROOT.parent / "app" / "src"
