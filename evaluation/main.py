@@ -15,6 +15,8 @@ from evaluation.client import DeepSeekClient, load_config
 from evaluation.core import (Store, SEPARATOR, parse_jsonl, parse_text_pairs, create_run,
                              execute_run, summary, compare_runs, comparison_key,
                              comparison_csv, visible_diff)
+from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, MODELS,
+                               formatted_transcript, grading_text)
 
 
 def label(record):
@@ -118,27 +120,44 @@ def datasets_page(store):
         st.rerun()
 
 
-def prompts_page(store):
-    st.header("Prompt versions")
-    st.caption("Each saved version contains both instructions and rules. Changes create a new version.")
+def setup_page(store):
+    st.header("Evaluation Setup")
+    st.caption("Save a model, filters, and prompt together. Copy a setup to try a single change.")
     prompts = store.list("prompts")
     sources = {p["id"]: p for p in prompts}
-    selected = record_selector("Copy from version", store.root / "prompts", list(sources),
-                               format_func=lambda key: label(sources[key]), disabled=not sources)
+    if "saved_setup" in st.session_state:
+        st.session_state["copy_setup"] = st.session_state.pop("saved_setup")
+        st.success("Setup saved.")
+    selected = record_selector("Copy from setup", store.root / "prompts", list(sources),
+                               format_func=lambda key: label(sources[key]), disabled=not sources, key="copy_setup")
     source = sources.get(selected, {"instructions": "", "rules": ""})
-    # Reset drafts only when the selected source changes; retain unsaved typing on reruns.
-    if st.session_state.get("prompt_source") != selected or "instructions_edit" not in st.session_state:
+    if st.session_state.get("prompt_source") != selected or "setup_model" not in st.session_state:
+        st.session_state["setup_model"] = source.get("model", DEFAULT_MODEL)
+        st.session_state.update(source.get("filters", DEFAULT_FILTERS))
         st.session_state["instructions_edit"] = source["instructions"]
         st.session_state["rules_edit"] = source["rules"]
+        st.session_state["version_name"] = f"{source['name']} (copy)" if selected else ""
         st.session_state["prompt_source"] = selected
-    name = st.text_input("New version name", key="version_name")
+    st.subheader("Model")
+    model = st.selectbox("Model to evaluate", list(MODELS), format_func=MODELS.__getitem__, key="setup_model")
+    st.subheader("Filters")
+    strip = st.toggle("Strip formatting", key="strip_formatting",
+                      help="Remove numbering before sending and grading. Turn off to grade the original formatting.")
+    narrow = st.toggle("Remove `/#*…`", key="remove_hash_marker",
+                       help="Remove input tokens such as /#*abc. Keep the surrounding whitespace.")
+    broad = st.toggle("Remove `/…`", key="remove_slash_marker",
+                      help="Remove all slash tokens, including /xyz and /#*abc, from the model input.")
+    st.subheader("Prompt")
     instructions = st.text_area("Instructions", height=280, key="instructions_edit")
     rules = st.text_area("Court-reporting rules", height=280, key="rules_edit")
     with st.expander("Combined system prompt preview"):
         st.code(instructions + SEPARATOR + rules, language=None)
-    if st.button("Save new prompt version", key="save_version"):
-        store.save_prompt(name, instructions, rules)
-        st.success("I saved a new immutable prompt version.")
+    name = st.text_input("New setup name", key="version_name")
+    if st.button("Save new setup", key="save_version"):
+        saved = store.save_prompt(name, instructions, rules, model=model, filters={
+            "strip_formatting": strip, "remove_hash_marker": narrow, "remove_slash_marker": broad})
+        st.session_state["saved_setup"] = saved["id"]
+        st.rerun()
 
 
 def run_label(run):
@@ -155,11 +174,15 @@ def execute_with_progress(store, run, config, retry=False):
     execute_run(store, run["id"], client, retry=retry, progress=progress)
 
 
-def runs_page(store):
-    st.header("Runs and comparisons")
+def results_page(store):
+    st.header("Results")
+    columns = {"prompt": "Setup", "model": "Model", "grading": "Grading mode",
+               "remove_hash_marker": "Remove /#*…", "remove_slash_marker": "Remove /…",
+               "similarity": "Similarity (%)", "baseline": "Baseline (%)", "improvement": "Gain (pp)",
+               "normalized_similarity": "Normalized (%)", "exact_match_rate": "Exact match (%)"}
     config = load_config(ROOT)
     client = DeepSeekClient(config)
-    st.caption(f"Model: {client.settings['model']} · Temperature: 0 · Sequential requests")
+    st.caption("Evaluate saved setups on the same excerpts and compare their scores.")
     if not client.ready:
         st.info("Add DEEPSEEK_API_KEY to evaluation/.env to enable API runs. Saved results remain available.")
     datasets, prompts = store.list("datasets"), store.list("prompts")
@@ -169,13 +192,13 @@ def runs_page(store):
     split = st.radio("Evaluation split", ["development", "holdout"], horizontal=True)
     if split == "holdout":
         st.info("Holdout selected explicitly. Keep these results separate from routine prompt tuning.")
-    selected_prompts = record_selector("Prompt versions to run", store.root / "prompts", list(prompt_map),
+    selected_prompts = record_selector("Setups to run", store.root / "prompts", list(prompt_map),
                                        multiple=True, default=list(prompt_map)[:1],
                                        format_func=lambda key: label(prompt_map[key]))
     dataset = dataset_map.get(selected_dataset)
     count = sum(c["split"] == split for c in dataset["cases"]) if dataset else 0
-    st.write(f"{count} cases × {len(selected_prompts)} prompt versions = **{count * len(selected_prompts)} API calls**")
-    st.caption("Starting sends the selected rough excerpts and prompts to the configured DeepSeek endpoint.")
+    st.write(f"{count} cases × {len(selected_prompts)} setups = **{count * len(selected_prompts)} API calls**")
+    st.caption("Starting sends each setup’s filtered excerpts and prompt to its selected model.")
     if st.button("Start evaluation", disabled=not (client.ready and count and selected_prompts)):
         # Persist the whole batch before starting so interrupted versions remain resumable.
         batch = [create_run(store, dataset, prompt_map[p], split, client.settings) for p in selected_prompts]
@@ -185,18 +208,24 @@ def runs_page(store):
 
     runs = store.list("runs")
     if not runs:
-        st.info("No runs yet. Import a dataset, save a prompt version, and start an evaluation.")
+        st.info("No runs yet. Choose a dataset and a saved setup, then start an evaluation.")
         return
     run_map = {r["id"]: r for r in runs}
     selected_run = record_selector("Inspect run", store.root / "runs", list(run_map),
                                    format_func=lambda key: run_label(run_map[key]))
     run = run_map[selected_run]
+    filters = run["prompt"].get("filters", LEGACY_FILTERS)
+    info = summary(run)
+    st.caption(f"{info['model']} · {info['grading']} · "
+               f"Remove `/#*…` {'on' if filters['remove_hash_marker'] else 'off'} · "
+               f"Remove `/…` {'on' if filters['remove_slash_marker'] else 'off'}")
     st.subheader("Compare compatible runs")
     compatible = [r for r in runs if comparison_key(r) == comparison_key(run) and summary(r)["complete"]]
     if not summary(run)["complete"] or len(compatible) < 2:
-        st.info("Select a complete run with another complete run on the same dataset snapshot and cases to compare.")
+        st.info("To compare, choose two completed runs with the same dataset snapshot, cases, and grading mode.")
     else:
-        st.dataframe(sorted([summary(r) for r in compatible], key=lambda row: row["similarity"], reverse=True), hide_index=True)
+        st.dataframe(sorted([summary(r) for r in compatible], key=lambda row: row["similarity"], reverse=True),
+                     column_config=columns, hide_index=True)
         candidates = {r["id"]: r for r in compatible if r["id"] != run["id"]}
         candidate_id = record_selector("Compare against inspected run", store.root / "runs", list(candidates),
                                        format_func=lambda key: run_label(candidates[key]))
@@ -207,13 +236,13 @@ def runs_page(store):
 
     st.subheader("Run history")
     st.caption("Similarity is not a probability of correctness. Incomplete runs are excluded from ranking.")
-    st.dataframe([summary(r) for r in runs], hide_index=True)
+    st.dataframe([summary(r) for r in runs], column_config=columns, hide_index=True)
     st.download_button("Export run summaries CSV", comparison_csv([summary(r) for r in runs]),
                        "run-summaries.csv", "text/csv")
     st.download_button("Export full run JSON", json.dumps(run, ensure_ascii=False, indent=2),
                        f"run-{run['id']}.json", "application/json")
     with st.expander("Saved configuration and hashes"):
-        st.json({"settings": run["settings"], "dataset_hash": run["dataset"]["hash"],
+        st.json({"settings": run["settings"], "filters": filters, "dataset_hash": run["dataset"]["hash"],
                  "prompt_hash": run["prompt"]["hash"], "scoring_version": run["scoring_version"]})
     remaining = sum(r["status"] != "success" for r in run["results"])
     if remaining:
@@ -229,18 +258,29 @@ def runs_page(store):
     if result.get("error"):
         st.error(result["error"])
     if result.get("scores"):
-        st.dataframe([result["scores"]], hide_index=True)
+        settings = {key: info[key] for key in ("prompt", "model", "grading", "remove_hash_marker", "remove_slash_marker")}
+        st.dataframe([{**settings, **result["scores"]}], column_config=columns, hide_index=True)
     for column, title, text in zip(st.columns(3), ("Rough input", "Expected output", "Generated output"),
                                   (case["input"], case["output"], result.get("response", "No successful response yet."))):
         column.markdown(f"**{title}**")
         column.code(text, language=None)
+    if "model_input" in result:
+        with st.expander("Input after filters"):
+            st.code(result["model_input"], language=None)
     if "response" in result:
-        st.caption("Diff: · = space, → = tab, ↵ = newline. Red marks removed text; green marks added text.")
+        with st.expander("Numbered transcript"):
+            numbered = result.get("formatted_output")
+            if numbered is None:
+                numbered = formatted_transcript(result["response"])
+            st.code(numbered, language=None)
+            st.download_button("Download numbered transcript", numbered, f"transcript-{run['id'][:8]}.txt", "text/plain")
+        st.caption(f"Graded diff ({info['grading']}). · = space, → = tab, ↵ = newline.")
         st.html("<style>.transcript-diff{font:13px monospace;overflow:auto;max-height:350px;color:#18212b;background:white}"
                 ".transcript-diff table{border-collapse:collapse}.transcript-diff td{padding:3px}"
                 ".transcript-diff .diff_add{background:#c6f6d5}.transcript-diff .diff_sub{background:#fed7d7}"
                 ".transcript-diff .diff_chg{background:#fefcbf}</style><div class='transcript-diff'>"
-                + visible_diff(case["output"], result["response"]) + "</div>")
+                + visible_diff(grading_text(case["output"], filters["strip_formatting"]),
+                               grading_text(result["response"], filters["strip_formatting"])) + "</div>")
     with st.expander("Attempt history"):
         st.json(result["attempts"])
 
@@ -249,7 +289,7 @@ def runs_page(store):
 def main():
     st.set_page_config(page_title="Transcript evaluation", page_icon="◈", layout="wide")
     st.sidebar.title("Transcript evaluation")
-    st.sidebar.caption("Compare prompt versions against reviewed transcript excerpts.")
+    st.sidebar.caption("Compare evaluation setups against reviewed transcript excerpts.")
     store = Store(Path(os.environ.get("EVALUATION_DATA_DIR", str(ROOT / "data"))))
     if not store.list("prompts"):
         source = ROOT.parent / "app" / "src"
@@ -257,11 +297,11 @@ def main():
             store.save_prompt("Editor baseline", (source / "AI Quality Analysis Prompt.md").read_text(encoding="utf-8"),
                               (source / "courtreportingrules.md").read_text(encoding="utf-8"))
         else:
-            st.info("Editor prompt documents were not found. Create your first prompt version manually.")
-    page = st.sidebar.radio("Workspace", ["Datasets", "Prompt versions", "Runs and comparisons"])
+            st.info("Create your first evaluation setup to get started.")
+    page = st.sidebar.radio("Workspace", ["Datasets", "Evaluation Setup", "Results"])
     st.sidebar.caption("Local evaluation app. Data and results are stored separately from the transcript editor.")
     try:
-        {"Datasets": datasets_page, "Prompt versions": prompts_page, "Runs and comparisons": runs_page}[page](store)
+        {"Datasets": datasets_page, "Evaluation Setup": setup_page, "Results": results_page}[page](store)
     except (ValueError, OSError, UnicodeError) as exc:
         st.error(str(exc))
 

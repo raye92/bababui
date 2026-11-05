@@ -16,6 +16,9 @@ import uuid
 
 from rapidfuzz.distance import Levenshtein
 
+from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, MODELS,
+                               formatted_transcript, grading_text, model_input)
+
 SCORING_VERSION = "character-levenshtein-lf-v1"
 SEPARATOR = "\n\n---\n\n# COURT REPORTING RULES DOCUMENT\n\n"
 
@@ -29,10 +32,11 @@ def digest(value):
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def valid_text(value, label):
+def valid_text(value, label, *, page_breaks=False):
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be nonempty text.")
-    if any(ord(c) < 32 and c not in "\n\r\t" for c in value):
+    allowed = "\n\r\t\f" if page_breaks else "\n\r\t"
+    if any(ord(c) < 32 and c not in allowed for c in value):
         raise ValueError(f"{label} contains unsupported control characters.")
     try:
         value.encode("utf-8")
@@ -58,8 +62,8 @@ def validate_cases(records):
         if split not in ("development", "holdout"):
             raise ValueError(f"Case {identifier}: split must be development or holdout.")
         result.append({"id": identifier,
-                       "input": valid_text(record.get("input"), f"Case {identifier} input"),
-                       "output": valid_text(record.get("output"), f"Case {identifier} output"),
+                       "input": valid_text(record.get("input"), f"Case {identifier} input", page_breaks=True),
+                       "output": valid_text(record.get("output"), f"Case {identifier} output", page_breaks=True),
                        "split": split})
     return result
 
@@ -160,11 +164,17 @@ class Store:
         self.write("datasets", record)
         return record
 
-    def save_prompt(self, name, instructions, rules):
+    def save_prompt(self, name, instructions, rules, *, model=DEFAULT_MODEL, filters=None):
+        if model not in MODELS:
+            raise ValueError("Choose an available model.")
+        filters = {**DEFAULT_FILTERS, **(filters or {})}
+        if filters.keys() != DEFAULT_FILTERS.keys() or not all(isinstance(v, bool) for v in filters.values()):
+            raise ValueError("Use the three supported on/off filters.")
         content = {"instructions": valid_text(instructions, "Instructions"),
                    "rules": valid_text(rules, "Rules")}
-        record = {"id": uuid.uuid4().hex, "name": valid_text(name, "Version name"),
+        record = {"id": uuid.uuid4().hex, "name": valid_text(name, "Setup name"),
                   "created_at": now(), **content,
+                  "model": model, "filters": filters,
                   "system_prompt": instructions + SEPARATOR + rules}
         record["hash"] = digest(record["system_prompt"])
         self.write("prompts", record)
@@ -203,8 +213,13 @@ def create_run(store, dataset, prompt, split, settings):
     selected = [c for c in dataset["cases"] if c["split"] == split]
     if not selected:
         raise ValueError("No cases in this split.")
+    # Older prompt files acquire setup defaults only when starting a new run.
+    setup = deepcopy(prompt)
+    setup.setdefault("model", DEFAULT_MODEL)
+    setup.setdefault("filters", DEFAULT_FILTERS.copy())
     record = {"id": uuid.uuid4().hex, "created_at": now(), "dataset": deepcopy(dataset),
-              "prompt": deepcopy(prompt), "split": split, "settings": deepcopy(settings),
+              "prompt": setup, "split": split,
+              "settings": {**deepcopy(settings), "model": setup["model"], "thinking": {"type": "disabled"}},
               "scoring_version": SCORING_VERSION, "case_ids": [c["id"] for c in selected],
               "results": [{"case_id": c["id"], "status": "pending", "attempts": []} for c in selected]}
     store.write("runs", record)
@@ -214,6 +229,8 @@ def create_run(store, dataset, prompt, split, settings):
 def execute_run(store, identifier, client, retry=False, progress=None):
     with store.run_lock(identifier):
         run = store.get("runs", identifier)
+        filters = run["prompt"].get("filters", LEGACY_FILTERS)
+        strip = filters["strip_formatting"]
         case_map = {c["id"]: c for c in run["dataset"]["cases"]}
         eligible = ("pending", "error", "running") if retry else ("pending",)
         for result in run["results"]:
@@ -226,11 +243,17 @@ def execute_run(store, identifier, client, retry=False, progress=None):
             case = case_map[result["case_id"]]
             started = time.perf_counter()
             try:
-                response = client.complete(case["input"], run["prompt"]["system_prompt"])
+                result["model_input"] = model_input(case["input"], filters)
+                if not result["model_input"].strip():
+                    raise ValueError("The input is empty after applying the setup filters.")
+                response = client.complete(result["model_input"], run["prompt"]["system_prompt"])
                 if not isinstance(response, str) or not response.strip():
                     raise ValueError("The model returned an empty response.")
+                graded_reply = grading_text(response, strip)
+                graded_expected = grading_text(case["output"], strip)
+                scores = score(grading_text(case["input"], strip), graded_reply, graded_expected)
                 result.update(status="success", response=response,
-                              scores=score(case["input"], response, case["output"]))
+                              scores=scores, formatted_output=formatted_transcript(response))
                 result.pop("error", None)
                 attempt["status"] = "success"
             except Exception as exc:
@@ -249,22 +272,27 @@ def summary(run):
     results = run["results"]
     successes = [r for r in results if r["status"] == "success"]
     complete = bool(results) and len(successes) == len(results)
-    row = {"run_id": run["id"], "prompt": run["prompt"]["name"],
-           "dataset": run["dataset"]["name"], "split": run["split"],
-           "completed": len(successes), "total": len(results), "complete": complete}
+    filters = run["prompt"].get("filters", LEGACY_FILTERS)
+    row = {"prompt": run["prompt"]["name"],
+           "model": run["settings"].get("model", "Unknown"),
+           "grading": "Plain text" if filters["strip_formatting"] else "Original formatting",
+           "remove_hash_marker": filters["remove_hash_marker"], "remove_slash_marker": filters["remove_slash_marker"]}
     for key in ("similarity", "baseline", "improvement", "normalized_similarity"):
         row[key] = sum(r["scores"][key] for r in successes) / len(results) if complete else None
     row["exact_match_rate"] = 100 * sum(r["scores"]["exact"] for r in successes) / len(results) if complete else None
+    row.update(dataset=run["dataset"]["name"], split=run["split"], completed=len(successes),
+               total=len(results), complete=complete, run_id=run["id"])
     return row
 
 
 def comparison_key(run):
-    return (digest(run["dataset"]["cases"]), tuple(run["case_ids"]), run["scoring_version"])
+    return (digest(run["dataset"]["cases"]), tuple(run["case_ids"]), run["scoring_version"],
+            run["prompt"].get("filters", LEGACY_FILTERS)["strip_formatting"])
 
 
 def compare_runs(reference, candidate):
     if comparison_key(reference) != comparison_key(candidate):
-        raise ValueError("Runs are not compatible: dataset, selected cases, or scoring version differs.")
+        raise ValueError("Runs are not compatible: dataset, selected cases, scoring version, or grading mode differs.")
     if not summary(reference)["complete"] or not summary(candidate)["complete"]:
         raise ValueError("Only complete runs can be compared.")
     other = {r["case_id"]: r for r in candidate["results"]}

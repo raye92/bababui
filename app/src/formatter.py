@@ -1,111 +1,15 @@
-import re
-import os
 from pathlib import Path
+import sys
+
+# The desktop editor also runs directly as python app/src/main.py.
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from transcript_formatting import TranscriptFormatter
 
 
-class Formatter:
-    """Handles formatting and stripping of transcript text."""
-    
-    def __init__(self):
-        self.LINES_PER_PAGE = 25
-    
-    def strip_formatting(self, text):
-        """
-        Removes line numbers 1-25 and page numbering.
-        Ignores the 5-line headers during the strip process.
-        
-        Args:
-            text (str): Raw text with formatting
-            
-        Returns:
-            str: Cleaned text without formatting
-        """
-        lines = text.split('\n')
-        cleaned_lines = []
-
-        # Regex: Start + Whitespace + Digits + EXACTLY 4 spaces + Content
-        # This catches "          1    Text" and "         10    Text"
-        pattern = re.compile(r"^\s*\d+ {4}(.*)")
-        
-        # Regex: Page numbers (solitary digits)
-        page_footer_pattern = re.compile(r"^\s*\d+\s*$")
-
-        for line in lines:
-            # Skip purely empty lines (this removes the 5-line headers and double spacing)
-            if not line.strip():
-                continue
-
-            match = pattern.match(line)
-            if match:
-                # Group 1 is the text AFTER the 4 spaces.
-                # This preserves internal spacing (like indentation for Q/A).
-                content = match.group(1) 
-                cleaned_lines.append(content)
-            
-            elif page_footer_pattern.match(line):
-                continue
-            
-            else:
-                # Keep lines that appear to be raw text already
-                cleaned_lines.append(line)
-
-        # Join with single newline for clean editing
-        return "\n".join(cleaned_lines)
-    
-    def apply_formatting(self, text):
-        """
-        Applies:
-        1. 5 Newlines at the start of every page.
-        2. Numbers 1-25 with strict alignment.
-        3. Double spacing between text lines.
-        4. Pagination footer.
-        
-        Args:
-            text (str): Raw text without formatting
-            
-        Returns:
-            tuple: (formatted_text, page_count)
-        """
-        lines = text.split('\n')
-        
-        # We build the string manually to handle distinct header vs text spacing
-        final_output = ""
-        
-        line_counter = 1
-        page_counter = 1
-
-        # Initial Header for Page 1
-        final_output += "\n" * 5
-
-        for line in lines:
-            if not line.strip():
-                continue
-
-            # Format line with right-aligned number (11 chars) + 4 spaces + content + double spacing
-            final_output += f"{line_counter:>11}    {line}\n\n"
-
-            if line_counter == self.LINES_PER_PAGE:
-                # Page footer with form feed
-                final_output += f"\n{page_counter:>72}\n\f"
-                # Start next page with 5 newlines header
-                final_output += "\n" * 5
-                line_counter = 1
-                page_counter += 1
-            else:
-                line_counter += 1
-
-        # --- Ensure we have exactly 25 lines per page ---
-        # If we finished the text but haven't reached line 25, fill the rest.
-        if line_counter > 1 and line_counter <= self.LINES_PER_PAGE:
-            while line_counter <= self.LINES_PER_PAGE:
-                final_output += f"{line_counter:>11}\n\n"
-                line_counter += 1
-            
-            # After filling the page, add the final footer
-            final_output += f"\n{page_counter:>72}"
-
-        return final_output, page_counter
-    
+class Formatter(TranscriptFormatter):
     def batch_strip_formatting(self, input_folder, output_folder):
         """
         Batch processes all text files in the input folder,

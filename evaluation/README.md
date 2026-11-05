@@ -1,6 +1,6 @@
 # Transcript evaluation
 
-A separate local browser app for comparing prompt versions against reviewed
+A separate local browser app for comparing evaluation setups against reviewed
 rough/expected transcript pairs. The transcript editor remains in `../app`.
 
 ## Start
@@ -31,12 +31,25 @@ An API key is only needed to run evaluations, not to manage data or view results
 
 1. **Datasets:** import reviewed pairs or add them manually. Each pair is a
    self-contained excerpt. Use **Update** to save edits to the selected dataset. Use **Save as new dataset** at the bottom to create a separate copy, including the current edits. Existing run snapshots remain unchanged.
-2. **Prompt versions:** copy a saved version, edit instructions and rules, preview
-   the combined system prompt, and save a new immutable version.
-3. **Runs and comparisons:** choose a dataset revision, split, and prompt versions.
+2. In **Evaluation Setup**, copy a saved setup, choose a model and filters, and
+   edit the instructions and court-reporting rules. Save the result under a new name.
+   New setups default to DeepSeek V4 Pro. DeepSeek Flash is also available.
+3. In **Results**, choose a dataset revision, split, and one or more setups.
    Review the API-call count, then start. Calls run sequentially at temperature zero.
-4. Inspect input/expected/generated text and whitespace-visible diffs. Compare
-   complete runs on matching data, or export CSV summaries and full JSON records.
+4. Inspect the original input, filtered model input, raw reply, and graded diff.
+   Download the numbered transcript, CSV summaries, or a full run as JSON.
+
+**Strip formatting** starts on. It removes transcript numbering and page formatting
+from the input before the model sees it. The same formatter strips the reply,
+reviewed output, and original input baseline for scoring. With the toggle off,
+numbering and spacing count in the score. Display and export apply standard
+numbering after grading in both modes.
+
+The `/#*…` input filter starts on and removes tokens such as `/#*abc`. The broader
+`/…` filter starts off. When on, it removes a slash and everything after it up
+to the next whitespace, including `/#*abc`. Neither filter changes the reviewed
+output or the baseline. Older prompt files use the new defaults for new runs.
+Existing runs keep their recorded scores and use their original settings on retry.
 
 ### JSONL import
 
@@ -49,7 +62,7 @@ One object per line, with `id`, `input`, and `output` strings:
 Use JSON escapes for newlines and tabs. `split` is optional and defaults to
 `development`; the other allowed value is `holdout`. IDs must be unique within
 the dataset. Text is UTF-8, must contain non-whitespace characters, and cannot
-contain control characters other than tab, CR, and LF. Spaces and line endings
+contain control characters other than tab, CR, LF, and form feed in transcripts. Spaces and line endings
 are retained in stored snapshots. UTF-8 file BOMs are accepted.
 
 ### Text-file import
@@ -72,7 +85,8 @@ Primary **character similarity** is:
 100 × (1 − Levenshtein distance / max(generated length, expected length))
 ```
 
-CRLF and CR are normalized to LF for scoring. All other characters count,
+CRLF and CR are normalized to LF for scoring. After any selected formatting
+removal, all other characters count,
 including indentation, trailing newlines, capitalization, and punctuation.
 Two empty strings score 100; one empty string scores zero. Empty imported excerpts
 and empty API responses are rejected rather than treated as successful cases.
@@ -89,8 +103,8 @@ score does not establish correctness; inspect the baseline and actual difference
 These metrics do not claim to classify individual edits as correct or incorrect.
 
 Comparisons require identical full dataset content snapshots, ordered selected
-case IDs, and scoring version. Model settings are visible in saved metadata;
-keep them fixed when attributing a change to a prompt. Development is selected by
+case IDs, scoring version, and grading mode. Results show the model and marker
+filters alongside each run's scores. Development is selected by
 default. Holdout evaluation requires explicit selection and should be reserved
 for a final check after tuning. Temperature zero reduces variation but does not
 guarantee deterministic model responses.

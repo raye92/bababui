@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
+from evaluation.setups import DEFAULT_MODEL
+
 
 def load_config(root):
     values = dotenv_values(Path(root) / ".env")
@@ -15,7 +17,7 @@ def load_config(root):
         return os.environ.get(key, values.get(key) or default)
     return {"api_key": value("DEEPSEEK_API_KEY"),
             "base_url": value("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            "model": value("DEEPSEEK_MODEL", "deepseek-chat"),
+            "model": value("DEEPSEEK_MODEL", DEFAULT_MODEL),
             "temperature": 0, "timeout_seconds": 180}
 
 
@@ -23,8 +25,10 @@ class DeepSeekClient:
     def __init__(self, config, opener=None):
         self.api_key = config.get("api_key", "")
         self.settings = {"base_url": config.get("base_url", "https://api.deepseek.com"),
-                         "model": config.get("model", "deepseek-chat"),
+                         "model": config.get("model", DEFAULT_MODEL),
                          "temperature": 0, "timeout_seconds": config.get("timeout_seconds", 180)}
+        if "thinking" in config:
+            self.settings["thinking"] = config["thinking"]
         self.opener = opener or urllib.request.urlopen
 
     @property
@@ -41,6 +45,8 @@ class DeepSeekClient:
         payload = {"model": self.settings["model"], "temperature": 0, "stream": False,
                    "messages": [{"role": "system", "content": system_prompt},
                                 {"role": "user", "content": text}]}
+        if "thinking" in self.settings:
+            payload["thinking"] = self.settings["thinking"]
         request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"),
                                          headers={"Authorization": f"Bearer {self.api_key}",
                                                   "Content-Type": "application/json"}, method="POST")

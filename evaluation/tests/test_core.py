@@ -208,3 +208,108 @@ def test_dataset_update_preserves_saved_run_snapshot(tmp_path):
     with pytest.raises(ValueError):
         store.update_dataset(dataset["id"], [])
     assert store.get("datasets", dataset["id"])["cases"] == changed
+
+
+@pytest.mark.parametrize(("narrow", "broad", "expected"), [
+    (False, False, "A /#*abc\tkeep  /xyz\nB"),
+    (True, False, "A \tkeep  /xyz\nB"),
+    (False, True, "A \tkeep  \nB"),
+    (True, True, "A \tkeep  \nB"),
+])
+def test_marker_filters_only_change_the_request(tmp_path, narrow, broad, expected):
+    store = Store(tmp_path)
+    original = "A /#*abc\tkeep  /xyz\nB"
+    dataset = store.save_dataset("Markers", [{"id": "x", "input": original, "output": original}])
+    setup = store.save_prompt("Filters", "Edit", "Rules", filters={
+        "strip_formatting": False, "remove_hash_marker": narrow, "remove_slash_marker": broad})
+    run = create_run(store, dataset, setup, "development", {})
+    class Echo:
+        def complete(self, text, prompt):
+            assert text == expected
+            return text
+    result = execute_run(store, run["id"], Echo())["results"][0]
+    assert result["response"] == expected
+    assert result["scores"] == score(original, expected, original)
+
+
+@pytest.mark.parametrize("strip", [True, False])
+def test_grading_precedes_numbering_and_covers_multiple_pages(tmp_path, strip):
+    from transcript_formatting import TranscriptFormatter
+
+    formatter = TranscriptFormatter()
+    plain = "\n".join(f"    Q    Line {i}." for i in range(1, 28))
+    numbered, pages = formatter.apply_formatting(plain)
+    assert pages == 2 and "\f" in numbered
+    store = Store(tmp_path)
+    dataset = store.save_dataset("Numbered", [{"id": "x", "input": numbered, "output": numbered}])
+    setup = store.save_prompt("Numbering", "Edit", "Rules", filters={"strip_formatting": strip})
+    run = create_run(store, dataset, setup, "development", {})
+    class PlainReply:
+        def complete(self, text, prompt):
+            assert text == (plain if strip else numbered)
+            return plain
+    saved = execute_run(store, run["id"], PlainReply())
+    result = saved["results"][0]
+    assert result["status"] == "success"
+    assert result["response"] == plain and result["formatted_output"] == numbered
+    assert result["scores"]["exact"] is strip
+    assert (result["scores"]["similarity"] == 100) is strip
+    assert result["scores"]["baseline"] == 100
+
+
+def test_legacy_history_and_grading_mode_compatibility(tmp_path):
+    from copy import deepcopy
+
+    store, dataset, _, _ = setup_run(tmp_path)
+    setup = store.save_prompt("Strict", "Edit", "Rules", filters={"strip_formatting": False})
+    strict = create_run(store, dataset, setup, "development", {})
+    strict = execute_run(store, strict["id"], FakeClient())
+    old = deepcopy(strict)
+    old["prompt"].pop("filters")
+    old["prompt"].pop("model")
+    old["settings"] = {"model": "deepseek-chat"}
+    old["results"][0]["scores"]["similarity"] = 42
+    assert summary(old)["grading"] == "Original formatting"
+    assert summary(old)["similarity"] == 71
+    assert compare_runs(old, strict)[0]["change_pp"] == 58
+    plain_setup = store.save_prompt("Plain", "Edit", "Rules")
+    plain = create_run(store, dataset, plain_setup, "development", {})
+    plain = execute_run(store, plain["id"], FakeClient())
+    with pytest.raises(ValueError, match="grading mode"):
+        compare_runs(old, plain)
+
+
+def test_filters_preserve_whitespace_and_handle_short_tokens():
+    from evaluation.setups import DEFAULT_FILTERS, model_input
+
+    text = "Q /#*\t/#*a / /x\nA"
+    assert model_input(text, DEFAULT_FILTERS) == "Q /#*\t / /x\nA"
+    broad = {**DEFAULT_FILTERS, "remove_hash_marker": False, "remove_slash_marker": True}
+    assert model_input("Q /#*\t/#*a / /x\nA/abc", broad) == "Q \t / \nA"
+
+
+def test_plain_numeric_answers_and_addresses_survive_grading_and_export():
+    from evaluation.setups import formatted_transcript, grading_text
+
+    answer = "Q How many?\n42\n\n1821    Main Street"
+    stripped = "Q How many?\n42\n1821    Main Street"
+    assert grading_text(answer, True) == stripped
+    missing_number = answer.replace("42", "")
+    assert not score(answer, grading_text(missing_number, True), grading_text(answer, True))["exact"]
+    numbered = formatted_transcript(answer)
+    assert "          2    42\n" in numbered
+    assert "          3    1821    Main Street\n" in numbered
+    assert grading_text(numbered, True) == grading_text("\n\n" + answer + "\n", True) == stripped
+
+
+@pytest.mark.parametrize("length", [25, 26, 50])
+def test_numbered_export_only_breaks_between_pages(length):
+    from transcript_formatting import TranscriptFormatter
+
+    formatter = TranscriptFormatter()
+    plain = "\n".join(f"    Q    Line {n}." for n in range(length))
+    numbered, pages = formatter.apply_formatting(plain)
+    assert pages == (length + 24) // 25
+    assert numbered.count("\f") == pages - 1
+    assert numbered.endswith(f"{pages:>72}")
+    assert formatter.strip_formatting(numbered) == plain
