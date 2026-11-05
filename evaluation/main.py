@@ -140,6 +140,13 @@ def setup_page(store):
         st.session_state["prompt_source"] = selected
     st.subheader("Model")
     model = st.selectbox("Model to evaluate", list(MODELS), format_func=MODELS.__getitem__, key="setup_model")
+    st.selectbox(
+        "Google AI Studio transcription model",
+        ["gemini-3.5-transcribe", "gemini-3.8-flash"],
+        index=None,
+        key="transcription_model",
+        help="Model selection only. Audio transcription is not available yet.",
+    )
     st.subheader("Filters")
     strip = st.toggle("Strip formatting", key="strip_formatting",
                       help="Remove numbering before sending and grading. Turn off to grade the original formatting.")
