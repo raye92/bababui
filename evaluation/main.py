@@ -12,11 +12,16 @@ if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
 from evaluation.client import DeepSeekClient, load_config
-from evaluation.core import (Store, SEPARATOR, parse_jsonl, parse_text_pairs, create_run,
+from evaluation.core import (Store, SEPARATOR, parse_jsonl, create_run,
                              execute_run, summary, compare_runs, comparison_key,
-                             comparison_csv, visible_diff)
+                             comparison_csv, visible_diff, validate_cases, valid_text)
 from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, MODELS,
                                formatted_transcript, grading_text)
+
+from evaluation.imports import import_files, folder_files
+from evaluation.storage import resolve
+from evaluation.transcription import (AUDIO_MODELS, DEFAULT_AUDIO_MODEL, GeminiTranscriber,
+                                      workload, retry_workload, preflight, has_key)
 
 
 def label(record):
@@ -55,29 +60,39 @@ def datasets_page(store):
     if not datasets:
         st.info("No datasets yet. Import pairs or add your first pair below.")
     with st.expander("Import a dataset", expanded=not datasets):
-        st.caption("JSONL: id, input, output, optional split. Text files: <id>.input.txt and <id>.output.txt.")
+        st.caption("Each case requires <id>.txt, <id>_scoped.txt and <id>.wav. Separators: underscore, hyphen, period or space.")
+        source = st.radio("Import source", ["Upload files", "Local folder"], horizontal=True)
         with st.form("import_dataset"):
             name = st.text_input("Dataset name", key="import_name")
-            mode = st.radio("Import format", ["JSONL", "Text pairs"], horizontal=True)
-            uploads = st.file_uploader("Choose files", type=["jsonl", "txt"], accept_multiple_files=True)
+            if source == "Local folder":
+                folder = st.text_input("Local folder path")
+                uploads = None
+            else:
+                mode = st.radio("Import format", ["Text pairs", "JSONL"], horizontal=True)
+                uploads = st.file_uploader("Choose text and WAV files", type=["jsonl", "txt", "wav"],
+                                           accept_multiple_files=True, max_upload_size=2048)
             submitted = st.form_submit_button("Import dataset")
         if submitted:
-            if not uploads:
-                raise ValueError("Choose files to import.")
-            if len({file.name for file in uploads}) != len(uploads):
-                raise ValueError("Duplicate filenames. Each input/output filename must be unique.")
-            if mode == "JSONL":
-                if len(uploads) != 1:
-                    raise ValueError("Choose one JSONL file per dataset.")
-                cases = parse_jsonl(uploads[0].getvalue().decode("utf-8-sig"))
+            if not name.strip():
+                raise ValueError("Dataset name must be nonempty text.")
+            if source == "Local folder":
+                cases = import_files(store, folder_files(folder))
             else:
-                cases = parse_text_pairs({file.name: file.getvalue().decode("utf-8-sig") for file in uploads})
+                if not uploads:
+                    raise ValueError("Choose files to import.")
+                if len({file.name.casefold() for file in uploads}) != len(uploads):
+                    raise ValueError("Duplicate filenames. Every filename must be unique.")
+                files = {file.name: file.getvalue() for file in uploads}
+                records = None
+                if mode == "JSONL":
+                    documents = [n for n in files if n.lower().endswith(".jsonl")]
+                    if len(documents) != 1:
+                        raise ValueError("Choose one JSONL file plus matching WAV files.")
+                    records = parse_jsonl(files.pop(documents[0]).decode("utf-8-sig"))
+                cases = import_files(store, files, records)
             saved = store.save_dataset(name, cases)
             st.session_state["dataset_navigation"] = (saved["id"], cases[0]["id"])
             st.rerun()
-        st.download_button("Download synthetic JSONL template", (ROOT / "fixtures/synthetic.jsonl").read_bytes(),
-                           "synthetic.jsonl", "application/x-ndjson")
-        st.caption("Synthetic examples demonstrate the format. They are not reviewed benchmark data.")
 
     options = {"new": None, **{d["id"]: d for d in datasets}}
     if "dataset_navigation" in st.session_state:
@@ -90,7 +105,8 @@ def datasets_page(store):
     dataset = options[selected]
     if dataset:
         st.dataframe([{"id": c["id"], "split": c["split"], "input_characters": len(c["input"]),
-                       "expected_characters": len(c["output"])} for c in dataset["cases"]], hide_index=True)
+                       "expected_characters": len(c["output"]), "audio": c["audio"]["filename"],
+                       "audio_minutes": round(c["audio"]["duration"] / 60, 2)} for c in dataset["cases"]], hide_index=True)
         st.download_button("Export dataset JSONL", "\n".join(json.dumps(c, ensure_ascii=False) for c in dataset["cases"]) + "\n",
                            f"dataset-{dataset['id'][:8]}.jsonl", "application/x-ndjson")
     existing = {c["id"]: c for c in dataset["cases"]} if dataset else {}
@@ -105,6 +121,9 @@ def datasets_page(store):
         rough = left.text_area("Rough input", value=initial.get("input", ""), height=230, key=f"input_{suffix}")
         expected = right.text_area("Expected output", value=initial.get("output", ""), height=230, key=f"output_{suffix}")
         split = st.selectbox("Split", ["development", "holdout"], index=int(initial.get("split") == "holdout"))
+        audio_upload = st.file_uploader("Matching WAV", type=["wav"], key=f"audio_{suffix}", max_upload_size=2048)
+        if initial.get("audio"):
+            st.caption(f"Saved audio: {initial['audio']['filename']}")
         updated = st.form_submit_button("Update", key="update_dataset", disabled=dataset is None)
         st.divider()
         name = st.text_input("New dataset name", value=f"{dataset['name']} (copy)" if dataset else "",
@@ -112,6 +131,18 @@ def datasets_page(store):
         saved = st.form_submit_button("Save as new dataset", key="save_dataset_as_new")
     if updated or saved:
         edited = {"id": identifier, "input": rough, "output": expected, "split": split}
+        proposed = [edited if c["id"] == choice else c for c in existing.values()]
+        if choice is None:
+            proposed.append(edited)
+        validate_cases(proposed, require_audio=False)
+        if saved:
+            valid_text(name, "Dataset name")
+        if audio_upload is not None:
+            edited = import_files(store, {audio_upload.name: audio_upload.getvalue()}, [edited])[0]
+        elif initial.get("audio"):
+            edited["audio"] = initial["audio"]
+        else:
+            raise ValueError("A matching WAV is required before saving a case.")
         cases = [edited if c["id"] == choice else c for c in existing.values()]
         if choice is None:
             cases.append(edited)
@@ -133,6 +164,7 @@ def setup_page(store):
     source = sources.get(selected, {"instructions": "", "rules": ""})
     if st.session_state.get("prompt_source") != selected or "setup_model" not in st.session_state:
         st.session_state["setup_model"] = source.get("model", DEFAULT_MODEL)
+        st.session_state["transcription_model"] = source.get("transcription_model", DEFAULT_AUDIO_MODEL)
         st.session_state.update(source.get("filters", DEFAULT_FILTERS))
         st.session_state["instructions_edit"] = source["instructions"]
         st.session_state["rules_edit"] = source["rules"]
@@ -142,10 +174,9 @@ def setup_page(store):
     model = st.selectbox("Model to evaluate", list(MODELS), format_func=MODELS.__getitem__, key="setup_model")
     st.selectbox(
         "Google AI Studio transcription model",
-        ["gemini-3.5-transcribe", "gemini-3.8-flash"],
-        index=None,
+        list(AUDIO_MODELS),
         key="transcription_model",
-        help="Model selection only. Audio transcription is not available yet.",
+        help="Audio is transcribed once per model and reused across evaluations.",
     )
     st.subheader("Filters")
     strip = st.toggle("Strip formatting", key="strip_formatting",
@@ -161,7 +192,8 @@ def setup_page(store):
         st.code(instructions + SEPARATOR + rules, language=None)
     name = st.text_input("New setup name", key="version_name")
     if st.button("Save new setup", key="save_version"):
-        saved = store.save_prompt(name, instructions, rules, model=model, filters={
+        saved = store.save_prompt(name, instructions, rules, model=model,
+                                  transcription_model=st.session_state["transcription_model"], filters={
             "strip_formatting": strip, "remove_hash_marker": narrow, "remove_slash_marker": broad})
         st.session_state["saved_setup"] = saved["id"]
         st.rerun()
@@ -171,19 +203,21 @@ def run_label(run):
     return f"{run['prompt']['name']} · {run['split']} · {run['created_at'][:16]} · {run['id'][:8]}"
 
 
-def execute_with_progress(store, run, config, retry=False):
+def execute_with_progress(store, run, config, retry=False, failures=None):
     # Retries use the original settings, even if the current .env has changed.
     client = DeepSeekClient({**run["settings"], "api_key": config["api_key"]})
     bar = st.progress(0.0, text=f"Running {run['prompt']['name']}")
     def progress(current):
         done = sum(r["status"] in ("success", "error") for r in current["results"])
         bar.progress(done / len(current["results"]), text=f"{done}/{len(current['results'])} cases attempted")
-    execute_run(store, run["id"], client, retry=retry, progress=progress)
+    transcriber = GeminiTranscriber(config["gemini_api_key"]) if has_key(config["gemini_api_key"]) else None
+    execute_run(store, run["id"], client, retry=retry, progress=progress,
+                transcriber=transcriber, transcription_failures=failures)
 
 
 def results_page(store):
     st.header("Results")
-    columns = {"prompt": "Setup", "model": "Model", "grading": "Grading mode",
+    columns = {"prompt": "Setup", "model": "Model", "audio_model": "Audio model", "grading": "Grading mode",
                "remove_hash_marker": "Remove /#*…", "remove_slash_marker": "Remove /…",
                "similarity": "Similarity (%)", "baseline": "Baseline (%)", "improvement": "Gain (pp)",
                "normalized_similarity": "Normalized (%)", "exact_match_rate": "Exact match (%)"}
@@ -204,13 +238,26 @@ def results_page(store):
                                        format_func=lambda key: label(prompt_map[key]))
     dataset = dataset_map.get(selected_dataset)
     count = sum(c["split"] == split for c in dataset["cases"]) if dataset else 0
-    st.write(f"{count} cases × {len(selected_prompts)} setups = **{count * len(selected_prompts)} API calls**")
-    st.caption("Starting sends each setup’s filtered excerpts and prompt to its selected model.")
-    if st.button("Start evaluation", disabled=not (client.ready and count and selected_prompts)):
-        # Persist the whole batch before starting so interrupted versions remain resumable.
+    ready = False
+    if count and selected_prompts:
+        try:
+            cases = [c for c in dataset["cases"] if c["split"] == split]
+            counts = workload(store, cases, [prompt_map[p] for p in selected_prompts])
+            st.write(f"**{counts['recordings']} recordings** need transcription · "
+                     f"**{counts['requests']} new transcription requests** · "
+                     f"**{counts['cached']} cached transcriptions** · "
+                     f"**{counts['prompts']} editing prompt calls**")
+            preflight(counts, config)
+            ready = True
+        except (ValueError, OSError) as exc:
+            st.warning(str(exc))
+    st.caption("Editing uses the original text, AI transcription reference, instructions and court-reporting rules.")
+    if st.button("Start evaluation", disabled=not ready):
+        preflight(workload(store, cases, [prompt_map[p] for p in selected_prompts]), config)
         batch = [create_run(store, dataset, prompt_map[p], split, client.settings) for p in selected_prompts]
+        failures = {}
         for run in batch:
-            execute_with_progress(store, run, config)
+            execute_with_progress(store, run, config, failures=failures)
         st.rerun()
 
     runs = store.list("runs")
@@ -223,7 +270,7 @@ def results_page(store):
     run = run_map[selected_run]
     filters = run["prompt"].get("filters", LEGACY_FILTERS)
     info = summary(run)
-    st.caption(f"{info['model']} · {info['grading']} · "
+    st.caption(f"{info['model']} · {info['audio_model']} · {info['grading']} · "
                f"Remove `/#*…` {'on' if filters['remove_hash_marker'] else 'off'} · "
                f"Remove `/…` {'on' if filters['remove_slash_marker'] else 'off'}")
     st.subheader("Compare compatible runs")
@@ -256,7 +303,8 @@ def results_page(store):
         st.warning(f"{remaining} cases need retry or resume. Successful cases will be skipped.")
         st.caption("If a previous request was interrupted, its response may have been lost. Retrying can incur another API charge.")
         if st.button(f"Retry or resume {remaining} cases", disabled=not client.ready):
-            execute_with_progress(store, run, config, retry=True)
+            preflight(retry_workload(store, run), config)
+            execute_with_progress(store, run, config, retry=True, failures={})
             st.rerun()
     results = {r["case_id"]: r for r in run["results"]}
     chosen_case = st.selectbox("Inspect case", list(results), key=f"inspect_case_{run['id']}")
@@ -265,15 +313,25 @@ def results_page(store):
     if result.get("error"):
         st.error(result["error"])
     if result.get("scores"):
-        settings = {key: info[key] for key in ("prompt", "model", "grading", "remove_hash_marker", "remove_slash_marker")}
+        settings = {key: info[key] for key in ("prompt", "model", "audio_model", "grading", "remove_hash_marker", "remove_slash_marker")}
         st.dataframe([{**settings, **result["scores"]}], column_config=columns, hide_index=True)
     for column, title, text in zip(st.columns(3), ("Rough input", "Expected output", "Generated output"),
                                   (case["input"], case["output"], result.get("response", "No successful response yet."))):
         column.markdown(f"**{title}**")
         column.code(text, language=None)
-    if "model_input" in result:
-        with st.expander("Input after filters"):
-            st.code(result["model_input"], language=None)
+    if "transcription" in result:
+        with st.expander("AI transcription reference"):
+            transcription = resolve(store.root, result["transcription"])
+            st.code(transcription["text"], language=None)
+            for boundary in transcription.get("boundary_flags", []):
+                st.warning(f"Inspect segment boundary {boundary}: overlap could not be matched safely.")
+            for warning in transcription.get("warnings", []):
+                st.warning(warning)
+    if "request" in result:
+        with st.expander("Exact submitted messages"):
+            request = resolve(store.root, result["request"])
+            st.code(request["system"], language=None)
+            st.code(request["user"], language=None)
     if "response" in result:
         with st.expander("Numbered transcript"):
             numbered = result.get("formatted_output")

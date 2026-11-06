@@ -16,6 +16,7 @@ def load_config(root):
     def value(key, default=""):
         return os.environ.get(key, values.get(key) or default)
     return {"api_key": value("DEEPSEEK_API_KEY"),
+            "gemini_api_key": value("GEMINI_API_KEY"),
             "base_url": value("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             "model": value("DEEPSEEK_MODEL", DEFAULT_MODEL),
             "temperature": 0, "timeout_seconds": 180}

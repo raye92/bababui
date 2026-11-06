@@ -1,3 +1,4 @@
+from evaluation.tests.audio_helpers import save_dataset, update_dataset, original as extract_original, AUDIO, seed
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -9,7 +10,8 @@ MAIN = Path(__file__).resolve().parents[1] / "main.py"
 
 def start(tmp_path, monkeypatch):
     monkeypatch.setenv("EVALUATION_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     return AppTest.from_file(str(MAIN), default_timeout=20).run()
 
 
@@ -31,6 +33,12 @@ def test_manual_pair_and_prompt_version(tmp_path, monkeypatch):
     app.text_area(key="output_new").set_value("Hello.")
     app.button(key="save_dataset_as_new").click().run()
     assert not app.exception
+    assert any("WAV is required" in e.value for e in app.error)
+    assert Store(tmp_path).list("datasets") == []
+    from evaluation.tests.audio_helpers import WAV
+    app.file_uploader(key="audio_new").upload("one.wav", WAV, "audio/wav")
+    app.button(key="save_dataset_as_new").click().run()
+    assert not app.error
     assert Store(tmp_path).list("datasets")[0]["cases"][0]["output"] == "Hello."
     app.sidebar.radio[0].set_value("Evaluation Setup").run()
     assert app.selectbox(key="setup_model").value == "deepseek-v4-pro"
@@ -61,7 +69,7 @@ def test_manual_pair_and_prompt_version(tmp_path, monkeypatch):
 
 def test_saved_runs_display_and_compare_without_requests(tmp_path, monkeypatch):
     store = Store(tmp_path)
-    dataset = store.save_dataset("Synthetic", [{"id": "x", "input": "hi", "output": "Hi."}])
+    dataset = save_dataset(store, "Synthetic", [{"id": "x", "input": "hi", "output": "Hi."}])
     class Fake:
         def complete(self, text, system_prompt):
             return "Hi." if system_prompt.startswith("Correct") else text
@@ -84,11 +92,11 @@ def test_saved_runs_display_and_compare_without_requests(tmp_path, monkeypatch):
 def test_start_and_rerender_do_not_duplicate_calls(tmp_path, monkeypatch):
     from evaluation.client import DeepSeekClient
     store = Store(tmp_path)
-    store.save_dataset("Synthetic", [{"id": "x", "input": "hi", "output": "Hi."}])
+    save_dataset(store, "Synthetic", [{"id": "x", "input": "hi", "output": "Hi."}])
     store.save_prompt("v1", "Correct", "Rules", model="deepseek-flash")
     calls = []
     def fake_complete(self, text, prompt):
-        calls.append((text, self.settings["model"]))
+        calls.append((extract_original(text), self.settings["model"]))
         return "Hi."
     monkeypatch.setattr(DeepSeekClient, "complete", fake_complete)
     app = start(tmp_path, monkeypatch)
@@ -104,9 +112,57 @@ def test_start_and_rerender_do_not_duplicate_calls(tmp_path, monkeypatch):
     assert len(store.list("runs")) == 1
 
 
+def test_upload_import_and_folder_import(tmp_path, monkeypatch):
+    from evaluation.tests.audio_helpers import WAV
+    source = tmp_path / "source"
+    source.mkdir()
+    for name, data in {"x.txt": b"hello", "x-scoped.txt": b"Hello.", "x.wav": WAV}.items():
+        (source / name).write_bytes(data)
+    app = start(tmp_path / "data", monkeypatch)
+    app.text_input(key="import_name").set_value("Uploaded")
+    uploads = next(u for u in app.file_uploader if u.label == "Choose text and WAV files")
+    for path in source.iterdir():
+        uploads.upload(path.name, path.read_bytes())
+    next(b for b in app.button if b.label == "Import dataset").click().run()
+    assert not app.error and not app.exception
+    next(r for r in app.radio if r.label == "Import source").set_value("Local folder").run()
+    app.text_input(key="import_name").set_value("Folder")
+    next(t for t in app.text_input if t.label == "Local folder path").set_value(str(source))
+    next(b for b in app.button if b.label == "Import dataset").click().run()
+    assert not app.error and not app.exception
+    records = Store(tmp_path / "data").list("datasets")
+    assert len(records) == 2 and records[0]["cases"] == records[1]["cases"]
+
+
+def test_uncached_counts_and_gemini_key_gate(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    dataset = save_dataset(store, "Test", [{"id": "x", "input": "hi", "output": "Hi"}])
+    store.save_prompt("One", "Edit", "Rules")
+    cache = store.root / "transcriptions" / "gemini-3.5-transcribe" / dataset["cases"][0]["audio"]["sha256"] / "complete.json"
+    cache.unlink()
+    app = start(tmp_path, monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake")
+    app.sidebar.radio[0].set_value("Results").run()
+    assert any("1 new transcription requests" in m.value for m in app.markdown)
+    assert any("GEMINI_API_KEY" in w.value for w in app.warning)
+    assert next(b for b in app.button if b.label == "Start evaluation").disabled
+    assert not store.list("runs")
+
+
+def test_manual_invalid_name_does_not_publish_audio(tmp_path, monkeypatch):
+    from evaluation.tests.audio_helpers import WAV
+    app = start(tmp_path, monkeypatch)
+    app.text_input(key="case_id_new").set_value("x")
+    app.text_area(key="input_new").set_value("hello")
+    app.text_area(key="output_new").set_value("Hello.")
+    app.file_uploader(key="audio_new").upload("x.wav", WAV, "audio/wav")
+    app.button(key="save_dataset_as_new").click().run()
+    assert app.error and not (tmp_path / "audio").exists()
+
+
 def test_dataset_update_and_save_as_new(tmp_path, monkeypatch):
     store = Store(tmp_path)
-    original = store.save_dataset("Original", [{"id": "one", "input": "hi", "output": "Hi."}])
+    original = save_dataset(store, "Original", [{"id": "one", "input": "hi", "output": "Hi."}])
     app = start(tmp_path, monkeypatch)
     app.selectbox(key="dataset_selection").set_value(original["id"]).run()
     app.selectbox(key=f"pair_{original['id']}").set_value("one").run()
@@ -132,7 +188,7 @@ def test_retry_uses_saved_model_filters_and_dataset(tmp_path, monkeypatch):
 
     store = Store(tmp_path)
     case = {"id": "x", "input": "          1    /#*old say /xyz", "output": "          1    Say."}
-    dataset = store.save_dataset("Retry", [case])
+    dataset = save_dataset(store, "Retry", [case])
     setup = store.save_prompt("Flash", "Correct", "Rules", model="deepseek-flash",
                               filters={"remove_slash_marker": True})
     run = create_run(store, dataset, setup, "development", {})
@@ -140,11 +196,11 @@ def test_retry_uses_saved_model_filters_and_dataset(tmp_path, monkeypatch):
         def complete(self, *args):
             raise OSError("Try again")
     execute_run(store, run["id"], Unavailable())
-    store.update_dataset(dataset["id"], [{**case, "input": "Later edit"}])
+    update_dataset(store, dataset["id"], [{**case, "input": "Later edit"}])
     store.save_prompt("Different setup", "Leave unchanged", "Rules", filters={"strip_formatting": False})
     calls = []
     def complete(self, text, prompt):
-        calls.append((self.settings["model"], text, prompt))
+        calls.append((self.settings["model"], extract_original(text), prompt))
         return "Say."
     monkeypatch.setattr(DeepSeekClient, "complete", complete)
     app = start(tmp_path, monkeypatch)
@@ -153,7 +209,8 @@ def test_retry_uses_saved_model_filters_and_dataset(tmp_path, monkeypatch):
     app.sidebar.radio[0].set_value("Results").run()
     next(b for b in app.button if b.label.startswith("Retry or resume")).click().run()
     assert not app.exception
-    assert calls == [("deepseek-flash", " say ", setup["system_prompt"])]
+    assert len(calls) == 1 and calls[0][:2] == ("deepseek-flash", " say ")
+    assert calls[0][2].startswith(setup["system_prompt"])
     result = store.get("runs", run["id"])["results"][0]
     assert result["scores"]["exact"]
     assert [a["status"] for a in result["attempts"]] == ["error", "success"]

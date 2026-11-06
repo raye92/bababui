@@ -21,23 +21,34 @@ The repository and evaluation `.streamlit/config.toml` files bind the server to
 localhost and disable usage telemetry. If launching from a different working
 directory, add `--server.address 127.0.0.1 --browser.gatherUsageStats false`.
 
-The app starts with no datasets or runs. On first launch it copies the editor's
-two prompt documents into a saved **Editor baseline** version. It does not import
-editor code, read its `.env`, or change its prompts or transcripts. API settings
-come from `evaluation/.env`; explicitly set environment variables take precedence.
-An API key is only needed to run evaluations, not to manage data or view results.
+On first launch, the app copies the editor's two prompt documents into a saved
+**Editor baseline** setup. The apps share
+transcript formatting code and use separate configuration and data.
+Text evaluations require `DEEPSEEK_API_KEY` in `evaluation/.env` or in the
+environment. Environment variables take precedence. You can manage data and
+view results without a key.
 
 ## Workflow
 
-1. **Datasets:** import reviewed pairs or add them manually. Each pair is a
+1. **Datasets:** import original/scoped/WAV groups from uploads or a local folder,
+   or add cases manually with a matching WAV. Each pair is a
    self-contained excerpt. Use **Update** to save edits to the selected dataset. Use **Save as new dataset** at the bottom to create a separate copy, including the current edits. Existing run snapshots remain unchanged.
 2. In **Evaluation Setup**, copy a saved setup, choose a model and filters, and
    edit the instructions and court-reporting rules. Save the result under a new name.
    New setups default to DeepSeek V4 Pro. DeepSeek Flash is also available.
 3. In **Results**, choose a dataset revision, split, and one or more setups.
-   Review the API-call count, then start. Calls run sequentially at temperature zero.
+   Review the separate transcription and editing-call counts, then start.
+   Editing calls run sequentially at temperature zero.
 4. Inspect the original input, filtered model input, raw reply, and graded diff.
    Download the numbered transcript, CSV summaries, or a full run as JSON.
+
+The **Google AI Studio transcription model** dropdown offers
+`gemini-3.5-transcribe` and `gemini-3.8-flash`. The choice is saved with each setup.
+Set `GEMINI_API_KEY` in `evaluation/.env` for new transcriptions. Fully cached
+evaluations do not require a Gemini key.
+
+Use the folder buttons next to the dataset, setup, and run selectors to open
+their storage folders on the machine running Streamlit.
 
 **Strip formatting** starts on. It removes transcript numbering and page formatting
 from the input before the model sees it. The same formatter strips the reply,
@@ -59,6 +70,7 @@ One object per line, with `id`, `input`, and `output` strings:
 {"id":"excerpt-01","input":"     A    yes","output":"     A    Yes.","split":"development"}
 ```
 
+Upload one JSONL file with a matching `<id>.wav` for every case.
 Use JSON escapes for newlines and tabs. `split` is optional and defaults to
 `development`; the other allowed value is `holdout`. IDs must be unique within
 the dataset. Text is UTF-8, must contain non-whitespace characters, and cannot
@@ -67,15 +79,69 @@ are retained in stored snapshots. UTF-8 file BOMs are accepted.
 
 ### Text-file import
 
-Upload both `<id>.input.txt` and `<id>.output.txt` for every excerpt. Every file
-must have a matching partner. Imported text pairs default to development; change
-the split using the pair editor and click Update.
+Each case requires three files:
 
-`fixtures/` contains synthetic examples and import templates. They are not loaded
-automatically and are not reviewed benchmark data. The legacy `example1.json`
-and `example1.jsonl` files are preserved for reference; they are not in this app's
-dataset format. Convert verified source material to the documented format before
-importing it.
+```text
+260901desai.txt
+260901desai_Scoped.txt
+260901desai.wav
+```
+
+The separator before `scoped` must be exactly one underscore, hyphen, period,
+or space. Filenames match case-insensitively. Missing partners, duplicate or
+ambiguous filenames, invalid text, and unreadable WAVs reject the entire import.
+Folder imports scan immediate files only and ignore unrelated file types.
+Every import and manual case requires audio. Imported text groups default to
+development; change the split in the pair editor when needed.
+
+WAVs are validated with FFprobe and decoded with FFmpeg, hashed once on import,
+and copied to `data/audio/<sha256>.wav`. Original source files can then move.
+Managed WAVs are immutable; do not edit them directly. Identical audio reuses
+the same copy. New evaluation checks only that the managed file exists.
+
+### Audio dependencies
+
+Install FFmpeg and FFprobe and make them available on PATH. On Windows:
+
+```powershell
+winget install --id Gyan.FFmpeg --exact
+```
+
+Restart the terminal and Streamlit after installing. Alternatively, set
+`FFMPEG_PATH` and `FFPROBE_PATH` environment variables to the executable paths.
+The Python requirements include Google's SDK. Uploads accept up to 2 GB per
+file; use local-folder import for larger WAVs.
+
+### Audio transcription and reuse
+
+Transcriptions live in `data/transcriptions/<model>/<audio-sha256>/`. Settings
+are fixed: verbatim text without speaker labels or timestamps. Original and
+reviewed text are never sent to the transcription model. Changing editing
+instructions or reimporting the same WAV does not cause retranscription.
+
+Segments last at most 30 minutes. The splitter chooses the last silence of at
+least 0.5 seconds below -35 dB in the 29:30 to 30:00 window. Without suitable
+silence, adjacent segments overlap by three seconds. Assembly removes only
+matching normalized suffix/prefix sequences of 3 to 30 words with more than
+one distinct word. Repeated single-word sequences and other uncertain joins
+retain both texts and are flagged in the result inspector.
+
+Successful segments are saved immediately. Explicit retry reuses them. OS-level
+locks prevent duplicate concurrent transcription and release when a process
+ends. Uploaded segments are deleted in `finally`, including failed requests.
+Pending remote IDs survive interruption for cleanup on a later explicit
+transcription action with credentials. Hard termination can prevent immediate
+cleanup; cached evaluation never requires remote access.
+
+The start summary counts recordings needing transcription, missing segment
+requests across audio models, reusable completed transcriptions, and editing
+prompt calls. A shared audio/model combination is transcribed once across
+setups. Gemini credentials and FFmpeg are required only for new transcription
+work. DeepSeek credentials are required for editing calls.
+
+Editing requests contain instructions and court-reporting rules as the system
+message, plus labeled original text and AI transcription reference sections.
+Filters apply only to original text. Reviewed output is used only for scoring.
 
 ## Scoring
 
@@ -91,7 +157,9 @@ including indentation, trailing newlines, capitalization, and punctuation.
 Two empty strings score 100; one empty string scores zero. Empty imported excerpts
 and empty API responses are rejected rather than treated as successful cases.
 
-- **Baseline:** the same similarity formula applied to unchanged rough input.
+- **Baseline:** similarity between the rough input and reviewed output using the
+  same grading mode as the model output. The slash-marker filters apply only
+  to the input sent to the model.
 - **Improvement:** generated similarity minus baseline, in percentage points.
 - **Exact-match rate:** percentage of cases matching after line-ending normalization.
 - **Normalized similarity:** secondary diagnostic that collapses whitespace and
@@ -113,9 +181,14 @@ guarantee deterministic model responses.
 
 `data/` holds datasets, prompt versions, and runs as UTF-8 JSON with generated
 internal IDs. Writes use an atomic replacement. Run records contain dataset and
-prompt snapshots, SHA-256 hashes, scoring version, settings, responses, timing,
+prompt snapshots, immutable transcription/request references, SHA-256 hashes,
+scoring version, settings, responses, timing,
 and attempt history. Credentials are never included. Back up this folder to
-preserve your work. It and `.env` are excluded from Git.
+preserve your work, including `audio/`, `transcriptions/`, and `requests/`.
+Exact submitted messages are stored once by content hash in `requests/`; run
+records reference them instead of repeating long transcripts. Missing or altered
+referenced artifacts block retry rather than silently regenerating content.
+The data folder and `.env` are excluded from Git.
 
 Each case is marked running before the request and saved immediately afterward.
 Failures remain visible. **Retry or resume** skips successful cases and uses the

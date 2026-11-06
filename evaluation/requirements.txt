@@ -1,4 +1,5 @@
-streamlit>=1.50,<2
+streamlit>=1.66,<2
 rapidfuzz>=3.9,<4
 python-dotenv>=1.0,<2
 pytest>=8,<9
+google-genai>=2.34,<3

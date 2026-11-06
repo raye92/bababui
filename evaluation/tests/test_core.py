@@ -1,3 +1,4 @@
+from evaluation.tests.audio_helpers import save_dataset, update_dataset, original as extract_original, AUDIO, seed
 import json
 
 import pytest
@@ -9,15 +10,15 @@ from evaluation.core import (
 
 
 def cases():
-    return [{"id": "one", "input": "hello", "output": "Hello.", "split": "development"},
-            {"id": "two", "input": "yes", "output": "Yes.", "split": "development"}]
+    return [{"id": "one", "input": "hello", "output": "Hello.", "split": "development", "audio": AUDIO},
+            {"id": "two", "input": "yes", "output": "Yes.", "split": "development", "audio": AUDIO}]
 
 
 def test_import_preserves_unicode_and_whitespace():
     raw = json.dumps({"id": "x", "input": "  café\r\n", "output": "  Café.\n"})
     assert parse_jsonl(raw)[0] == {
         "id": "x", "input": "  café\r\n", "output": "  Café.\n", "split": "development"}
-    assert parse_text_pairs({"x.input.txt": "  café\r\n", "x.output.txt": "  Café.\n"}) == parse_jsonl(raw)
+    assert parse_text_pairs({"x.txt": "  café\r\n", "x_scoped.txt": "  Café.\n"}) == parse_jsonl(raw)
 
 
 @pytest.mark.parametrize("record", [
@@ -36,7 +37,7 @@ def test_duplicate_and_unmatched_imports_rejected():
     with pytest.raises(ValueError, match="Duplicate"):
         validate_cases(cases() + cases())
     with pytest.raises(ValueError, match="partner"):
-        parse_text_pairs({"x.input.txt": "hi"})
+        parse_text_pairs({"x.txt": "hi"})
     with pytest.raises(ValueError, match="line 1"):
         parse_jsonl("{bad}")
     with pytest.raises(ValueError):
@@ -58,7 +59,7 @@ def test_scores_count_formatting_and_baseline():
 
 def setup_run(tmp_path):
     store = Store(tmp_path)
-    dataset = store.save_dataset("Test", cases())
+    dataset = save_dataset(store, "Test", cases())
     prompt = store.save_prompt("v1", "Edit", "Rules")
     run = create_run(store, dataset, prompt, "development", {"model": "fake", "temperature": 0})
     return store, dataset, prompt, run
@@ -70,6 +71,7 @@ class FakeClient:
         self.fail = fail
 
     def complete(self, text, system_prompt):
+        text = extract_original(text)
         self.calls.append(text)
         if self.fail and text == "yes":
             raise RuntimeError("Unavailable")
@@ -83,7 +85,7 @@ def test_snapshots_are_immutable_and_paths_are_generated(tmp_path):
     saved = store.get("runs", run["id"])
     assert saved["dataset"]["cases"][0]["input"] == "hello"
     assert saved["prompt"]["instructions"] == "Edit"
-    newer = store.save_dataset("../../outside", cases())
+    newer = save_dataset(store, "../../outside", cases())
     assert newer["id"] != dataset["id"]
     assert store.get("datasets", dataset["id"])["cases"][0]["input"] == "hello"
     with pytest.raises(ValueError):
@@ -130,7 +132,7 @@ def test_comparisons_and_exports(tmp_path):
 
 def test_holdout_requires_selection(tmp_path):
     store = Store(tmp_path)
-    dataset = store.save_dataset("Held", [dict(cases()[0], split="holdout")])
+    dataset = save_dataset(store, "Held", [dict(cases()[0], split="holdout")])
     prompt = store.save_prompt("v1", "Edit", "Rules")
     with pytest.raises(ValueError, match="No cases"):
         create_run(store, dataset, prompt, "development", {})
@@ -174,7 +176,7 @@ def test_completed_case_is_saved_before_next_request(tmp_path):
     store, _, _, run = setup_run(tmp_path)
     class Inspecting(FakeClient):
         def complete(self, text, system_prompt):
-            if text == "yes":
+            if extract_original(text) == "yes":
                 saved = store.get("runs", run["id"])
                 assert saved["results"][0]["response"] == "Hello."
                 assert saved["results"][1]["status"] == "running"
@@ -200,13 +202,13 @@ def test_dataset_update_preserves_saved_run_snapshot(tmp_path):
     store, dataset, _, run = setup_run(tmp_path)
     changed = cases()
     changed[0]["output"] = "Hello again."
-    updated = store.update_dataset(dataset["id"], changed)
+    updated = update_dataset(store, dataset["id"], changed)
     assert updated["id"] == dataset["id"]
     assert updated["hash"] != dataset["hash"]
     assert len(store.list("datasets")) == 1
     assert store.get("runs", run["id"])["dataset"]["cases"][0]["output"] == "Hello."
     with pytest.raises(ValueError):
-        store.update_dataset(dataset["id"], [])
+        update_dataset(store, dataset["id"], [])
     assert store.get("datasets", dataset["id"])["cases"] == changed
 
 
@@ -219,14 +221,14 @@ def test_dataset_update_preserves_saved_run_snapshot(tmp_path):
 def test_marker_filters_only_change_the_request(tmp_path, narrow, broad, expected):
     store = Store(tmp_path)
     original = "A /#*abc\tkeep  /xyz\nB"
-    dataset = store.save_dataset("Markers", [{"id": "x", "input": original, "output": original}])
+    dataset = save_dataset(store, "Markers", [{"id": "x", "input": original, "output": original}])
     setup = store.save_prompt("Filters", "Edit", "Rules", filters={
         "strip_formatting": False, "remove_hash_marker": narrow, "remove_slash_marker": broad})
     run = create_run(store, dataset, setup, "development", {})
     class Echo:
         def complete(self, text, prompt):
-            assert text == expected
-            return text
+            assert extract_original(text) == expected
+            return extract_original(text)
     result = execute_run(store, run["id"], Echo())["results"][0]
     assert result["response"] == expected
     assert result["scores"] == score(original, expected, original)
@@ -241,12 +243,12 @@ def test_grading_precedes_numbering_and_covers_multiple_pages(tmp_path, strip):
     numbered, pages = formatter.apply_formatting(plain)
     assert pages == 2 and "\f" in numbered
     store = Store(tmp_path)
-    dataset = store.save_dataset("Numbered", [{"id": "x", "input": numbered, "output": numbered}])
+    dataset = save_dataset(store, "Numbered", [{"id": "x", "input": numbered, "output": numbered}])
     setup = store.save_prompt("Numbering", "Edit", "Rules", filters={"strip_formatting": strip})
     run = create_run(store, dataset, setup, "development", {})
     class PlainReply:
         def complete(self, text, prompt):
-            assert text == (plain if strip else numbered)
+            assert extract_original(text) == (plain if strip else numbered)
             return plain
     saved = execute_run(store, run["id"], PlainReply())
     result = saved["results"][0]
