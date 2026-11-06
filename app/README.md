@@ -24,6 +24,7 @@ From the repository root, use `python app/src/main.py`. From another directory, 
 ## Files
 
 - `src/`: Python app code, prompt documents, and local transcript data.
+- `../transcript_formatting.py`: transcript formatting code shared with the evaluation app.
 - `src/original.txt` and `src/incoming.txt`: the editor's working transcripts.
 - `src/original/` and `src/stripped/`: batch formatting input and output.
 - `../evaluation/`: the standalone transcript evaluation app.
