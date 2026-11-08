@@ -190,8 +190,12 @@ def setup_page(store):
     st.subheader("Prompt")
     instructions = st.text_area("Instructions", height=280, key="instructions_edit")
     rules = st.text_area("Court-reporting rules", height=280, key="rules_edit")
-    with st.expander("Combined system prompt preview"):
+    with st.expander("Combined request preview"):
+        st.caption("System message: instructions and rules")
         st.code(instructions + SEPARATOR + rules, language=None)
+        st.caption("User message: placeholders are filled for each case at run time")
+        st.code("# AI transcription reference\n[AI transcription of the case audio]\n\n"
+                "# Original transcript\n[Original input text after setup filters]", language=None)
     name = st.text_input("New setup name", key="version_name")
     if st.button("Save new setup", key="save_version"):
         saved = store.save_prompt(name, instructions, rules, model=model,

@@ -114,7 +114,7 @@ def test_payload_references_and_missing_artifact_do_not_regenerate(tmp_path):
     result = saved["results"][0]
     assert "model_input" not in result
     assert "Audio reference" not in json.dumps(saved)
-    assert resolve(tmp_path, result["request"])["user"].endswith("Audio reference")
+    assert resolve(tmp_path, result["request"])["user"] == "# AI transcription reference\nAudio reference\n\n# Original transcript\nrough"
     other = execute_run(store, create_run(store, dataset, setup, "development", {})["id"], Fake())
     assert other["results"][0]["request"] == result["request"]
     (tmp_path / result["transcription"]["path"]).unlink()

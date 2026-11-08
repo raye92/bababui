@@ -35,4 +35,4 @@ def update_dataset(store, identifier, cases):
 
 
 def original(text):
-    return text.removeprefix("# Original transcript\n").split("\n\n# AI transcription reference\n")[0]
+    return text.split("\n\n# Original transcript\n", 1)[1]

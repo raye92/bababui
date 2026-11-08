@@ -139,9 +139,16 @@ prompt calls. A shared audio/model combination is transcribed once across
 setups. Gemini credentials and FFmpeg are required only for new transcription
 work. DeepSeek credentials are required for editing calls.
 
-Editing requests contain instructions and court-reporting rules as the system
-message, plus labeled original text and AI transcription reference sections.
-Filters apply only to original text. Reviewed output is used only for scoring.
+Editing requests send instructions and court-reporting rules as the system
+message. The user message contains the labeled AI transcription reference first,
+then the labeled original transcript to revise. Both transcripts are data, not
+instructions. The original supplies the structure; the AI transcription is an
+imperfect audio reference to help revisions. Filters apply only to original
+text. Reviewed output is used only for scoring.
+
+Saved request snapshots remain unchanged. Retrying an existing request sends its
+saved messages, including the previous section order. Newly built requests use
+the reference-first order.
 
 ## Scoring
 
@@ -213,3 +220,17 @@ evaluation/.venv/Scripts/python.exe -m pytest evaluation/tests -q
 Tests cover scoring, validation, snapshots, retries, imports, exports, API payloads,
 and Streamlit screens. Network calls use fake transports; tests do not consume API
 credits. No reviewed transcript data or API key is required.
+
+The default Gemini transport follows the [AI Studio transcription documentation](https://aistudio.google.com/docs/transcribe):
+Files API upload, `gemini-3.5-transcribe` through the Interactions API, explicit
+verbatim mode, and transcript extraction from `output_text`. Segments are at most
+30 minutes, within the documented one-hour limit for plain transcription.
+Tests also cover SDK payload serialization, incomplete responses, remote cleanup,
+cache reuse, message ordering, and unchanged historical requests on retry.
+
+Passing local tests does not verify live credentials, model access, or accuracy
+on real recordings. A separate live acceptance check requires an explicitly
+selected short recording and makes paid Gemini and DeepSeek calls. Confirm a
+nonempty transcription, reference-first revision request, successful revision,
+and deletion of the uploaded audio. Keep diagnostic artifacts in a temporary
+folder outside `evaluation/data`. No live check was performed for this change.
