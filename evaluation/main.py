@@ -16,7 +16,7 @@ from evaluation.core import (Store, SEPARATOR, parse_jsonl, create_run,
                              execute_run, summary, compare_runs, comparison_key,
                              comparison_csv, visible_diff, validate_cases, valid_text)
 from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, MODELS,
-                               formatted_transcript, grading_text)
+                               expected_for_grading, formatted_transcript, grading_text)
 
 from evaluation.imports import import_files, folder_files
 from evaluation.storage import resolve
@@ -165,7 +165,7 @@ def setup_page(store):
     if st.session_state.get("prompt_source") != selected or "setup_model" not in st.session_state:
         st.session_state["setup_model"] = source.get("model", DEFAULT_MODEL)
         st.session_state["transcription_model"] = source.get("transcription_model", DEFAULT_AUDIO_MODEL)
-        st.session_state.update(source.get("filters", DEFAULT_FILTERS))
+        st.session_state.update({**DEFAULT_FILTERS, **source.get("filters", {})})
         st.session_state["instructions_edit"] = source["instructions"]
         st.session_state["rules_edit"] = source["rules"]
         st.session_state["version_name"] = f"{source['name']} (copy)" if selected else ""
@@ -185,6 +185,8 @@ def setup_page(store):
                        help="Remove input tokens such as /#*abc. Keep the surrounding whitespace.")
     broad = st.toggle("Remove `/…`", key="remove_slash_marker",
                       help="Remove all slash tokens, including /xyz and /#*abc, from the model input.")
+    heading = st.toggle("Remove heading (notice info)", key="remove_heading",
+                        help="Grade the expected text after ‘transcript of the proceeding.’ when the marker is clear.")
     st.subheader("Prompt")
     instructions = st.text_area("Instructions", height=280, key="instructions_edit")
     rules = st.text_area("Court-reporting rules", height=280, key="rules_edit")
@@ -194,7 +196,8 @@ def setup_page(store):
     if st.button("Save new setup", key="save_version"):
         saved = store.save_prompt(name, instructions, rules, model=model,
                                   transcription_model=st.session_state["transcription_model"], filters={
-            "strip_formatting": strip, "remove_hash_marker": narrow, "remove_slash_marker": broad})
+            "strip_formatting": strip, "remove_hash_marker": narrow, "remove_slash_marker": broad,
+            "remove_heading": heading})
         st.session_state["saved_setup"] = saved["id"]
         st.rerun()
 
@@ -219,6 +222,7 @@ def results_page(store):
     st.header("Results")
     columns = {"prompt": "Setup", "model": "Model", "audio_model": "Audio model", "grading": "Grading mode",
                "remove_hash_marker": "Remove /#*…", "remove_slash_marker": "Remove /…",
+               "remove_heading": "Remove heading (notice info)",
                "similarity": "Similarity (%)", "baseline": "Baseline (%)", "improvement": "Gain (pp)",
                "normalized_similarity": "Normalized (%)", "exact_match_rate": "Exact match (%)"}
     config = load_config(ROOT)
@@ -272,11 +276,12 @@ def results_page(store):
     info = summary(run)
     st.caption(f"{info['model']} · {info['audio_model']} · {info['grading']} · "
                f"Remove `/#*…` {'on' if filters['remove_hash_marker'] else 'off'} · "
-               f"Remove `/…` {'on' if filters['remove_slash_marker'] else 'off'}")
+               f"Remove `/…` {'on' if filters['remove_slash_marker'] else 'off'} · "
+               f"Remove heading {'on' if info['remove_heading'] else 'off'}")
     st.subheader("Compare compatible runs")
     compatible = [r for r in runs if comparison_key(r) == comparison_key(run) and summary(r)["complete"]]
     if not summary(run)["complete"] or len(compatible) < 2:
-        st.info("To compare, choose two completed runs with the same dataset snapshot, cases, and grading mode.")
+        st.info("To compare, choose completed runs with the same dataset snapshot, cases, and grading settings.")
     else:
         st.dataframe(sorted([summary(r) for r in compatible], key=lambda row: row["similarity"], reverse=True),
                      column_config=columns, hide_index=True)
@@ -307,13 +312,17 @@ def results_page(store):
             execute_with_progress(store, run, config, retry=True, failures={})
             st.rerun()
     results = {r["case_id"]: r for r in run["results"]}
+    untrimmed = [f"{r['case_id']} ({r['heading_warning']})" for r in results.values() if r.get("heading_warning")]
+    if untrimmed:
+        st.warning("Expected output kept in full for " + ", ".join(untrimmed))
     chosen_case = st.selectbox("Inspect case", list(results), key=f"inspect_case_{run['id']}")
     result = results[chosen_case]
     case = next(c for c in run["dataset"]["cases"] if c["id"] == chosen_case)
     if result.get("error"):
         st.error(result["error"])
     if result.get("scores"):
-        settings = {key: info[key] for key in ("prompt", "model", "audio_model", "grading", "remove_hash_marker", "remove_slash_marker")}
+        settings = {key: info[key] for key in ("prompt", "model", "audio_model", "grading", "remove_hash_marker",
+                                              "remove_slash_marker", "remove_heading")}
         st.dataframe([{**settings, **result["scores"]}], column_config=columns, hide_index=True)
     for column, title, text in zip(st.columns(3), ("Rough input", "Expected output", "Generated output"),
                                   (case["input"], case["output"], result.get("response", "No successful response yet."))):
@@ -339,12 +348,13 @@ def results_page(store):
                 numbered = formatted_transcript(result["response"])
             st.code(numbered, language=None)
             st.download_button("Download numbered transcript", numbered, f"transcript-{run['id'][:8]}.txt", "text/plain")
+        graded_expected, _ = expected_for_grading(case["output"], filters)
         st.caption(f"Graded diff ({info['grading']}). · = space, → = tab, ↵ = newline.")
         st.html("<style>.transcript-diff{font:13px monospace;overflow:auto;max-height:350px;color:#18212b;background:white}"
                 ".transcript-diff table{border-collapse:collapse}.transcript-diff td{padding:3px}"
                 ".transcript-diff .diff_add{background:#c6f6d5}.transcript-diff .diff_sub{background:#fed7d7}"
                 ".transcript-diff .diff_chg{background:#fefcbf}</style><div class='transcript-diff'>"
-                + visible_diff(grading_text(case["output"], filters["strip_formatting"]),
+                + visible_diff(graded_expected,
                                grading_text(result["response"], filters["strip_formatting"])) + "</div>")
     with st.expander("Attempt history"):
         st.json(result["attempts"])

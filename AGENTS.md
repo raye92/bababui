@@ -5,6 +5,7 @@
 - Do not create additional worktrees unless I explicitly ask.
 - Do not use a branching or worktree skill as permission to override these preferences.
 - Preserve existing uncommitted changes. Do not commit or push unless I ask.
+- When writing a commit message, match the style of recent commit messages in this repository.
 
 # Run the apps
 

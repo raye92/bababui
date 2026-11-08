@@ -53,6 +53,53 @@ def test_scores_count_formatting_and_baseline():
     assert score("a\r\nb", "a\nb", "a\nb")["exact"]
     assert score("x", "  Hi.\n", "Hi.")["normalized_similarity"] == 100
     assert score("x", "  Hi.\n", "Hi.")["similarity"] == 50
+
+
+@pytest.mark.parametrize(("output", "body", "warning"), [
+    ("Notice\r\n    9    transcript of the proceeding.\r\n\r\n   10\r\n\r\n   11    EXAMINATION\r\n",
+     "   11    EXAMINATION\r\n", None),
+    ("Notice\n 9\t Transcript   of the proceeding.\n10\n11    THE COURT: Proceed.\n12    EXAMINATION",
+     "11    THE COURT: Proceed.\n12    EXAMINATION", None),
+    ("Notice\nTRANSCRIPT OF THE PROCEEDING.\n\n42\n", "42\n", None),
+    ("They prepared a transcript of the proceeding.\nBody", None, "missing"),
+    ("transcript of the proceeding.\nBody\ntranscript of the proceeding.\nEnd", None, "repeated"),
+    (" 9    transcript of the proceeding.\n 10\n", None, "no proceeding text"),
+])
+def test_expected_heading_detection(output, body, warning):
+    from evaluation.setups import expected_for_grading
+
+    expected, notice = expected_for_grading(output, {"strip_formatting": False, "remove_heading": True})
+    assert expected == (output if body is None else body)
+    if warning:
+        assert warning in notice
+    else:
+        assert notice is None
+
+
+def test_heading_filter_scores_full_reply_and_flags_untrimmed_cases(tmp_path):
+    store = Store(tmp_path)
+    output = "Notice\n    9    transcript of the proceeding.\n   10\n   11    Hello."
+    dataset = save_dataset(store, "Heading", [
+        {"id": "one", "input": "Hello.", "output": output},
+        {"id": "two", "input": "Yes.", "output": "Yes."},
+    ])
+    prompt = store.save_prompt("Trim", "Edit", "Rules", filters={"remove_heading": True})
+    run = create_run(store, dataset, prompt, "development", {})
+
+    class Reply:
+        def complete(self, text, system_prompt):
+            assert "omit prefatory notice information" in system_prompt
+            return "Notice\nHello." if extract_original(text) == "Hello." else "Yes."
+
+    graded = execute_run(store, run["id"], Reply())
+    trimmed, flagged = graded["results"]
+    assert trimmed["scores"] == score("Hello.", "Notice\nHello.", "Hello.")
+    assert flagged["scores"]["exact"] and "missing" in flagged["heading_warning"]
+    assert graded["dataset"]["cases"][0]["output"] == output
+    old = create_run(store, dataset, store.save_prompt("Old", "Edit", "Rules"), "development", {})
+    old["prompt"]["filters"].pop("remove_heading")
+    with pytest.raises(ValueError, match="heading filter"):
+        compare_runs(old, graded)
     assert score("x", "", "abc")["similarity"] == 0
     assert score("x", "", "")["similarity"] == 100
 
@@ -263,7 +310,8 @@ def test_legacy_history_and_grading_mode_compatibility(tmp_path):
     from copy import deepcopy
 
     store, dataset, _, _ = setup_run(tmp_path)
-    setup = store.save_prompt("Strict", "Edit", "Rules", filters={"strip_formatting": False})
+    setup = store.save_prompt("Strict", "Edit", "Rules",
+                              filters={"strip_formatting": False, "remove_heading": False})
     strict = create_run(store, dataset, setup, "development", {})
     strict = execute_run(store, strict["id"], FakeClient())
     old = deepcopy(strict)

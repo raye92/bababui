@@ -42,9 +42,10 @@ def test_manual_pair_and_prompt_version(tmp_path, monkeypatch):
     assert Store(tmp_path).list("datasets")[0]["cases"][0]["output"] == "Hello."
     app.sidebar.radio[0].set_value("Evaluation Setup").run()
     assert app.selectbox(key="setup_model").value == "deepseek-v4-pro"
-    assert [t.value for t in app.toggle] == [True, True, False]
+    assert app.toggle(key="remove_heading").value is True
     app.selectbox(key="setup_model").set_value("deepseek-flash")
     app.toggle(key="remove_slash_marker").set_value(True)
+    app.toggle(key="remove_heading").set_value(False)
     app.text_input(key="version_name").set_value("My v2")
     app.text_area(key="instructions_edit").set_value("Edit punctuation only.")
     app.button(key="save_version").click().run()
@@ -53,10 +54,12 @@ def test_manual_pair_and_prompt_version(tmp_path, monkeypatch):
     assert len(setups) == 2
     saved = setups[0]
     assert saved["model"] == "deepseek-flash"
-    assert saved["filters"] == {"strip_formatting": True, "remove_hash_marker": True, "remove_slash_marker": True}
+    assert saved["filters"] == {"strip_formatting": True, "remove_hash_marker": True, "remove_slash_marker": True,
+                                "remove_heading": False}
     app.selectbox(key="copy_setup").set_value(saved["id"]).run()
     assert app.selectbox(key="setup_model").value == "deepseek-flash"
     assert app.toggle(key="remove_slash_marker").value
+    assert app.toggle(key="remove_heading").value is False
     assert app.text_area(key="instructions_edit").value == "Edit punctuation only."
     app.text_input(key="version_name").set_value("Strict grading")
     app.toggle(key="strip_formatting").set_value(False)
