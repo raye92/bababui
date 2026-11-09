@@ -88,7 +88,7 @@ def test_heading_filter_scores_full_reply_and_flags_untrimmed_cases(tmp_path):
 
     class Reply:
         def complete(self, text, system_prompt):
-            assert "omit prefatory notice information" in system_prompt
+            assert system_prompt == prompt["system_prompt"]
             return "Notice\nHello." if extract_original(text) == "Hello." else "Yes."
 
     graded = execute_run(store, run["id"], Reply())

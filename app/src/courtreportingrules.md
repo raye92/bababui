@@ -844,7 +844,7 @@ RIGHT:
      Q    Okay.
      MS. MADSEN:  Counsel, do you stipulate to waive the
 admonitions?
-     THE WITNESS:  I'm fine to waive.
+     MR. SIMMONS:  I'm fine to waive.
 ```
 
 The key test: If the Q line is addressed to someone other than the witness, it must be reformatted as a colloquy line with the attorney's speaker label.
@@ -961,91 +961,3 @@ is it in?
 (This is fine — "Okay" leads directly into the next question to the same witness on the same topic.)
 
 ---
-
-# Implementation Priority for AI Court Reporter
-
-## Phase 0: Structural Rules (HIGHEST PRIORITY)
-These rules account for ~85% of remaining errors. Implement with LLM + examples:
-
-- **Rule 100: Paragraph breaks within testimony** — single highest-impact rule
-- **Rule 101: Colloquy vs. Q/A mode switching**
-- **Rule 102: Interrupted Q/A dash convention**
-- **Rule 103: Transcript section headers** (can be partially deterministic)
-- **Rule 105: Standalone fragment paragraph breaks**
-
-## Phase 1: Deterministic Rules
-Implement with regex/string normalization:
-
-- Rules 94–97: Spacing
-- Rule 103: Section headers (placement is deterministic once identified)
-- Rules 64–73: Dates, time, money, addresses, measurements, percentages, fractions, decimals, numbered references
-- Rule 25: Speaker label formatting (colon, spacing, caps)
-
-## Phase 2: Dictionary-Based Rules
-Use a style dictionary/lexicon:
-
-- Rule 45: Legal citations and foreign expressions
-- Rule 57: Brand/product names
-- Rules 76–78: Abbreviations
-- Rules 85–90: Prefixes, suffixes, compound words (use reference list)
-
-## Phase 3: LLM/Reviewer Rules
-Use LLM suggestions plus human review:
-
-- Rules 8–13: Nonessential/interrupting/contrasting phrases
-- Rules 26–34: Interruptions and question structure
-- Rules 79–81: Possessive vs. descriptive
-- Rules 91–93: Compound adjective judgment
-- Rules 98–99: Yes/no punctuation (sometimes requires context)
-- Rule 104: Preserving witness phrasing (anti-overcorrection)
-
-# Suggested Code Structure
-
-```text
-src/
-  transcript-reviewer/
-    components/
-      TranscriptReviewer.tsx
-      TranscriptPane.tsx
-      SuggestionCard.tsx
-      InlineDiff.tsx
-    hooks/
-      useTranscriptReviewer.ts
-    data/
-      mockTranscriptData.ts
-      courtReportingRules.ts
-    rules/
-      spacingRules.ts
-      numberRules.ts
-      transcriptFormatRules.ts
-      yesNoRules.ts
-      paragraphBreakRules.ts
-      colloquyRules.ts
-    utils/
-      diffUtils.ts
-      transcriptLineUtils.ts
-```
-
-# Rule Metadata Shape
-
-```ts
-export interface CourtReportingRule {
-  id: string;
-  title: string;
-  category:
-    | 'punctuation'
-    | 'spacing'
-    | 'numbers'
-    | 'capitalization'
-    | 'quotations'
-    | 'transcript_formatting'
-    | 'hyphenation'
-    | 'apostrophes'
-    | 'semantic'
-    | 'deposition_structure';
-  automation: 'deterministic' | 'dictionary' | 'llm_review';
-  priority: 'low' | 'medium' | 'high' | 'critical';
-  summary: string;
-  examples: string[];
-}
-```
