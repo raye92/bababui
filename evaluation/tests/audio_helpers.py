@@ -4,7 +4,7 @@ import io
 import wave
 
 from evaluation.storage import write_json
-from evaluation.transcription import AUDIO_MODELS
+from evaluation.transcription import AUDIO_MODELS, Transcriptions
 
 stream = io.BytesIO()
 with wave.open(stream, "wb") as handle:
@@ -20,7 +20,7 @@ def seed(store):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(WAV)
     for model in AUDIO_MODELS:
-        write_json(store.root / "transcriptions" / model / SHA / "complete.json",
+        write_json(Transcriptions(store).directory(AUDIO, model) / "complete.json",
                    {"text": "Audio reference", "model": model, "audio_sha256": SHA,
                     "boundary_flags": [], "warnings": []})
 

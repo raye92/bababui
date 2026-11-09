@@ -141,7 +141,8 @@ def test_uncached_counts_and_gemini_key_gate(tmp_path, monkeypatch):
     store = Store(tmp_path)
     dataset = save_dataset(store, "Test", [{"id": "x", "input": "hi", "output": "Hi"}])
     store.save_prompt("One", "Edit", "Rules")
-    cache = store.root / "transcriptions" / "gemini-3.5-transcribe" / dataset["cases"][0]["audio"]["sha256"] / "complete.json"
+    from evaluation.transcription import Transcriptions
+    cache = Transcriptions(store).directory(dataset["cases"][0]["audio"], "gemini-3.5-transcribe") / "complete.json"
     cache.unlink()
     app = start(tmp_path, monkeypatch)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "fake")

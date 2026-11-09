@@ -15,26 +15,27 @@ def test_config_uses_own_env_file(tmp_path, monkeypatch):
     assert config["api_key"] == "test-secret"
     assert config["model"] == "chosen"
     assert config["temperature"] == 0
+    assert config["timeout_seconds"] == 180
     assert "api_key" not in DeepSeekClient(config).settings
 
 
 def test_request_contract_and_response():
     received = {}
     def transport(request, timeout):
+        assert timeout == 180
         received.update(json.loads(request.data))
         return io.BytesIO(json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "Hello."}}]}).encode())
     client = DeepSeekClient({"api_key": "secret", "model": "fake", "base_url": "https://example.com", "temperature": 0}, opener=transport)
     assert client.complete("hello", "Edit") == "Hello."
-    assert received == {"model": "fake", "temperature": 0, "stream": False,
+    assert received == {"model": "fake", "temperature": 0, "stream": False, "max_tokens": 16384,
                         "messages": [{"role": "system", "content": "Edit"}, {"role": "user", "content": "hello"}]}
 
 
 @pytest.mark.parametrize("body", [
     {"choices": []},
-    {"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]},
     {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
 ])
-def test_invalid_or_truncated_response_is_failure(body):
+def test_invalid_or_empty_response_is_failure(body):
     client = DeepSeekClient({"api_key": "secret", "model": "fake", "base_url": "https://example.com"},
                             opener=lambda *a, **k: io.BytesIO(json.dumps(body).encode()))
     with pytest.raises(ValueError):
@@ -90,3 +91,38 @@ def test_revision_payload_order_and_legacy_retry(tmp_path):
     assert (tmp_path / reference["path"]).read_bytes() == before
     assert received[1]["messages"] == [{"role": "system", "content": legacy["system"]},
                                         {"role": "user", "content": legacy["user"]}]
+
+@pytest.mark.parametrize('reason', ['length', 'content_filter', None, 'unexpected'])
+def test_nonstop_text_is_accepted_and_saved(tmp_path, reason):
+    from evaluation.core import Store, create_run, execute_run
+    from evaluation.storage import resolve
+    from evaluation.tests.audio_helpers import save_dataset
+    store = Store(tmp_path)
+    dataset = save_dataset(store, 'Test', [{'id': 'x', 'input': 'rough', 'output': 'Partial text'}])
+    setup = store.save_prompt('Edit', 'Instructions', 'Rules')
+    body = {'choices': [{'finish_reason': reason, 'message': {'content': 'Partial text'}}]}
+    client = DeepSeekClient({'api_key': 'fake'}, opener=lambda *a, **k: io.BytesIO(json.dumps(body).encode()))
+    run = create_run(store, dataset, setup, 'development', client.settings)
+    saved = execute_run(store, run['id'], client)
+    result = saved['results'][0]
+    assert result['status'] == 'success'
+    assert result['response'] == 'Partial text'
+    assert result['finish_reason'] == reason
+    assert str(reason) in result['response_warning']
+    assert resolve(tmp_path, result['attempts'][0]['api_response']) == body
+
+
+def test_empty_response_preserves_provider_reply(tmp_path):
+    from evaluation.core import Store, create_run, execute_run
+    from evaluation.storage import resolve
+    from evaluation.tests.audio_helpers import save_dataset
+    store = Store(tmp_path)
+    dataset = save_dataset(store, 'Test', [{'id': 'x', 'input': 'rough', 'output': 'expected'}])
+    setup = store.save_prompt('Edit', 'Instructions', 'Rules')
+    body = {'choices': [{'finish_reason': 'length', 'message': {'content': '', 'reasoning_content': 'provider detail'}}]}
+    client = DeepSeekClient({'api_key': 'fake'}, opener=lambda *a, **k: io.BytesIO(json.dumps(body).encode()))
+    run = create_run(store, dataset, setup, 'development', client.settings)
+    result = execute_run(store, run['id'], client)['results'][0]
+    assert result['status'] == 'error'
+    assert 'length' in result['error']
+    assert resolve(tmp_path, result['api_response']) == body

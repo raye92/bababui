@@ -27,16 +27,21 @@ class DeepSeekClient:
         self.api_key = config.get("api_key", "")
         self.settings = {"base_url": config.get("base_url", "https://api.deepseek.com"),
                          "model": config.get("model", DEFAULT_MODEL),
-                         "temperature": 0, "timeout_seconds": config.get("timeout_seconds", 180)}
+                         "temperature": 0, "timeout_seconds": config.get("timeout_seconds", 180),
+                         "max_tokens": config.get("max_tokens", 16384)}
         if "thinking" in config:
             self.settings["thinking"] = config["thinking"]
         self.opener = opener or urllib.request.urlopen
+        self.last_response = None
+        self.finish_reason = None
 
     @property
     def ready(self):
         return bool(self.api_key.strip()) and self.api_key != "your_deepseek_api_key_here"
 
     def complete(self, text, system_prompt):
+        self.last_response = None
+        self.finish_reason = None
         if not self.ready:
             raise ValueError("Set DEEPSEEK_API_KEY in evaluation/.env.")
         endpoint = self.settings["base_url"].rstrip("/") + "/chat/completions"
@@ -44,6 +49,7 @@ class DeepSeekClient:
         if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ValueError("DEEPSEEK_BASE_URL must be an HTTPS URL without credentials, query, or fragment.")
         payload = {"model": self.settings["model"], "temperature": 0, "stream": False,
+                   "max_tokens": self.settings["max_tokens"],
                    "messages": [{"role": "system", "content": system_prompt},
                                 {"role": "user", "content": text}]}
         if "thinking" in self.settings:
@@ -60,13 +66,13 @@ class DeepSeekClient:
             raise ValueError("Could not reach DeepSeek or the request timed out. Retry explicitly when ready.") from None
         except (ValueError, UnicodeError):
             raise ValueError("DeepSeek returned invalid JSON.") from None
+        self.last_response = data
         try:
             choice = data["choices"][0]
-            if choice.get("finish_reason") != "stop":
-                raise ValueError("DeepSeek did not finish normally; the response may be truncated.")
+            self.finish_reason = choice.get("finish_reason")
             text = choice["message"]["content"]
             if not isinstance(text, str) or not text.strip():
-                raise ValueError("DeepSeek returned an empty response.")
+                raise ValueError(f"DeepSeek returned an empty or non-text response (finish_reason={self.finish_reason!r}).")
             return text
         except (KeyError, IndexError, TypeError):
             raise ValueError("DeepSeek returned an unexpected response structure.") from None

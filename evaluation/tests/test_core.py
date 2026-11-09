@@ -363,3 +363,26 @@ def test_numbered_export_only_breaks_between_pages(length):
     assert numbered.count("\f") == pages - 1
     assert numbered.endswith(f"{pages:>72}")
     assert formatter.strip_formatting(numbered) == plain
+
+def test_api_times_persist_on_failure_and_retry(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    dataset = save_dataset(store, 'Timing', cases()[:1])
+    setup = store.save_prompt('Edit', 'Edit', 'Rules')
+    run = create_run(store, dataset, setup, 'development', {})
+    assert summary(run)['deepseek_seconds'] is None
+    clock = [0.0]
+    monkeypatch.setattr('evaluation.core.time.perf_counter', lambda: clock[0])
+    class Client:
+        def complete(self, *args):
+            clock[0] += 12.5
+            raise ValueError('unfinished')
+    failed = execute_run(store, run['id'], Client())
+    assert summary(failed)['deepseek_seconds'] == 12.5
+    assert summary(failed)['transcription_seconds'] == 0
+    class Success:
+        def complete(self, *args):
+            clock[0] += 4
+            return 'Hello.'
+    retried = execute_run(store, run['id'], Success(), retry=True)
+    assert summary(retried)['deepseek_seconds'] == 16.5
+    assert retried['results'][0]['attempts'][-1]['deepseek_seconds'] == 4

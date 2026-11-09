@@ -225,6 +225,8 @@ def execute_with_progress(store, run, config, retry=False, failures=None):
 def results_page(store):
     st.header("Results")
     columns = {"prompt": "Setup", "model": "Model", "audio_model": "Audio model", "grading": "Grading mode",
+               "transcription_seconds": st.column_config.NumberColumn("Transcription time (s)", format="%.2f"),
+               "deepseek_seconds": st.column_config.NumberColumn("DeepSeek time (s)", format="%.2f"),
                "remove_hash_marker": "Remove /#*…", "remove_slash_marker": "Remove /…",
                "remove_heading": "Remove heading (notice info)",
                "similarity": "Similarity (%)", "baseline": "Baseline (%)", "improvement": "Gain (pp)",
@@ -299,6 +301,7 @@ def results_page(store):
 
     st.subheader("Run history")
     st.caption("Similarity is not a probability of correctness. Incomplete runs are excluded from ranking.")
+    st.caption("Times total API calls across cases and retries. Cached transcription adds 0 seconds. Older timings are unavailable.")
     st.dataframe([summary(r) for r in runs], column_config=columns, hide_index=True)
     st.download_button("Export run summaries CSV", comparison_csv([summary(r) for r in runs]),
                        "run-summaries.csv", "text/csv")
@@ -324,14 +327,17 @@ def results_page(store):
     case = next(c for c in run["dataset"]["cases"] if c["id"] == chosen_case)
     if result.get("error"):
         st.error(result["error"])
+    if result.get("response_warning"):
+        st.warning(result["response_warning"])
+    elif "finish_reason" in result:
+        st.caption(f"DeepSeek finish_reason={result['finish_reason']!r}")
+    if "api_response" in result:
+        with st.expander("Raw DeepSeek response"):
+            st.json(resolve(store.root, result["api_response"]))
     if result.get("scores"):
         settings = {key: info[key] for key in ("prompt", "model", "audio_model", "grading", "remove_hash_marker",
                                               "remove_slash_marker", "remove_heading")}
         st.dataframe([{**settings, **result["scores"]}], column_config=columns, hide_index=True)
-    for column, title, text in zip(st.columns(3), ("Rough input", "Expected output", "Generated output"),
-                                  (case["input"], case["output"], result.get("response", "No successful response yet."))):
-        column.markdown(f"**{title}**")
-        column.code(text, language=None)
     if "transcription" in result:
         with st.expander("AI transcription reference"):
             transcription = resolve(store.root, result["transcription"])
@@ -362,6 +368,12 @@ def results_page(store):
                                grading_text(result["response"], filters["strip_formatting"])) + "</div>")
     with st.expander("Attempt history"):
         st.json(result["attempts"])
+    displayed_expected, _ = expected_for_grading(case["output"], filters)
+    for column, title, text in zip(st.columns(3), ("Rough input", "Expected output", "Generated output"),
+                                  (grading_text(case["input"], filters["strip_formatting"]), displayed_expected,
+                                   grading_text(result.get("response", "No response text available."), filters["strip_formatting"]))):
+        column.markdown(f"**{title}**")
+        column.code(text, language=None)
 
 
 

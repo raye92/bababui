@@ -193,7 +193,20 @@ def test_gemini_contract_and_cleanup(tmp_path, status, text, success):
         assert events == ["files/upload"]
         assert payloads[0]["model"] == model and payloads[0]["store"] is False
         if model == AUDIO_MODELS[0]:
-            assert payloads[0]["generation_config"] == {"transcription_config": {"mode": {"type": "verbatim"}}}
+            assert payloads[0]["generation_config"] == {"transcription_config": {"mode": {"type": "verbatim", "diarization_mode": "speaker"}}}
+        else:
+            assert "Speaker 1" in payloads[0]["input"][0]["text"]
+
+
+def test_unlabeled_cache_is_preserved_but_not_reused(tmp_path):
+    from evaluation.core import Store
+    from evaluation.transcription import Transcriptions, DEFAULT_AUDIO_MODEL
+    from evaluation.tests.audio_helpers import AUDIO
+    from evaluation.storage import write_json
+    old = tmp_path / "transcriptions" / DEFAULT_AUDIO_MODEL / AUDIO["sha256"] / "complete.json"
+    write_json(old, {"text": "Old unlabeled speech"})
+    assert Transcriptions(Store(tmp_path)).cached(AUDIO, DEFAULT_AUDIO_MODEL) is None
+    assert old.exists()
 
 
 def test_advisory_lock_released_when_worker_is_killed(tmp_path):
@@ -359,3 +372,22 @@ def test_real_google_sdk_serializes_transcription_with_fake_http(tmp_path):
             assert client.transcribe(tmp_path / "x.wav", model, lambda _: None, lambda _: None) == "Spoken words."
     assert len(requests) == 2
     assert requests[0]["generation_config"]["transcription_config"]["mode"]["type"] == "verbatim"
+
+def test_gemini_response_time_excludes_upload_and_cleanup(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from evaluation.transcription import GeminiTranscriber
+    clock = [0.0]
+    monkeypatch.setattr('evaluation.transcription.time.perf_counter', lambda: clock[0])
+    class Files:
+        def upload(self, **kwargs):
+            clock[0] += 30
+            return SimpleNamespace(name='files/test', uri='uri', state='ACTIVE')
+        def delete(self, **kwargs):
+            clock[0] += 20
+    class Interactions:
+        def create(self, **kwargs):
+            clock[0] += 7.25
+            return SimpleNamespace(status='completed', output_text='speech')
+    client = GeminiTranscriber('fake', sdk=SimpleNamespace(files=Files(), interactions=Interactions()))
+    client.transcribe(tmp_path / 'x.wav', 'gemini-3.5-transcribe', lambda _: None, lambda _: None)
+    assert client.api_seconds == 7.25

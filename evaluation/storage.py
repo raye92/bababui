@@ -94,7 +94,7 @@ def artifact(root, kind, value):
 
 def resolve(root, reference):
     relative = reference["path"]
-    if not re.fullmatch(r"(?:requests/[0-9a-f]{64}|transcriptions/[a-z0-9.-]+/[0-9a-f]{64}/complete)\.json", relative):
+    if not re.fullmatch(r"(?:(?:requests|responses)/[0-9a-f]{64}|transcriptions/[a-z0-9.-]+/(?:speakers-v1/)?[0-9a-f]{64}/complete)\.json", relative):
         raise ValueError("Invalid artifact reference.")
     try:
         data = (Path(root) / relative).read_bytes()

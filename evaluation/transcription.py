@@ -19,6 +19,7 @@ def has_key(key):
 class GeminiTranscriber:
     def __init__(self, key, sdk=None):
         self.key, self.sdk = key, sdk
+        self.api_seconds = 0.0
 
     def client(self):
         if not has_key(self.key):
@@ -55,12 +56,18 @@ class GeminiTranscriber:
             audio = {"type": "audio", "uri": uploaded.uri, "mime_type": "audio/wav"}
             kwargs = {"model": model, "input": [audio], "store": False}
             if model == DEFAULT_AUDIO_MODEL:
-                kwargs["generation_config"] = {"transcription_config": {"mode": {"type": "verbatim"}}}
+                kwargs["generation_config"] = {"transcription_config": {
+                    "mode": {"type": "verbatim", "diarization_mode": "speaker"}}}
             else:
                 kwargs["input"].insert(0, {"type": "text", "text":
                     "Transcribe all spoken words verbatim, including repetitions and false starts. "
-                    "Return only the complete plain transcript. No summary, speaker labels, or timestamps."})
-            response = sdk.interactions.create(**kwargs, automatic_continuation=False, timeout=1800)
+                    "Label each speaker turn as Speaker 1, Speaker 2, etc., using consistent labels within this recording. "
+                    "Do not guess speaker names. Return only the complete transcript with speaker labels. No summary or timestamps."})
+            started = time.perf_counter()
+            try:
+                response = sdk.interactions.create(**kwargs, automatic_continuation=False, timeout=1800)
+            finally:
+                self.api_seconds += time.perf_counter() - started
             status = getattr(response, "status", None)
             if getattr(status, "value", status) != "completed":
                 raise ValueError("Audio transcription did not complete; it may be truncated.")
@@ -87,7 +94,7 @@ class Transcriptions:
         import re
         if model not in AUDIO_MODELS or not re.fullmatch(r"[0-9a-f]{64}", audio["sha256"]):
             raise ValueError("Invalid transcription model or audio identity.")
-        return self.root / "transcriptions" / model / audio["sha256"]
+        return self.root / "transcriptions" / model / "speakers-v1" / audio["sha256"]
 
     def cached(self, audio, model):
         path = self.directory(audio, model) / "complete.json"
