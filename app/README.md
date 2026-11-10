@@ -33,7 +33,7 @@ tags, formats that transcription, and writes the result to Incoming. The current
 transcript is never sent to the model and stays unchanged until revisions are
 accepted. Only that tab is locked during processing; scrolling and view switching
 remain available. BABABUI becomes a loading bar, with the current stage in the
-status bar. Other tabs can edit and process concurrently. Simultaneous requests
+header. Other tabs can edit and process concurrently. Simultaneous requests
 for identical audio share transcription, then format independently. Background
 results and warnings stay in their own tabs. Wait for a tab to finish before
 closing it, and for all requests to finish before exiting.

@@ -12,14 +12,14 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
-    QFileDialog, QSizePolicy)
+    QFileDialog, QSizePolicy, QLabel)
 from app.src.formatter import Formatter
 from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
 from app.src.audio_pipeline import AUDIO_MODEL
 from app.src.documents import (Document, canonical, save_document, open_document,
     suggested_path, save_session, load_session)
 from app.src.document_view import DocumentView
-from app.src.tab_bar import AudioTabBar
+from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
 from app.src.sample_text import SAMPLE
 
@@ -45,7 +45,7 @@ class TranscriptEditor(QMainWindow):
         self.jobs.failed.connect(self._failed)
         self.jobs.progress.connect(self._progress)
         self.jobs.completed.connect(self._completed)
-        self.tabs = QTabWidget()
+        self.tabs = EditorTabs()
         self.tabs.setTabBar(AudioTabBar())
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
@@ -58,7 +58,7 @@ class TranscriptEditor(QMainWindow):
         bar.replace_requested.connect(self.choose_wav)
         bar.close_requested.connect(self.close_tab)
         bar.tabMoved.connect(lambda *_: self.schedule_recovery())
-        self.plus_btn = QToolButton()
+        self.plus_btn = NewTabButton(self.tabs)
         self.plus_btn.setText('+')
         self.plus_btn.setToolTip('New tab (Ctrl+T)')
         self.plus_btn.clicked.connect(lambda: self.new_tab())
@@ -135,7 +135,9 @@ class TranscriptEditor(QMainWindow):
         audio.setCheckable(True)
         audio.setChecked(True)
         audio.triggered.connect(lambda: audio.setChecked(True))
-        row.addStretch()
+        self.status_label = QLabel()
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        row.addWidget(self.status_label, 1)
         self.bababui_btn = QPushButton('BABABUI')
         self.bababui_btn.clicked.connect(self.run_bababui)
         row.addWidget(self.bababui_btn)
@@ -148,6 +150,10 @@ class TranscriptEditor(QMainWindow):
         self.toggle_view_btn = QPushButton('Show Incoming')
         self.toggle_view_btn.clicked.connect(self.toggle_view)
         row.addWidget(self.toggle_view_btn)
+        header_height = self.bababui_btn.sizeHint().height()
+        for control in (self.file_btn, self.manual_btn, self.settings_btn,
+                        self.bababui_btn, self.toggle_view_btn, self.progress):
+            control.setFixedHeight(header_height)
         self.toolbar.addWidget(container)
 
     def _restore(self):
@@ -253,8 +259,12 @@ class TranscriptEditor(QMainWindow):
         message = doc.status
         if doc.warnings:
             message += ' ' + ' '.join(doc.warnings)
-        self.statusBar().showMessage(message)
+        self.show_status(message)
         self.setWindowTitle(f'{doc.title}{" *" if doc.dirty else ""} - BABABUI')
+
+    def show_status(self, message):
+        self.status_label.setText(message)
+        self.status_label.setToolTip(message)
 
     def set_processing_model(self, model):
         if self.current and not self.current.document.busy and model in MODELS:
@@ -334,7 +344,7 @@ class TranscriptEditor(QMainWindow):
         if not view:
             return
         if view.document.busy:
-            self.statusBar().showMessage('Wait for this tab to finish processing before closing it.')
+            self.show_status('Wait for this tab to finish processing before closing it.')
             return
         if view.document.dirty:
             answer = QMessageBox.question(self, 'Unsaved changes', f'Save changes to {view.document.title}?',
@@ -457,12 +467,12 @@ class TranscriptEditor(QMainWindow):
                          self.current.document.id if self.current else None)
             return True
         except (OSError, ValueError) as exc:
-            self.statusBar().showMessage(f'Could not save recovery: {exc}')
+            self.show_status(f'Could not save recovery: {exc}')
             return False
 
     def closeEvent(self, event):
         if any(v.document.busy for v in self.views()):
-            self.statusBar().showMessage('Wait for processing tabs to finish before closing BABABUI.')
+            self.show_status('Wait for processing tabs to finish before closing BABABUI.')
             event.ignore()
         elif not self.persist_session():
             QMessageBox.warning(self, 'Recovery could not be saved', 'Keep the app open and save your documents before trying again.')

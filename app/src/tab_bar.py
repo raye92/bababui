@@ -1,8 +1,44 @@
 """Tab headers double as WAV inputs only until audio is attached."""
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QPainter, QPen
-from PySide6.QtWidgets import QTabBar, QMenu, QApplication
+from PySide6.QtWidgets import QTabBar, QMenu, QApplication, QToolButton, QSizePolicy, QTabWidget, QSizeGrip
+
+
+class EditorTabs(QTabWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.resize_grip = QSizeGrip(self)
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in (QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+            button = self.cornerWidget(Qt.TopRightCorner)
+            if button:
+                bar = self.tabBar().geometry()
+                button.setGeometry(self.width() - bar.height(), bar.top(), bar.height(), bar.height())
+            grip = getattr(self, 'resize_grip', None)
+            if grip:
+                size = grip.sizeHint()
+                grip.setGeometry(self.width() - size.width(), self.height() - size.height(), size.width(), size.height())
+                grip.raise_()
+        return result
+
+
+class NewTabButton(QToolButton):
+    """Square corner control sized to the tab strip instead of a toolbar button."""
+    def __init__(self, tabs):
+        super().__init__(tabs)
+        self.tabs = tabs
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setStyleSheet('QToolButton { border-radius: 0; padding: 0; margin: 0; }')
+
+    def sizeHint(self):
+        height = max(1, self.tabs.tabBar().sizeHint().height())
+        return QSize(height, height)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
 
 class AudioTabBar(QTabBar):

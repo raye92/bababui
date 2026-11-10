@@ -224,3 +224,23 @@ def test_unreadable_recovery_is_preserved_and_reported(tmp_path):
         assert len(backups) == 1 and backups[0].read_text() == 'bad json'
     finally:
         w.close()
+
+
+def test_header_alignment_and_editor_resize_grip(window):
+    from PySide6.QtWidgets import QStatusBar
+    for width in (720, 1100, 1600):
+        window.resize(width, 800)
+        QApplication.processEvents()
+        heights = {button.height() for button in (window.file_btn, window.manual_btn,
+            window.settings_btn, window.bababui_btn, window.toggle_view_btn, window.progress)}
+        assert len(heights) == 1
+        plus, bar = window.plus_btn.geometry(), window.tabs.tabBar().geometry()
+        assert plus.top() == bar.top() and plus.height() == bar.height()
+        assert plus.width() == plus.height() and plus.right() == window.tabs.width()-1
+        assert not window.findChildren(QStatusBar)
+        assert window.tabs.geometry().bottom() == window.height()-1
+        grip = window.tabs.resize_grip
+        assert grip.parentWidget() is window.tabs
+        assert grip.geometry().bottomRight() == window.tabs.rect().bottomRight()
+    window.show_status('Processing audio...')
+    assert window.status_label.text() == 'Processing audio...'
