@@ -52,8 +52,13 @@ Insert Sample, and Batch Strip.
 Batch Strip lets you choose a folder and writes results into its `stripped`
 subfolder. It starts from the selected document's folder when available.
 
-Edit `src/bababui_prompt.md` to replace the basic formatting placeholder. This
-is the only editor formatting prompt. Evaluation keeps its own saved prompts.
+`src/bababui_prompt.md` contains the transcript-editing instructions and the full
+text extracted from all 131 pages of `MWW SUMMARY - smileys fixed.pdf`. Add specific
+overrides in the `# Extra instructions` section at the top. Speaker labels and
+turn order are preserved, and the result contains only the revised transcript.
+The reference retains the source text layer's OCR artifacts and repeated pages.
+The button reloads this file on each run. This is the only editor formatting
+prompt. Evaluation keeps its own saved prompts.
 
 ## Saving and recovery
 
