@@ -88,13 +88,10 @@ Remove their leftover punctuation and repair spacing. Preserve meaningful
 answers such as "uh-huh" and "unh-unh," and words expressing uncertainty,
 emphasis, or substantive meaning.
 
-Remove abandoned false starts, stutters, and redundant restart fragments when
-the speaker immediately restates the same thought. Retain the completed wording:
-"I -- I'll waive." becomes "I'll waive." Remove a leftover dash that marks only
-the deleted hesitation or false start. "Uh, just his initial evaluation, uh --"
-becomes "Just his initial evaluation." Preserve substantive corrections,
-contrasts, deliberate emphasis, and interruptions that affect meaning. Do not
-erase a changed answer or silently choose between conflicting factual statements.
+Remove stutters, abandoned starts, redundant restarts, and empty conversational
+lead-ins that add no meaning. Keep the completed thought and repair punctuation
+and capitalization. Preserve meaningful uncertainty, corrections, contrasts,
+emphasis, and interruptions; do not erase changed answers or conflicting facts.
 
 Preserve the meaning, order, and speaker attribution of all retained testimony,
 and keep distinct retained speaker turns separate. If a turn consists entirely
