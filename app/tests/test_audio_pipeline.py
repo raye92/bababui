@@ -43,6 +43,28 @@ def test_annotation_bytes_preserve_unicode():
     assert [w.text for w in words] == ['Café?', 'Yes.']
 
 
+def test_overlapping_speakers_preserve_transcript_order():
+    block = NS(type='text', text='No. How can I?', annotations=[
+        NS(type='word_info', speaker='a', start_index=0, end_index=3, start_offset='345.4s', end_offset='345.5s'),
+        NS(type='word_info', speaker='b', start_index=4, end_index=7, start_offset='344.8s', end_offset='344.9s'),
+        NS(type='word_info', speaker='b', start_index=8, end_index=11, start_offset='344.9s', end_offset='345.1s'),
+        NS(type='word_info', speaker='a', start_index=12, end_index=13, start_offset='345.6s', end_offset='345.7s')])
+    words = parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+    assert words == [Word('No.', 'a', 345.4, 345.5), Word('How', 'b', 344.8, 344.9),
+                     Word('can', 'b', 344.9, 345.1), Word('I?', 'a', 345.6, 345.7)]
+    assert stitch([words]) == ('Speaker 1: No.\nSpeaker 2: How can\nSpeaker 1: I?', [])
+
+
+@pytest.mark.parametrize('speakers', [('a', 'a', 'a'), ('a', 'b', 'a')])
+def test_backwards_timestamps_for_same_speaker_are_rejected(speakers):
+    block = NS(type='text', text='One two three', annotations=[
+        NS(type='word_info', speaker=speakers[0], start_index=0, end_index=3, start_offset='10s', end_offset='11s'),
+        NS(type='word_info', speaker=speakers[1], start_index=4, end_index=7, start_offset='12s', end_offset='13s'),
+        NS(type='word_info', speaker=speakers[2], start_index=8, end_index=13, start_offset='9s', end_offset='10s')])
+    with pytest.raises(ValueError, match='timestamps are out of order'):
+        parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+
+
 def test_real_sdk_contract_cleanup_and_cache(tmp_path, monkeypatch):
     import httpx
     from google import genai
