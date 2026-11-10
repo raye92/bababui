@@ -128,3 +128,74 @@ def test_eval_grading_unwraps_exports_without_changing_logical_paragraphs():
     assert grading_text(export, True) == text
     assert grading_text(export, False) == export
     assert formatted_transcript(export) == export
+
+
+@pytest.mark.parametrize(("heading", "centered"), [
+    ("EXAMINATION", "                      EXAMINATION"),
+    ("FURTHER EXAMINATION", "                  FURTHER EXAMINATION"),
+])
+@pytest.mark.parametrize("indent", ["", "   ", "\t"])
+def test_examination_headings_are_centered_by_formatter(heading, centered, indent):
+    text = indent + heading + "  \nBY SPEAKER 3:\n     Q    Your name?"
+    numbered, _ = FORMATTER.apply_formatting(text)
+
+    assert content_lines(numbered) == [centered, "BY SPEAKER 3:", "     Q    Your name?"]
+    assert FORMATTER.apply_formatting(numbered)[0] == numbered
+
+
+@pytest.mark.parametrize("heading", ["EXAMINATION", "FURTHER EXAMINATION"])
+@pytest.mark.parametrize(("preceding", "padding", "page_index", "line_index"), [
+    (0, 0, 0, 0),
+    (22, 0, 0, 22),
+    (23, 2, 1, 0),
+    (24, 1, 1, 0),
+    (25, 0, 1, 0),
+    (48, 2, 2, 0),
+    (49, 1, 2, 0),
+])
+def test_examination_by_and_first_q_stay_on_one_page(
+    heading, preceding, padding, page_index, line_index,
+):
+    text = "     A    Yes.\n" * preceding + heading + "\nBY SPEAKER 2:\n     Q    Why?"
+    numbered, pages = FORMATTER.apply_formatting(text)
+    page_lines = [content_lines(page) for page in numbered.split("\f")]
+
+    assert pages == page_index + 1
+    block = page_lines[page_index][line_index:line_index + 3]
+    assert [line.strip() for line in block] == [heading, "BY SPEAKER 2:", "Q    Why?"]
+    assert content_lines(numbered).count("///") == padding
+    if padding:
+        assert len(page_lines[page_index - 1]) == 25
+        assert page_lines[page_index - 1][-padding:] == ["///"] * padding
+    assert FORMATTER.apply_formatting(numbered) == (numbered, pages)
+    assert formatted_transcript(text) == numbered
+
+
+def test_examination_page_boundary_counts_wrapped_lines():
+    # Twelve two-line answers fill 24 physical lines before the heading.
+    answer = "     A    Please describe the records you reviewed before the examination.\n"
+    text = answer * 12 + "FURTHER EXAMINATION\nBY SPEAKER 3:\n     Q    Why?"
+    numbered, pages = FORMATTER.apply_formatting(text)
+    first, second = [content_lines(page) for page in numbered.split("\f")]
+
+    assert pages == 2
+    assert len(first) == 25 and first[-1] == "///"
+    assert second == ["                  FURTHER EXAMINATION", "BY SPEAKER 3:", "     Q    Why?"]
+    assert FORMATTER.apply_formatting(numbered) == (numbered, pages)
+
+
+def test_examination_keeps_q_start_but_allows_long_question_to_continue():
+    text = (
+        "     A    Yes.\n" * 22 + "EXAMINATION\nBY SPEAKER 2:\n"
+        "     Q    Please describe the records you reviewed before the examination."
+    )
+    numbered, pages = FORMATTER.apply_formatting(text)
+    first, second = [content_lines(page) for page in numbered.split("\f")]
+
+    assert pages == 2
+    assert first[-3:] == [
+        "                      EXAMINATION", "BY SPEAKER 2:",
+        "     Q    Please describe the records you reviewed",
+    ]
+    assert second == ["before the examination."]
+    assert "///" not in numbered

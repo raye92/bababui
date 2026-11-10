@@ -15,6 +15,8 @@ class TranscriptFormatter:
         re.IGNORECASE,
     )
     structural_line = re.compile(r"^(?:[A-Z -]*EXAMINATION|BY .+:|/{3,})$")
+    examination_heading = re.compile(r"^(?:FURTHER )?EXAMINATION$")
+    examiner_line = re.compile(r"^BY .+:$")
     numeric_answer = re.compile(r"^[+-]?\d[\d,./:%-]*$")
 
     def _content_lines(self, text):
@@ -74,6 +76,8 @@ class TranscriptFormatter:
         return "\n".join(paragraphs)
 
     def _wrap_paragraph(self, paragraph):
+        if self.examination_heading.fullmatch(paragraph.strip()):
+            return [paragraph.strip().center(self.LINE_WIDTH).rstrip()]
         content = paragraph.lstrip(" \t")
         indentation = paragraph[:len(paragraph) - len(content)]
         return textwrap.wrap(
@@ -83,11 +87,25 @@ class TranscriptFormatter:
         )
 
     def apply_formatting(self, text):
-        lines = [
+        wrapped = [
             line
             for paragraph in self.strip_formatting(text).split("\n") if paragraph.strip()
             for line in self._wrap_paragraph(paragraph)
         ]
+        lines = []
+        for index, line in enumerate(wrapped):
+            # Keep the heading, examiner, and start of the question together.
+            if (
+                self.examination_heading.fullmatch(line.strip())
+                and index + 2 < len(wrapped)
+                and self.examiner_line.fullmatch(wrapped[index + 1].strip())
+                and self.qa_label.match(wrapped[index + 2].lstrip())
+                and wrapped[index + 2].lstrip().startswith("Q")
+            ):
+                remaining = self.LINES_PER_PAGE - len(lines) % self.LINES_PER_PAGE
+                if remaining < 3:
+                    lines.extend(["///"] * remaining)
+            lines.append(line)
         if not lines:
             return "\n" * 5, 1
 

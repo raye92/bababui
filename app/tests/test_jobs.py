@@ -143,9 +143,9 @@ def test_worker_numbers_model_output_before_emitting_incoming(tmp_path):
     assert identifier == 'document'
     assert warnings == ['Transcription warning']
     assert incoming.count('\f') == 1
-    assert '          1    EXAMINATION' in incoming
+    assert '          1                          EXAMINATION' in incoming
     assert '          2    BY SPEAKER 2:' in incoming
     assert '          3         Q    Please describe the records you reviewed\n' in incoming
     assert '          4    before the examination.\n' in incoming
     assert '          1         Q    Question 21?' in incoming
-    assert TranscriptFormatter().strip_formatting(incoming) == output
+    assert TranscriptFormatter().strip_formatting(incoming) == ' ' * 22 + output
