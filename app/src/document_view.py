@@ -64,7 +64,13 @@ class DocumentView(QWidget):
             self.original_stack.setCurrentWidget(self.editor)
         else:
             self.diff_view.set_texts(doc.original, doc.incoming)
-            self.original_stack.setCurrentWidget(self.diff_view)
+            if self.diff_view.has_changes:
+                self.original_stack.setCurrentWidget(self.diff_view)
+            else:
+                # Layout is generated, not a pending editorial decision.
+                doc.incoming = doc.original
+                self._set_text(self.incoming_editor, doc.incoming)
+                self.original_stack.setCurrentWidget(self.editor)
         self._updating = False
         self.set_busy(doc.busy)
 

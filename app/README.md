@@ -84,6 +84,13 @@ prompt. Evaluation keeps its own saved prompts.
 
 ## Saving and recovery
 
+The inline diff compares transcript content, without printed line numbers,
+page layout, or wrapping. Headings, examiner labels, questions, answers, and
+speaker turns are matched in order. Changed words are highlighted inside
+paired passages. Accept and Deny apply to those passages; numbered documents
+are wrapped and numbered again after each decision. Formatting alone does not
+create a pending change.
+
 - **Ctrl+S** saves the reviewed Original text to `.txt`, even when viewing
   Incoming. The companion `<filename>.txt.bababui.json` keeps pending Incoming
   revisions, the WAV path, and model selections. Keep both files together.

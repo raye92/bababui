@@ -1,4 +1,5 @@
-import difflib
+from html import escape
+from app.src.transcript_diff import parse_transcript, align_blocks, word_spans, render_blocks, is_formatted, equivalent_content
 from PySide6.QtWidgets import (QScrollArea, QWidget, QFrame, QPlainTextEdit,
                                QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy)
@@ -6,7 +7,7 @@ from PySide6.QtCore import Qt, Signal, QRect
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QColor
 
 # Width of the existing left margin shared by the +/- markers and the line
-# numbers — reused here rather than adding a new gutter.
+# numbers â€” reused here rather than adding a new gutter.
 GUTTER_WIDTH = 24
 
 
@@ -130,9 +131,9 @@ class _EqualBlock(_NumberedEdit):
     regions), so the diff structure is preserved and no new variance is created.
     """
 
-    # Emitted on every keystroke — caller saves to disk without re-rendering.
+    # Emitted on every keystroke â€” caller saves to disk without re-rendering.
     saved = Signal(list)
-    # Emitted on focusOut when the line count changed — caller must re-render
+    # Emitted on focusOut when the line count changed â€” caller must re-render
     # so hunk indices stay accurate.
     needs_rerender = Signal()
 
@@ -189,6 +190,10 @@ class _EqualBlock(_NumberedEdit):
         super().showEvent(event)
         self._sync_height()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_height()
+
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         # If lines were added/removed the cached hunk indices are stale.
@@ -196,38 +201,21 @@ class _EqualBlock(_NumberedEdit):
             self.needs_rerender.emit()
 
 
+
 class DiffView(QScrollArea):
-    """Inline diff between the original text and the incoming text.
-
-    Insertions (in incoming, missing from original) are highlighted green.
-    Deletions (in original, missing from incoming) are highlighted red.
-    Every change hunk carries Accept / Deny buttons that reconcile the two
-    sides line-for-line, mirroring how Cursor / GitHub / VS Code present diffs.
-    """
-
-    # Emitted with (new_original_text, new_incoming_text) after each resolution.
+    """Review logical content while retaining paragraph structure."""
     resolved = Signal(str, str)
-    # Emitted during equal-block live edits — caller saves to disk only, no
-    # re-render (cursor must stay in place while the user is typing).
     autosaved = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
-
-        self._mono = QFont("Courier New", 12)
+        self._mono = QFont('Courier New', 12)
         self._mono.setStyleHint(QFont.Monospace)
-
-        self.original_lines = []
-        self.incoming_lines = []
-
-        # Shared gutter width for every row so changed and unchanged lines line
-        # up; recomputed per render from the highest line number on screen.
+        self.original_blocks, self.incoming_blocks = [], []
+        self._formatted = False
+        self._regions, self._rows = [], []
         self._gutter = GUTTER_WIDTH
-        # (widget, first_original_line_0based, original_line_count) per row,
-        # used to map between the scroll position and an original line number.
-        self._rows = []
-
         self._container = QWidget()
         self._layout = QVBoxLayout(self._container)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -235,177 +223,168 @@ class DiffView(QScrollArea):
         self.setWidget(self._container)
 
     def set_texts(self, original_text, incoming_text):
-        """Load both sides and render the inline diff."""
-        self.original_lines = original_text.split('\n')
-        self.incoming_lines = incoming_text.split('\n')
+        self._formatted = is_formatted(original_text) or is_formatted(incoming_text)
+        self.original_blocks = parse_transcript(original_text)
+        self.incoming_blocks = parse_transcript(incoming_text)
         self._render()
 
     def _clear(self):
         while self._layout.count():
-            item = self._layout.takeAt(0)
-            widget = item.widget()
+            widget = self._layout.takeAt(0).widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _compute_gutter(self):
-        digits = max(2, len(str(max(1, len(self.original_lines)))))
-        nf = QFont(self._mono)
-        nf.setPointSizeF(max(7.0, self._mono.pointSizeF() - 2))
-        return QFontMetrics(nf).horizontalAdvance('0' * digits) + 10
+        digits = max(2, len(str(max(1, len(self.original_blocks)))))
+        return QFontMetrics(self._mono).horizontalAdvance('0' * digits + ' \u2212') + 10
 
     def _render(self):
         self._clear()
         self._rows = []
         self._gutter = self._compute_gutter()
-
-        matcher = difflib.SequenceMatcher(
-            None, self.original_lines, self.incoming_lines, autojunk=False)
-
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'equal':
-                widget = self._make_equal_block(
-                    self.original_lines[i1:i2], i1, i2, j1, j2)
+        self._regions = []
+        for op in align_blocks(self.original_blocks, self.incoming_blocks):
+            # Group only contiguous runs of the same one-sided change.
+            # Replacement pairs remain independent review decisions.
+            if (op[0] in ('equal', 'insert', 'delete') and self._regions
+                    and self._regions[-1][0] == op[0]
+                    and self._regions[-1][2] == op[1] and self._regions[-1][4] == op[3]):
+                self._regions[-1][2], self._regions[-1][4] = op[2], op[4]
             else:
-                widget = self._make_hunk(tag, i1, i2, j1, j2)
+                self._regions.append(list(op))
+        for region in self._regions:
+            tag, i1, i2, j1, j2 = region
+            widget = self._make_equal_block(region) if tag == 'equal' else self._make_hunk(region)
             self._layout.addWidget(widget)
-            # Track the original-line span this row occupies for scroll mapping.
-            self._rows.append((widget, i1, i2 - i1))
-
+            start = self.original_blocks[i1].source_start if i1 < len(self.original_blocks) else (
+                self.original_blocks[-1].source_end if self.original_blocks else 0)
+            end = self.original_blocks[i2-1].source_end if i2 > i1 else start
+            self._rows.append((widget, start, end-start))
         self._layout.addStretch(1)
 
-    def _make_equal_block(self, lines, orig_i1, orig_i2, inc_j1, inc_j2):
-        """Editable block for unchanged lines — no truncation, full scroll."""
-        # Line numbers reflect the 1-based position within the original text.
-        block = _EqualBlock(lines, self._mono, orig_i1 + 1, self._gutter)
+    @property
+    def has_changes(self):
+        return any(r[0] != 'equal' for r in self._regions)
 
-        def on_saved(new_lines, oi1=orig_i1, oi2=orig_i2, ij1=inc_j1, ij2=inc_j2):
-            # Equal lines stay equal: mirror the edit to both sides.
-            self.original_lines = (self.original_lines[:oi1]
-                                   + new_lines
-                                   + self.original_lines[oi2:])
-            self.incoming_lines = (self.incoming_lines[:ij1]
-                                   + new_lines
-                                   + self.incoming_lines[ij2:])
-            self.autosaved.emit('\n'.join(self.original_lines),
-                                '\n'.join(self.incoming_lines))
+    def _texts(self):
+        original = render_blocks(self.original_blocks, self._formatted)
+        incoming = render_blocks(self.incoming_blocks, self._formatted)
+        if equivalent_content(self.original_blocks, self.incoming_blocks):
+            incoming = original
+        return original, incoming
 
+    def _refresh_blocks(self):
+        self.set_texts(*self._texts())
+
+    def _make_equal_block(self, region):
+        _, i1, i2, j1, j2 = region
+        lines = [b.indent + b.text for b in self.original_blocks[i1:i2]]
+        block = _EqualBlock(lines, self._mono, i1+1, self._gutter)
+        block.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        def on_saved(new_lines):
+            _, oi1, oi2, ij1, ij2 = region
+            replacement = parse_transcript('\n'.join(new_lines))
+            self.original_blocks[oi1:oi2] = replacement
+            self.incoming_blocks[ij1:ij2] = replacement.copy()
+            da, db = len(replacement)-(oi2-oi1), len(replacement)-(ij2-ij1)
+            following = False
+            for other in self._regions:
+                if other is region:
+                    other[2], other[4] = oi1+len(replacement), ij1+len(replacement)
+                    following = True
+                elif following:
+                    other[1] += da
+                    other[2] += da
+                    other[3] += db
+                    other[4] += db
+            self.autosaved.emit(*self._texts())
         block.saved.connect(on_saved)
-        # Re-render when focusOut detects a line-count change so hunk indices
-        # stay accurate before the user can click Accept / Deny.
-        block.needs_rerender.connect(self._render)
+        block.needs_rerender.connect(self._refresh_blocks)
         return block
 
-    def _make_line_row(self, text, kind):
-        if kind == 'delete':
-            bg = '#ffd7d5'
-            fg = '#82071e'
-            mark = '\u2212'
-        elif kind == 'insert':
-            bg = '#ccffd8'
-            fg = '#116329'
-            mark = '+'
-        else:
-            # Equal lines: no background tint, no forced text color — inherit
-            # whatever the palette provides so they look identical to the editor.
-            bg = None
-            fg = None
-            mark = ' '
-
+    def _make_line_row(self, text, kind, spans=None, number=None):
+        bg, fg, mark = ('#ffd7d5', '#82071e', '\u2212') if kind == 'delete' else ('#ccffd8', '#116329', '+')
         row = QWidget()
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(0)
-
-        marker = QLabel(mark)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        marker = QLabel(f'{number} {mark}' if number is not None else mark)
         marker.setFont(self._mono)
         marker.setFixedWidth(self._gutter)
         marker.setAlignment(Qt.AlignCenter)
-        if bg:
-            marker.setStyleSheet(f"background-color:{bg}; color:{fg};")
-
-        # An empty string would collapse the row height, so keep a space.
-        content = QLabel(text if text != '' else ' ')
+        marker.setStyleSheet(f'background-color:{bg}; color:{fg};')
+        content = QLabel(text or ' ')
         content.setFont(self._mono)
         content.setTextFormat(Qt.PlainText)
+        content.setWordWrap(True)
+        if spans is not None:
+            parts, position = [], 0
+            highlight = '#ffaaa5' if kind == 'delete' else '#7ee2a8'
+            for start, end in spans:
+                parts.append(escape(text[position:start]))
+                parts.append(f'<span style="background-color:{highlight}; font-weight:bold">' + escape(text[start:end]) + '</span>')
+                position = end
+            parts.append(escape(text[position:]))
+            content.setTextFormat(Qt.RichText)
+            content.setText('<span style="white-space:pre-wrap">' + ''.join(parts) + '</span>')
         content.setTextInteractionFlags(Qt.TextSelectableByMouse)
         content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        if bg:
-            content.setStyleSheet(f"background-color:{bg}; color:{fg};")
-
-        h.addWidget(marker)
-        h.addWidget(content)
+        content.setStyleSheet(f'background-color:{bg}; color:{fg};')
+        layout.addWidget(marker)
+        layout.addWidget(content)
         return row
 
-    def _make_hunk(self, tag, i1, i2, j1, j2):
-        # No border or margin — the block sits flush in the document flow so
-        # surrounding equal lines are not pushed away visually.
+    def _make_hunk(self, region):
+        tag, i1, i2, j1, j2 = region
         block = QWidget()
         v = QVBoxLayout(block)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-
-        # Red side: lines removed relative to incoming.
-        for line in self.original_lines[i1:i2]:
-            v.addWidget(self._make_line_row(line, 'delete'))
-        # Green side: lines added by incoming.
-        for line in self.incoming_lines[j1:j2]:
-            v.addWidget(self._make_line_row(line, 'insert'))
-
-        # Inline action bar — sits directly below the highlighted lines,
-        # no surrounding box so it flows with the rest of the content.
+        old = '\n'.join(b.indent+b.text for b in self.original_blocks[i1:i2])
+        new = '\n'.join(b.indent+b.text for b in self.incoming_blocks[j1:j2])
+        old_spans, new_spans = word_spans(old, new) if tag == 'replace' else (None, None)
+        for blocks, kind, spans in ((self.original_blocks[i1:i2], 'delete', old_spans),
+                                   (self.incoming_blocks[j1:j2], 'insert', new_spans)):
+            offset = 0
+            for index, paragraph in enumerate(blocks):
+                text = paragraph.indent + paragraph.text
+                local = None if spans is None else [(max(0, start-offset), min(len(text), end-offset))
+                    for start, end in spans if start < offset+len(text) and end > offset]
+                number = i1+index+1 if kind == 'delete' or index < i2-i1 else None
+                v.addWidget(self._make_line_row(text, kind, local, number))
+                offset += len(text)+1
         bar = QWidget()
-        bar.setStyleSheet("background:#f6f8fa;")
+        bar.setStyleSheet('background:#f6f8fa;')
         h = QHBoxLayout(bar)
-        h.setContentsMargins(self._gutter + 4, 3, 8, 3)
+        h.setContentsMargins(self._gutter+4, 3, 8, 3)
         h.setSpacing(6)
-
-        caption = QLabel("Incoming change")
-        caption.setStyleSheet("color:#57606a; font-size:11px;")
-
-        accept = QPushButton("\u2713 Accept")
-        accept.setCursor(Qt.PointingHandCursor)
-        accept.setFixedHeight(22)
-        accept.setStyleSheet(
-            "border:none; background:#1f883d; color:white;"
-            " padding:0 10px; border-radius:3px; font-size:11px;")
-        accept.clicked.connect(
-            lambda _=False, a=i1, b=i2, c=j1, d=j2: self._accept(a, b, c, d))
-
-        deny = QPushButton("\u2717 Deny")
-        deny.setCursor(Qt.PointingHandCursor)
-        deny.setFixedHeight(22)
-        deny.setStyleSheet(
-            "border:none; background:#cf222e; color:white;"
-            " padding:0 10px; border-radius:3px; font-size:11px;")
-        deny.clicked.connect(
-            lambda _=False, a=i1, b=i2, c=j1, d=j2: self._deny(a, b, c, d))
-
+        caption = QLabel('Incoming change')
+        caption.setStyleSheet('color:#57606a; font-size:11px;')
         h.addWidget(caption)
         h.addStretch(1)
-        h.addWidget(accept)
-        h.addWidget(deny)
+        for title, color, callback in (('\u2713 Accept', '#1f883d', self._accept), ('\u2717 Deny', '#cf222e', self._deny)):
+            button = QPushButton(title)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFixedHeight(22)
+            button.setStyleSheet(f'border:none; background:{color}; color:white; padding:0 10px; border-radius:3px; font-size:11px;')
+            button.clicked.connect(lambda _=False, callback=callback: callback(*region[1:]))
+            h.addWidget(button)
         v.addWidget(bar)
-
         return block
 
     def _accept(self, i1, i2, j1, j2):
-        # Take the incoming version for this region into the original.
-        self.original_lines = (self.original_lines[:i1]
-                               + self.incoming_lines[j1:j2]
-                               + self.original_lines[i2:])
+        self.original_blocks[i1:i2] = self.incoming_blocks[j1:j2]
         self._commit()
 
     def _deny(self, i1, i2, j1, j2):
-        # Keep the original version; roll the incoming side back to match it.
-        self.incoming_lines = (self.incoming_lines[:j1]
-                               + self.original_lines[i1:i2]
-                               + self.incoming_lines[j2:])
+        self.incoming_blocks[j1:j2] = self.original_blocks[i1:i2]
         self._commit()
 
     def _commit(self):
-        self.resolved.emit('\n'.join(self.original_lines),
-                           '\n'.join(self.incoming_lines))
-        self._render()
+        original, incoming = self._texts()
+        self.set_texts(original, incoming)
+        self.resolved.emit(original, incoming)
 
     def center_line(self):
         """0-based original line nearest the vertical center of the viewport.
