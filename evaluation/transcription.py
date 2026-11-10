@@ -16,6 +16,43 @@ def has_key(key):
     return bool(key and key.strip() and not key.startswith("your_"))
 
 
+def speaker_text(response):
+    """Render ASR annotations as turns without reconstructing the spoken words."""
+    labels, blocks = {}, []
+    for step in getattr(response, "steps", None) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for block in getattr(step, "content", None) or []:
+            if getattr(block, "type", None) != "text":
+                continue
+            raw = block.text.encode("utf-8")
+            turns, previous = [], None
+            for annotation in getattr(block, "annotations", None) or []:
+                speaker = getattr(annotation, "speaker", None)
+                if getattr(annotation, "type", None) != "word_info" or not speaker:
+                    continue
+                start = annotation.start_index
+                if not isinstance(start, int) or not 0 <= start < len(raw):
+                    raise ValueError("Invalid speaker annotation offset.")
+                if turns and start < turns[-1][0]:
+                    raise ValueError("Speaker annotations are out of order.")
+                if speaker != previous:
+                    label = labels.setdefault(speaker, f"Speaker {len(labels) + 1}")
+                    turns.append((start, label))
+                    previous = speaker
+            if not turns:
+                blocks.append(block.text)
+                continue
+            parts = []
+            if turns[0][0]:
+                parts.append(raw[:turns[0][0]].decode("utf-8").strip())
+            for index, (start, label) in enumerate(turns):
+                end = turns[index + 1][0] if index + 1 < len(turns) else len(raw)
+                parts.append(f"{label}: {raw[start:end].decode('utf-8').strip()}")
+            blocks.append("\n".join(part for part in parts if part))
+    return "\n".join(blocks) if blocks else response.output_text
+
+
 class GeminiTranscriber:
     def __init__(self, key, sdk=None):
         self.key, self.sdk = key, sdk
@@ -71,7 +108,7 @@ class GeminiTranscriber:
             status = getattr(response, "status", None)
             if getattr(status, "value", status) != "completed":
                 raise ValueError("Audio transcription did not complete; it may be truncated.")
-            text = response.output_text
+            text = speaker_text(response)
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Audio transcription returned empty text.")
             return text

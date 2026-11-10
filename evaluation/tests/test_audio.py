@@ -373,6 +373,35 @@ def test_real_google_sdk_serializes_transcription_with_fake_http(tmp_path):
     assert len(requests) == 2
     assert requests[0]["generation_config"]["transcription_config"]["mode"]["type"] == "verbatim"
 
+
+def test_speaker_annotations_survive_sdk(tmp_path):
+    import httpx
+    from google import genai
+    from types import SimpleNamespace
+    from evaluation.transcription import GeminiTranscriber
+    # Offsets are UTF-8 bytes, not Python character indices. Preserve punctuation.
+    text = "Café? Yes, indeed. Again?"
+    annotations = [
+        {"type": "word_info", "speaker": speaker, "start_index": start,
+         "end_index": end}
+        for speaker, start, end in [("spk:0", 0, 6), ("spk:1", 7, 11),
+                                    ("spk:1", 12, 19), ("spk:0", 20, 26)]
+    ]
+    def transport(request):
+        return httpx.Response(200, json={"status": "completed", "steps": [
+            {"type": "model_output", "content": [
+                {"type": "text", "text": text, "annotations": annotations}]}]})
+    class Files:
+        def upload(self, **kwargs):
+            return SimpleNamespace(name="files/test", uri="uri", state="ACTIVE")
+        def delete(self, **kwargs):
+            pass
+    with genai.Client(api_key="fake", http_options={"client_args": {
+            "transport": httpx.MockTransport(transport)}}) as sdk:
+        client = GeminiTranscriber("fake", sdk=SimpleNamespace(files=Files(), interactions=sdk.interactions))
+        result = client.transcribe(tmp_path / "x.wav", "gemini-3.5-transcribe", lambda _: None, lambda _: None)
+    assert result == "Speaker 1: Café?\nSpeaker 2: Yes, indeed.\nSpeaker 1: Again?"
+
 def test_gemini_response_time_excludes_upload_and_cleanup(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from evaluation.transcription import GeminiTranscriber
