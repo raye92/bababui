@@ -383,12 +383,7 @@ def main():
     st.sidebar.caption("Compare evaluation setups against reviewed transcript excerpts.")
     store = Store(Path(os.environ.get("EVALUATION_DATA_DIR", str(ROOT / "data"))))
     if not store.list("prompts"):
-        source = ROOT.parent / "app" / "src"
-        if (source / "AI Quality Analysis Prompt.md").exists() and (source / "courtreportingrules.md").exists():
-            store.save_prompt("Editor baseline", (source / "AI Quality Analysis Prompt.md").read_text(encoding="utf-8"),
-                              (source / "courtreportingrules.md").read_text(encoding="utf-8"))
-        else:
-            st.info("Create your first evaluation setup to get started.")
+        st.info("Create your first evaluation setup to get started.")
     page = st.sidebar.radio("Workspace", ["Datasets", "Evaluation Setup", "Results"])
     st.sidebar.caption("Local evaluation app. Data and results are stored separately from the transcript editor.")
     try:

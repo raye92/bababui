@@ -21,9 +21,9 @@ The repository and evaluation `.streamlit/config.toml` files bind the server to
 localhost and disable usage telemetry. If launching from a different working
 directory, add `--server.address 127.0.0.1 --browser.gatherUsageStats false`.
 
-On first launch, the app copies the editor's two prompt documents into a saved
-**Editor baseline** setup. The apps share
-transcript formatting code and use separate configuration and data.
+On first launch, create an evaluation setup with your own instructions and rules.
+Existing saved setups remain unchanged. The apps share transcript formatting
+code and use separate configuration and data.
 Text evaluations require `DEEPSEEK_API_KEY` in `evaluation/.env` or in the
 environment. Environment variables take precedence. You can manage data and
 view results without a key.

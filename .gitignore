@@ -57,4 +57,5 @@ htmlcov/
 
 # Evaluation datasets and run history
 /evaluation/data/
+/app/data/
 

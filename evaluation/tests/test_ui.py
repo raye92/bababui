@@ -23,6 +23,7 @@ def test_empty_app_and_no_automatic_calls(tmp_path, monkeypatch):
     assert not app.exception
     assert next(b for b in app.button if b.label == "Start evaluation").disabled
     assert Store(tmp_path).list("runs") == []
+    assert Store(tmp_path).list("prompts") == []
 
 
 def test_setup_preview_matches_saved_system_message(tmp_path, monkeypatch):
@@ -68,10 +69,11 @@ def test_manual_pair_and_prompt_version(tmp_path, monkeypatch):
     app.toggle(key="remove_heading").set_value(False)
     app.text_input(key="version_name").set_value("My v2")
     app.text_area(key="instructions_edit").set_value("Edit punctuation only.")
+    app.text_area(key="rules_edit").set_value("Preserve spoken words.")
     app.button(key="save_version").click().run()
     assert not app.exception
     setups = Store(tmp_path).list("prompts")
-    assert len(setups) == 2
+    assert len(setups) == 1
     saved = setups[0]
     assert saved["model"] == "deepseek-flash"
     assert saved["filters"] == {"strip_formatting": True, "remove_hash_marker": True, "remove_slash_marker": True,
