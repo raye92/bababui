@@ -1,78 +1,92 @@
+"""Tabbed transcript editor with explicit saves and independent processing."""
 import sys
-import os
-from PySide6.QtWidgets import (QApplication, QMainWindow,
-                               QVBoxLayout, QWidget, QToolBar, QMessageBox,
-                               QStackedWidget, QPushButton, QSizePolicy, QToolButton, QMenu, QHBoxLayout, QGridLayout, QPlainTextEdit)
-from PySide6.QtGui import QFont, QAction, QActionGroup
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings
-from formatter import Formatter
-from diff_view import DiffView, LineNumberedEditor
 from pathlib import Path
-from processing import ProcessingClient, load_config, MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR
-from audio_pipeline import AudioPipeline, AUDIO_MODEL
-from wav_input import WavInput
+import shutil
+import time
 
-# Both files live in src, next to this script.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ORIGINAL_FILE = os.path.join(BASE_DIR, "original.txt")
-INCOMING_FILE = os.path.join(BASE_DIR, "incoming.txt")
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-class _BababuiWorker(QThread):
-    succeeded = Signal(str, list)
-    failed = Signal(str)
-    progress = Signal(str)
-
-    def __init__(self, path, model, config):
-        super().__init__()
-        self.path, self.model, self.config = path, model, config
-
-    def run(self):
-        try:
-            client = ProcessingClient(self.config, self.model)
-            client.check_ready()
-            prompt = PROMPT_FILE.read_text(encoding='utf-8')
-            if not prompt.strip():
-                raise ValueError('Fill in app/src/bababui_prompt.md before processing.')
-            pipeline = AudioPipeline(self.config.get('gemini_api_key', ''), APP_DIR / 'data' / 'transcriptions')
-            text, warnings = pipeline.run(self.path, self.progress.emit)
-            self.progress.emit('Formatting transcript...')
-            result = client.complete(text, prompt)
-            self.succeeded.emit(result, warnings)
-        except Exception as exc:
-            # SDK exceptions can include request details; do not display them.
-            message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'
-            self.failed.emit(message)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
+    QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
+    QFileDialog, QSizePolicy)
+from app.src.formatter import Formatter
+from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
+from app.src.audio_pipeline import AUDIO_MODEL
+from app.src.documents import (Document, canonical, save_document, open_document,
+    suggested_path, save_session, load_session)
+from app.src.document_view import DocumentView
+from app.src.tab_bar import AudioTabBar
+from app.src.jobs import JobManager, Request
+from app.src.sample_text import SAMPLE
 
 
 class TranscriptEditor(QMainWindow):
-    def __init__(self, settings=None):
+    def __init__(self, *, session_path=None, legacy_dir=None, jobs=None):
         super().__init__()
-        self.setWindowTitle("BABABUI")
-        self.resize(1000, 800)
-        
-        # Initialize formatter
+        self.setWindowTitle('BABABUI')
+        self.resize(1100, 800)
+        self.setMinimumWidth(720)
         self.formatter = Formatter()
-
-        self.settings = settings if settings is not None else QSettings('BABABUI', 'TranscriptEditor')
-        self.processing_model = self.settings.value('processing_model', DEFAULT_MODEL)
-        if self.processing_model not in MODELS:
-            self.processing_model = DEFAULT_MODEL
-        self._busy = False
-        self._worker = None
-        self._suppress_mirror = False
+        self.session_path = Path(session_path) if session_path is not None else APP_DIR/'data'/'session.json'
+        self.legacy_dir = Path(legacy_dir) if legacy_dir is not None else Path(__file__).parent
+        self._restoring = True
+        self._recovery_enabled = True
+        self._last_view = None
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.setInterval(300)
+        self._recovery_timer.timeout.connect(self.persist_session)
+        self.jobs = jobs if jobs is not None else JobManager(self)
+        self.jobs.succeeded.connect(self._succeeded)
+        self.jobs.failed.connect(self._failed)
+        self.jobs.progress.connect(self._progress)
+        self.jobs.completed.connect(self._completed)
+        self.tabs = QTabWidget()
+        self.tabs.setTabBar(AudioTabBar())
+        self.tabs.setDocumentMode(True)
+        self.setCentralWidget(self.tabs)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        bar = self.tabs.tabBar()
+        bar.attach_requested.connect(self.choose_wav)
+        bar.wav_dropped.connect(self.attach_wav)
+        bar.duplicate_requested.connect(self.duplicate_tab)
+        bar.replace_requested.connect(self.choose_wav)
+        bar.close_requested.connect(self.close_tab)
+        bar.tabMoved.connect(lambda *_: self.schedule_recovery())
+        self.plus_btn = QToolButton()
+        self.plus_btn.setText('+')
+        self.plus_btn.setToolTip('New tab (Ctrl+T)')
+        self.plus_btn.clicked.connect(lambda: self.new_tab())
+        self.tabs.setCornerWidget(self.plus_btn, Qt.TopRightCorner)
         self._build_toolbar()
+        self._restore()
+        self._restoring = False
+        self._tab_changed(self.tabs.currentIndex())
+        self.persist_session()
 
-        # --- Views ---
-        # The central area swaps wholesale between the original view and the
-        # hidden incoming view (no tabs).
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+    @property
+    def current(self):
+        return self.tabs.currentWidget()
 
-        self._build_original_view()   # main stack index 0
-        self._build_incoming_view()   # main stack index 1
+    def views(self):
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
 
-        self._load_files()
+    def find_view(self, identifier):
+        return next((v for v in self.views() if v.document.id == identifier), None)
+
+    def _menu_button(self, title, layout):
+        button = QToolButton()
+        button.setText(title)
+        button.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(button)
+        button.setMenu(menu)
+        layout.addWidget(button)
+        return button, menu
 
     def _build_toolbar(self):
         self.toolbar = QToolBar('BABABUI', self)
@@ -82,455 +96,382 @@ class TranscriptEditor(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
         container = QWidget()
         container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout = QGridLayout(container)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setColumnStretch(1, 1)
-        left, right = QWidget(), QWidget()
-        left_layout, right_layout = QHBoxLayout(left), QHBoxLayout(right)
-        for row in (left_layout, right_layout):
-            row.setContentsMargins(0, 0, 0, 0)
-        self.manual_btn = QToolButton()
-        self.manual_btn.setText('Manual')
-        self.manual_btn.setPopupMode(QToolButton.InstantPopup)
-        manual = QMenu(self.manual_btn)
-        for title, callback in [('Strip Formatting', self.strip_formatting),
+        row = QHBoxLayout(container)
+        row.setContentsMargins(4, 2, 4, 2)
+        self.file_btn, menu = self._menu_button('File', row)
+        self.file_actions = {}
+        for label, shortcut, callback in (
+            ('New Tab', 'Ctrl+T', lambda: self.new_tab()),
+            ('Open', 'Ctrl+O', lambda: self.open_file()),
+            ('Save', 'Ctrl+S', lambda: self.save_current()),
+            ('Save As', 'Ctrl+Shift+S', lambda: self.save_current(save_as=True)),
+            ('Duplicate Tab', '', lambda: self.duplicate_tab()),
+            ('Close Tab', 'Ctrl+W', lambda: self.close_tab(self.tabs.currentIndex()))):
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            if shortcut:
+                action.setShortcut(QKeySequence(shortcut))
+            self.addAction(action)
+            menu.addAction(action)
+            self.file_actions[label] = action
+        self.manual_btn, manual = self._menu_button('Manual', row)
+        for label, callback in (('Strip Formatting', self.strip_formatting),
                                 ('Apply Standards', self.apply_formatting),
                                 ('Insert Sample', self.insert_sample_text),
-                                ('Batch Strip', self.batch_strip_formatting)]:
-            manual.addAction(title, callback)
-        self.manual_btn.setMenu(manual)
-        self.settings_btn = QToolButton()
-        self.settings_btn.setText('Settings')
-        self.settings_btn.setPopupMode(QToolButton.InstantPopup)
-        settings_menu = QMenu(self.settings_btn)
-        processing_menu = settings_menu.addMenu('LLM processing model')
+                                ('Batch Strip', self.batch_strip_formatting)):
+            manual.addAction(label, callback)
+        self.settings_btn, settings = self._menu_button('Settings', row)
+        processing = settings.addMenu('LLM processing model')
         group = QActionGroup(self)
         group.setExclusive(True)
+        self.model_actions = {}
         for model, label in MODELS.items():
-            action = processing_menu.addAction(label)
+            action = processing.addAction(label)
             action.setCheckable(True)
-            action.setChecked(model == self.processing_model)
             action.triggered.connect(lambda checked, m=model: self.set_processing_model(m))
             group.addAction(action)
-        transcription = settings_menu.addMenu('AI transcription model')
-        action = transcription.addAction('Gemini 3.5 Transcribe')
-        action.setCheckable(True)
-        action.setChecked(True)
-        action.triggered.connect(lambda: action.setChecked(True))
-        self.settings.setValue('transcription_model', AUDIO_MODEL)
-        self.settings_btn.setMenu(settings_menu)
-        left_layout.addWidget(self.manual_btn)
-        left_layout.addWidget(self.settings_btn)
-        left_layout.addStretch()
-        self.wav_input = WavInput()
+            self.model_actions[model] = action
+        audio = settings.addMenu('AI transcription model').addAction('Gemini 3.5 Transcribe')
+        audio.setCheckable(True)
+        audio.setChecked(True)
+        audio.triggered.connect(lambda: audio.setChecked(True))
+        row.addStretch()
         self.bababui_btn = QPushButton('BABABUI')
         self.bababui_btn.clicked.connect(self.run_bababui)
-        self.toggle_view_btn = QPushButton('Show Incoming \u25b8')
-        self.toggle_view_btn.setMinimumWidth(max(self.toggle_view_btn.fontMetrics().horizontalAdvance(t)
-            for t in ('Show Incoming \u25b8', '\u25c2 Back to Original')) + 28)
-        self.bababui_btn.setMinimumWidth(max(self.bababui_btn.fontMetrics().horizontalAdvance(t)
-            for t in ('BABABUI', 'Working...')) + 28)
+        row.addWidget(self.bababui_btn)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedWidth(180)
+        self.progress.setAccessibleName('BABABUI processing progress')
+        self.progress.hide()
+        row.addWidget(self.progress)
+        self.toggle_view_btn = QPushButton('Show Incoming')
         self.toggle_view_btn.clicked.connect(self.toggle_view)
-        right_layout.addStretch()
-        right_layout.addWidget(self.bababui_btn)
-        right_layout.addWidget(self.toggle_view_btn)
-        # Equal side columns keep the WAV input centered on the entire window.
-        side_width = max(left.sizeHint().width(), right.sizeHint().width())
-        left.setFixedWidth(side_width)
-        right.setFixedWidth(side_width)
-        layout.setColumnMinimumWidth(0, side_width)
-        layout.setColumnMinimumWidth(2, side_width)
-        layout.addWidget(left, 0, 0)
-        layout.addWidget(self.wav_input, 0, 1)
-        layout.addWidget(right, 0, 2)
+        row.addWidget(self.toggle_view_btn)
         self.toolbar.addWidget(container)
-        self.setMinimumWidth(780)
+
+    def _restore(self):
+        documents, active = [], None
+        notice = ''
+        if self.session_path.exists():
+            try:
+                documents, active = load_session(self.session_path)
+            except (OSError, ValueError) as exc:
+                try:
+                    backup = self.session_path.with_name(self.session_path.name + f'.unreadable-{time.time_ns()}')
+                    shutil.copy2(self.session_path, backup)
+                except OSError:
+                    self._recovery_enabled = False
+                notice = str(exc)
+        else:
+            original, incoming = self.legacy_dir/'original.txt', self.legacy_dir/'incoming.txt'
+            if original.exists() or incoming.exists():
+                try:
+                    text = original.read_text(encoding='utf-8') if original.exists() else ''
+                    proposed = incoming.read_text(encoding='utf-8') if incoming.exists() else text
+                    documents = [Document(original=text, incoming=proposed or text,
+                                          status='Imported the previous working transcript. Save it as a named file.')]
+                except (OSError, UnicodeError) as exc:
+                    notice = f'Could not import the previous transcript: {exc}'
+        for document in documents:
+            self.add_document(document)
+        if not documents:
+            self.add_document(Document(status=notice, warnings=[notice] if notice else []))
+        target = self.find_view(active)
+        if target:
+            self.tabs.setCurrentWidget(target)
+
+    def add_document(self, document):
+        if document.model not in MODELS or document.transcription_model != AUDIO_MODEL:
+            document.model, document.transcription_model = DEFAULT_MODEL, AUDIO_MODEL
+            document.dirty = True
+            document.warnings.append('Unsupported saved model selection was reset to the defaults.')
+        view = DocumentView(document)
+        view.changed.connect(lambda v=view: self.document_changed(v))
+        index = self.tabs.addTab(view, document.title)
+        self.tabs.setCurrentIndex(index)
+        self.document_changed(view)
+        return view
+
+    def new_tab(self):
+        return self.add_document(Document())
+
+    def duplicate_tab(self, index=None):
+        view = self.tabs.widget(index) if index is not None else self.current
+        if view:
+            view.capture_position()
+            return self.add_document(view.document.duplicate())
+
+    def document_changed(self, view):
+        index = self.tabs.indexOf(view)
+        if index < 0:
+            return
+        doc = view.document
+        label = doc.title + (' ●' if doc.dirty else '') + (' [Working]' if doc.busy else '')
+        self.tabs.setTabText(index, label)
+        tooltip = f'Text: {doc.save_path or "Unsaved"}\nWAV: {doc.wav_path or "Click or drop a WAV"}'
+        if doc.status:
+            tooltip += '\n' + doc.status
+        if doc.warnings:
+            tooltip += '\n' + '\n'.join(doc.warnings)
+        self.tabs.setTabToolTip(index, tooltip)
+        self.tabs.tabBar().setTabData(index, {'wav_path': doc.wav_path, 'busy': doc.busy})
+        for side in (AudioTabBar.LeftSide, AudioTabBar.RightSide):
+            button = self.tabs.tabBar().tabButton(index, side)
+            if button:
+                button.setEnabled(not doc.busy)
+        self.tabs.tabBar().update()
+        if view is self.current:
+            self.update_controls()
+        self.schedule_recovery()
+
+    def _tab_changed(self, index):
+        if self._last_view is not None:
+            self._last_view.capture_position()
+        self._last_view = self.current
+        if self.current:
+            self.current.schedule_restore()
+        if hasattr(self, 'bababui_btn'):
+            self.update_controls()
+        self.schedule_recovery()
+
+    def update_controls(self):
+        view = self.current
+        if not view:
+            return
+        doc = view.document
+        self.manual_btn.setEnabled(not doc.busy)
+        self.settings_btn.setEnabled(not doc.busy)
+        self.bababui_btn.setVisible(not doc.busy)
+        self.bababui_btn.setEnabled(not doc.busy)
+        self.progress.setVisible(doc.busy)
+        self.progress.setToolTip(doc.status)
+        self.progress.setAccessibleDescription(doc.status)
+        self.toggle_view_btn.setText('Back to Original' if doc.view else 'Show Incoming')
+        self.model_actions[doc.model].setChecked(True)
+        self.file_actions['Close Tab'].setEnabled(not doc.busy)
+        message = doc.status
+        if doc.warnings:
+            message += ' ' + ' '.join(doc.warnings)
+        self.statusBar().showMessage(message)
+        self.setWindowTitle(f'{doc.title}{" *" if doc.dirty else ""} - BABABUI')
 
     def set_processing_model(self, model):
-        self.processing_model = model
-        self.settings.setValue('processing_model', model)
+        if self.current and not self.current.document.busy and model in MODELS:
+            if self.current.document.model != model:
+                self.current.document.model = model
+                self.current.edited()
 
-    def _build_original_view(self):
-        """Original view: the transcript editor, which flips to an inline diff
-        whenever the incoming text differs from the original."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+    def choose_wav(self, index):
+        view = self.tabs.widget(index)
+        if not view or view.document.busy:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Choose WAV recording',
+            str(Path(view.document.wav_path).parent) if view.document.wav_path else '', 'WAV audio (*.wav *.WAV)')
+        if path:
+            self.attach_wav(index, path)
 
-        self.original_stack = QStackedWidget()
+    def attach_wav(self, index, path):
+        view = self.tabs.widget(index)
+        if not view or view.document.busy:
+            return
+        path = Path(path).resolve()
+        if not path.is_file() or path.suffix.lower() != '.wav':
+            return
+        view.document.wav_path = str(path)
+        view.document.status = 'WAV attached. Click BABABUI to process.'
+        view.edited()
+        self.tabs.setCurrentWidget(view)
 
-        # --- Text Editor ---
-        # Monospace font is critical for alignment
-        font = QFont("Courier New", 12)
-        font.setStyleHint(QFont.Monospace)
-        # Line-numbered editor so the plain view matches the diff view exactly.
-        self.editor = LineNumberedEditor(font)
-        self.editor.textChanged.connect(self._on_editor_changed)
-
-        # Inline diff display (green = added, red = removed) with accept/deny.
-        self.diff_view = DiffView()
-        self.diff_view.resolved.connect(self._on_diff_resolved)
-        # Live edits in equal blocks: just persist, no view switch or re-render.
-        self.diff_view.autosaved.connect(self._on_diff_autosaved)
-
-        self.original_stack.addWidget(self.editor)      # index 0: edit mode
-        self.original_stack.addWidget(self.diff_view)   # index 1: diff mode
-
-        layout.addWidget(self.original_stack)
-        self.stack.addWidget(page)
-
-    def _build_incoming_view(self):
-        """Hidden incoming view: editing here is what creates variance between
-        the original and the incoming text."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        font = QFont("Courier New", 12)
-        font.setStyleHint(QFont.Monospace)
-        # Identical line-numbered editor to the original view.
-        self.incoming_editor = LineNumberedEditor(font)
-        self.incoming_editor.textChanged.connect(self._on_incoming_changed)
-        layout.addWidget(self.incoming_editor)
-
-        self.stack.addWidget(page)
-
-    # ------------------------------------------------------------------
-    # File helpers
-    # ------------------------------------------------------------------
-    def _read_file(self, path):
+    def open_file(self, path=None):
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, 'Open transcript', '', 'Text files (*.txt)')
+        if not path:
+            return
+        existing = next((v for v in self.views() if v.document.save_path
+                         and canonical(v.document.save_path) == canonical(path)), None)
+        if existing:
+            self.tabs.setCurrentWidget(existing)
+            return
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            return ""
+            self.add_document(open_document(path))
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.warning(self, 'Could not open transcript', str(exc))
 
-    def _write_file(self, path, text):
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(text)
+    def save_current(self, *, save_as=False):
+        return self.save_view(self.current, save_as=save_as)
 
-    def _load_files(self):
-        original = self._read_file(ORIGINAL_FILE)
-        incoming = self._read_file(INCOMING_FILE)
+    def save_view(self, view, *, save_as=False):
+        if not view:
+            return False
+        doc = view.document
+        target = doc.save_path
+        if save_as or not target:
+            directory = Path(doc.save_path).parent if doc.save_path else Path.home()/'Documents'
+            suggestion = suggested_path(doc, directory)
+            target, _ = QFileDialog.getSaveFileName(self, 'Save transcript version', str(suggestion),
+                'Text files (*.txt)', options=QFileDialog.DontConfirmOverwrite)
+            if not target:
+                return False
+            if not Path(target).suffix:
+                target += '.txt'
+        try:
+            if any(v is not view and v.document.save_path and canonical(v.document.save_path) == canonical(target)
+                   for v in self.views()):
+                raise ValueError('That file belongs to another open tab. Choose a different version name.')
+            save_document(doc, target, save_as=save_as)
+            doc.status = 'Saved.'
+            self.document_changed(view)
+            self.persist_session()
+            return True
+        except (OSError, ValueError) as exc:
+            self.document_changed(view)
+            QMessageBox.warning(self, 'Could not save transcript', str(exc))
+            return False
 
-        # Incoming starts as a mirror of the original until it is edited.
-        if incoming == "" and original != "":
-            incoming = original
-            self._write_file(INCOMING_FILE, incoming)
-
-        self._suppress_mirror = True
-        self.editor.setPlainText(original)
-        self.incoming_editor.setPlainText(incoming)
-        self._suppress_mirror = False
-
-        self._refresh_original_view()
-
-    # ------------------------------------------------------------------
-    # Mirroring and diffing
-    # ------------------------------------------------------------------
-    def _on_editor_changed(self):
-        if self._suppress_mirror:
+    def close_tab(self, index):
+        view = self.tabs.widget(index)
+        if not view:
             return
-        # Editing the transcript editor mirrors straight into incoming, so
-        # ordinary edits never create a difference between the two.
-        text = self.editor.toPlainText()
-        self._write_file(ORIGINAL_FILE, text)
-        self._write_file(INCOMING_FILE, text)
-
-    def _on_incoming_changed(self):
-        if self._suppress_mirror:
+        if view.document.busy:
+            self.statusBar().showMessage('Wait for this tab to finish processing before closing it.')
             return
-        # Edits in the hidden view only touch incoming -> this is the variance.
-        self._write_file(INCOMING_FILE, self.incoming_editor.toPlainText())
-
-    def _view_center_line(self, view):
-        """Best-effort 0-based line at the vertical center of a view."""
-        getter = getattr(view, 'center_line', None)
-        return getter() if getter else 0
-
-    def _apply_center_line(self, view, line):
-        """Scroll `view` so `line` is centered, after layout has settled."""
-        setter = getattr(view, 'scroll_to_center_line', None)
-        if setter:
-            # Defer: child geometry / scrollbar range aren't final until the
-            # freshly shown view has been laid out.
-            QTimer.singleShot(0, lambda: setter(line))
+        if view.document.dirty:
+            answer = QMessageBox.question(self, 'Unsaved changes', f'Save changes to {view.document.title}?',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+            if answer == QMessageBox.Cancel or (answer == QMessageBox.Save and not self.save_view(view)):
+                return
+        self._last_view = None
+        self.tabs.removeTab(index)
+        view.deleteLater()
+        if not self.tabs.count():
+            self.new_tab()
+        self.persist_session()
 
     def toggle_view(self):
-        if self.stack.currentIndex() == 0:
-            # Remember where we were so the incoming view opens on the same line.
-            line = self._view_center_line(self.original_stack.currentWidget())
-            # Reveal the hidden incoming text, loaded fresh from disk.
-            self._suppress_mirror = True
-            self.incoming_editor.setPlainText(self._read_file(INCOMING_FILE))
-            self._suppress_mirror = False
-            self.stack.setCurrentIndex(1)
-            self.toggle_view_btn.setText("\u25c2 Back to Original")
-            self._apply_center_line(self.incoming_editor, line)
-        else:
-            line = self._view_center_line(self.incoming_editor)
-            self.stack.setCurrentIndex(0)
-            self.toggle_view_btn.setText("Show Incoming \u25b8")
-            self._refresh_original_view()
-            self._apply_center_line(self.original_stack.currentWidget(), line)
-
-    def _refresh_original_view(self):
-        """Show the plain editor when the two sides match, otherwise show the
-        inline diff with accept/deny controls."""
-        original = self._read_file(ORIGINAL_FILE)
-        incoming = self._read_file(INCOMING_FILE)
-
-        if original == incoming:
-            self._suppress_mirror = True
-            self.editor.setPlainText(original)
-            self._suppress_mirror = False
-            self.original_stack.setCurrentWidget(self.editor)
-        else:
-            self.diff_view.set_texts(original, incoming)
-            self._set_diff_busy(self._busy)
-            self.original_stack.setCurrentWidget(self.diff_view)
-
-    def _on_diff_autosaved(self, new_original, new_incoming):
-        # Equal-block edit in the diff view: persist both files and keep the
-        # hidden incoming editor in sync, but don't switch views or re-render.
-        self._write_file(ORIGINAL_FILE, new_original)
-        self._write_file(INCOMING_FILE, new_incoming)
-        self._suppress_mirror = True
-        self.incoming_editor.setPlainText(new_incoming)
-        self._suppress_mirror = False
-
-    def _on_diff_resolved(self, new_original, new_incoming):
-        # An accept/deny was applied: persist both sides.
-        self._write_file(ORIGINAL_FILE, new_original)
-        self._write_file(INCOMING_FILE, new_incoming)
-
-        if new_original == new_incoming:
-            # Everything reconciled -> hand control back to the editor.
-            self._suppress_mirror = True
-            self.editor.setPlainText(new_original)
-            self.incoming_editor.setPlainText(new_incoming)
-            self._suppress_mirror = False
-            self.original_stack.setCurrentWidget(self.editor)
-
-    def _active_editor(self):
-        """Return the editor the toolbar actions should operate on, or None
-        when the original view is currently showing an unresolved diff."""
-        if self.stack.currentIndex() == 1:
-            return self.incoming_editor
-        if self.original_stack.currentWidget() is self.editor:
-            return self.editor
-        return None
-
-    def insert_sample_text(self):
-        """Inserts the sample text provided in your prompt."""
-        sample = """
-
-
-
-
-          1                           EXAMINATION
-
-          2    BY MS. MADSEN:
-
-          3         Q    And good morning, everybody.  My name is
-
-          4    Stacey Madsen.  I'm with LMLA, and I represent the
-
-          5    defendants here.
-
-          6              Are we ready to proceed right now?
-
-          7         A    I'm good.
-
-          8         MS. MADSEN:  Counsel?
-
-          9         MR. SIMMONS:  Fired up.
-
-         10    BY MS. MADSEN:
-
-         11         Q    All right, Doctor, how would you like me to
-
-         12    refer to you?
-
-         13         A    Jordan is fine.
-
-         14         Q    Is that the only name you've used?
-
-         15         A    Yes.
-
-         16         Q    Approximately how many times have you been in
-
-         17    a deposition or a cross examination?
-
-         18         A    Over 50.
-
-         19         Q    Okay.
-
-         20         MS. MADSEN:  Counsel, do you stipulate to waive the
-
-         21    admonitions?
-
-         22         THE WITNESS:  I'm fine to waive.
-
-         23    BY MS. MADSEN:
-
-         24         Q    I feel uncomfortable asking you without him
-
-         25    here, I'm just going to go over the basics, your
-
-
-                                                                       1"""
-        editor = self._active_editor()
-        if editor is None:
-            self.statusBar().showMessage("Resolve the incoming changes first.")
-            return
-        editor.setPlainText(sample)
-
-    def strip_formatting(self):
-        """
-        Removes line numbers 1-25 and page numbering.
-        Ignores the 5-line headers during the strip process.
-        """
-        editor = self._active_editor()
-        if editor is None:
-            self.statusBar().showMessage("Resolve the incoming changes first.")
-            return
-        raw_text = editor.toPlainText()
-        cleaned_text = self.formatter.strip_formatting(raw_text)
-        editor.setPlainText(cleaned_text)
-        self.statusBar().showMessage("Formatting stripped.")
-
-    def apply_formatting(self):
-        """
-        Applies:
-        1. 5 Newlines at the start of every page.
-        2. Numbers 1-25 with strict alignment.
-        3. Double spacing between text lines.
-        4. Pagination footer.
-        """
-        editor = self._active_editor()
-        if editor is None:
-            self.statusBar().showMessage("Resolve the incoming changes first.")
-            return
-        raw_text = editor.toPlainText()
-        formatted_text, page_count = self.formatter.apply_formatting(raw_text)
-        editor.setPlainText(formatted_text)
-        self.statusBar().showMessage(f"Applied standards: {page_count} pages generated.")
-    
-    def set_busy(self, busy):
-        self._busy = busy
-        for control in (self.manual_btn, self.settings_btn, self.wav_input, self.bababui_btn):
-            control.setEnabled(not busy)
-        self.editor.setReadOnly(busy)
-        self.incoming_editor.setReadOnly(busy)
-        self._set_diff_busy(busy)
-        self.bababui_btn.setText('Working...' if busy else 'BABABUI')
-
-    def _set_diff_busy(self, busy):
-        # Keep the scroll area usable while preventing edits and accept/deny.
-        for editor in self.diff_view.findChildren(QPlainTextEdit):
-            editor.setReadOnly(busy)
-        for button in self.diff_view.findChildren(QPushButton):
-            button.setEnabled(not busy)
+        if self.current:
+            self.current.toggle_view()
 
     def run_bababui(self):
-        if self._busy:
+        view = self.current
+        if not view or view.document.busy:
             return
-        if self.wav_input.path is None:
-            self.statusBar().showMessage('Choose or drop a WAV file first.')
+        doc = view.document
+        if not doc.wav_path:
+            doc.status = 'Attach a WAV to this tab first.'
+            self.document_changed(view)
             return
-        self.set_busy(True)
-        self._worker = _BababuiWorker(str(self.wav_input.path), self.processing_model, load_config())
-        self._worker.progress.connect(self.statusBar().showMessage)
-        self._worker.succeeded.connect(self._on_bababui_succeeded)
-        self._worker.failed.connect(self._on_bababui_failed)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
-
-    def _on_bababui_succeeded(self, response, warnings):
         try:
-            # Atomic publication prevents a partial incoming file on write failure.
-            destination = Path(INCOMING_FILE)
-            temporary = destination.with_suffix('.tmp')
-            temporary.write_text(response, encoding='utf-8')
-            temporary.replace(destination)
-            self._suppress_mirror = True
-            self.incoming_editor.setPlainText(response)
-            self._suppress_mirror = False
-            if self.stack.currentIndex() == 0:
-                self._refresh_original_view()
-            self.statusBar().showMessage('Incoming updated. Review the suggested revisions.' +
-                                         (' ' + ' '.join(warnings) if warnings else ''))
-            if warnings:
-                QMessageBox.warning(self, 'Transcription review notes', '\n\n'.join(warnings))
-        except OSError as exc:
-            self._on_bababui_failed(f'Could not save Incoming: {exc}')
-        finally:
-            self._suppress_mirror = False
+            request = Request(doc.id, doc.wav_path, doc.model, doc.transcription_model,
+                              PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()))
+            view.set_busy(True)
+            doc.status = 'Starting...'
+            doc.warnings = []
+            self.document_changed(view)
+            self.persist_session()
+            self.jobs.start(request)
+        except (OSError, ValueError) as exc:
+            view.set_busy(False)
+            self._failed(doc.id, str(exc))
 
-    def _on_bababui_failed(self, message):
-        self.statusBar().showMessage(message)
-        QMessageBox.warning(self, 'BABABUI could not finish', message)
+    def _progress(self, identifier, message):
+        view = self.find_view(identifier)
+        if view:
+            view.document.status = message
+            self.document_changed(view)
 
-    def _on_worker_finished(self):
-        self.set_busy(False)
-        self._worker.deleteLater()
-        self._worker = None
+    def _succeeded(self, identifier, text, warnings):
+        view = self.find_view(identifier)
+        if view:
+            view.receive(text, warnings)
+
+    def _failed(self, identifier, message):
+        view = self.find_view(identifier)
+        if view:
+            view.document.status = message
+            self.document_changed(view)
+
+    def _completed(self, identifier):
+        view = self.find_view(identifier)
+        if view:
+            view.set_busy(False)
+            self.document_changed(view)
+            self.persist_session()
+
+    def _manual_editor(self):
+        view = self.current
+        if not view or view.document.busy:
+            return None
+        editor = view.active_editor()
+        if editor is None:
+            view.document.status = 'Resolve the incoming changes first.'
+            self.document_changed(view)
+        return editor
+
+    def insert_sample_text(self):
+        editor = self._manual_editor()
+        if editor is not None:
+            editor.setPlainText(SAMPLE)
+
+    def strip_formatting(self):
+        editor = self._manual_editor()
+        if editor is not None:
+            editor.setPlainText(self.formatter.strip_formatting(editor.toPlainText()))
+
+    def apply_formatting(self):
+        editor = self._manual_editor()
+        if editor is not None:
+            text, pages = self.formatter.apply_formatting(editor.toPlainText())
+            editor.setPlainText(text)
+            self.current.document.status = f'Applied standards: {pages} pages generated.'
+            self.document_changed(self.current)
+
+    def batch_strip_formatting(self):
+        view = self.current
+        if not view or view.document.busy:
+            return
+        start = str(Path(view.document.save_path).parent) if view.document.save_path else ''
+        folder = QFileDialog.getExistingDirectory(self, 'Choose folder of text files to strip', start)
+        if not folder:
+            return
+        try:
+            results = self.formatter.batch_strip_formatting(folder, str(Path(folder)/'stripped'))
+            view.document.status = f'Batch strip: {len(results["processed"])} processed, {len(results["failed"])} failed.'
+            self.document_changed(view)
+        except (OSError, ValueError) as exc:
+            view.document.status = str(exc)
+            self.document_changed(view)
+
+    def schedule_recovery(self):
+        if not self._restoring:
+            self._recovery_timer.start()
+
+    def persist_session(self):
+        if self._restoring or not self._recovery_enabled:
+            return False
+        self._recovery_timer.stop()
+        try:
+            for view in self.views():
+                view.capture_position()
+            save_session(self.session_path, [v.document for v in self.views()],
+                         self.current.document.id if self.current else None)
+            return True
+        except (OSError, ValueError) as exc:
+            self.statusBar().showMessage(f'Could not save recovery: {exc}')
+            return False
 
     def closeEvent(self, event):
-        if self._busy:
-            self.statusBar().showMessage('Wait for BABABUI to finish before closing the editor.')
+        if any(v.document.busy for v in self.views()):
+            self.statusBar().showMessage('Wait for processing tabs to finish before closing BABABUI.')
+            event.ignore()
+        elif not self.persist_session():
+            QMessageBox.warning(self, 'Recovery could not be saved', 'Keep the app open and save your documents before trying again.')
             event.ignore()
         else:
             super().closeEvent(event)
 
-    def batch_strip_formatting(self):
-        """
-        Batch processes all .txt files from 'original' folder
-        and saves stripped versions to 'stripped' folder.
-        """
-        try:
-            results = self.formatter.batch_strip_formatting(
-                os.path.join(BASE_DIR, 'original'),
-                os.path.join(BASE_DIR, 'stripped'),
-            )
-            
-            # Build summary message
-            message_parts = []
-            
-            if results['processed']:
-                message_parts.append(f"Successfully processed {len(results['processed'])} file(s):")
-                for item in results['processed']:
-                    filename = item['input'].split('\\')[-1].split('/')[-1]
-                    message_parts.append(f"  ✓ {filename}")
-            
-            if results['failed']:
-                message_parts.append(f"\nFailed to process {len(results['failed'])} file(s):")
-                for item in results['failed']:
-                    filename = item['file'].split('\\')[-1].split('/')[-1]
-                    message_parts.append(f"  ✗ {filename}: {item['error']}")
-            
-            if results['skipped']:
-                message_parts.append("\n" + "\n".join(results['skipped']))
-            
-            message = "\n".join(message_parts)
-            
-            # Show results in message box
-            if results['failed']:
-                QMessageBox.warning(self, "Batch Strip - Partial Success", message)
-            else:
-                QMessageBox.information(self, "Batch Strip - Complete", message)
-            
-            self.statusBar().showMessage(f"Batch strip complete: {len(results['processed'])} processed, {len(results['failed'])} failed")
-            
-        except FileNotFoundError as e:
-            QMessageBox.critical(self, "Error", str(e))
-            self.statusBar().showMessage("Batch strip failed: folder not found")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
-            self.statusBar().showMessage("Batch strip failed")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = TranscriptEditor()
     window.show()
