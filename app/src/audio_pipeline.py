@@ -35,6 +35,7 @@ def segments(duration):
 
 def parse_words(response):
     words = []
+    speaker_starts = {}
     for step in getattr(response, 'steps', None) or []:
         if getattr(step, 'type', None) != 'model_output':
             continue
@@ -63,8 +64,12 @@ def parse_words(response):
                     raise ValueError('Transcription is missing valid word timestamps.') from None
                 if not a.speaker or not math.isfinite(t0) or not math.isfinite(t1) or not 0 <= t0 <= t1:
                     raise ValueError('Transcription is missing valid speaker tags or timestamps.')
-                if words and t0 < words[-1].start:
-                    raise ValueError('Transcription timestamps are out of order.')
+                # Speaker turns can overlap in time. Keep the model's text order,
+                # but still reject timestamps that run backwards for one speaker.
+                if t0 < speaker_starts.get(a.speaker, 0):
+                    raise ValueError(f'Transcription timestamps are out of order for speaker {a.speaker}: '
+                                     f'{t0:g}s follows {speaker_starts[a.speaker]:g}s.')
+                speaker_starts[a.speaker] = t0
                 words.append(Word(text, a.speaker, t0, t1))
     if not words:
         raise ValueError('No speech with speaker tags was returned.')

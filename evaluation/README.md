@@ -51,10 +51,16 @@ Use the folder buttons next to the dataset, setup, and run selectors to open
 their storage folders on the machine running Streamlit.
 
 **Strip formatting** starts on. It removes transcript numbering and page formatting
-from the input before the model sees it. The same formatter strips the reply,
+and joins recognized 56-character continuations into logical paragraphs before
+the model sees the input. It preserves speaker turns, topic paragraphs, headings,
+procedural notations, and ambiguous line breaks. Joined wrap boundaries become a
+single space. The same formatter strips the reply,
 reviewed output, and original input baseline for scoring. With the toggle off,
 numbering and spacing count in the score. Display and export apply standard
-numbering after grading in both modes.
+56-character wrapping and numbered, 25-line pages after grading in both modes.
+The width includes indentation and labels, excluding the number gutter. Continuation
+lines start flush left; words and hyphenated terms are never split. A single longer
+token may exceed the width. Existing saved datasets and run history are unchanged.
 
 The `/#*…` input filter starts on and removes tokens such as `/#*abc`. The broader
 `/…` filter starts off. When on, it removes a slash and everything after it up

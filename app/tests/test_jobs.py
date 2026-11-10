@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import pytest
 from app.src.jobs import TranscriptionCoordinator
+from transcript_formatting import TranscriptFormatter
 
 
 @pytest.mark.parametrize('fails', [False, True])
@@ -61,6 +62,7 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
         def check_ready(self):
             pass
         def complete(self, text, prompt):
+            assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == text
             calls.append((self.model, text, prompt))
             if self.model == 'fail':
                 raise ValueError('Formatting failed')
@@ -92,8 +94,58 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
         for worker in list(manager.workers.values()):
             worker.wait(5000)
         app.processEvents()
-    assert results == [('first', 'success', [])]
+    assert results == [('first', TranscriptFormatter().apply_formatting('success')[0], [])]
     assert failures == [('second', 'Formatting failed')]
     assert set(finished) == {'first', 'second'} and not manager.workers
     assert calls.count('transcribe') == 1
     assert ('success', 'Audio transcript', 'Captured prompt') in calls
+
+
+def test_worker_numbers_model_output_before_emitting_incoming(tmp_path):
+    from app.src.jobs import ProcessingWorker, Request
+
+    wav = tmp_path / 'sample.wav'
+    wav.write_bytes(b'audio')
+    output = (
+        'EXAMINATION\nBY SPEAKER 2:\n'
+        '     Q    Please describe the records you reviewed before the examination.\n'
+        + '\n'.join(f'     Q    Question {i}?' for i in range(23)))
+
+    class Pipeline:
+        def __init__(self, *args):
+            pass
+
+        def run(self, path, progress):
+            return 'Speaker 2: Question?', ['Transcription warning']
+
+    class Processor:
+        def __init__(self, *args):
+            pass
+
+        def check_ready(self):
+            pass
+
+        def complete(self, text, prompt):
+            assert text == 'Speaker 2: Question?'
+            assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == text
+            return output
+
+    worker = ProcessingWorker(
+        Request('document', str(wav), 'model', 'transcribe', 'rules', {}),
+        TranscriptionCoordinator(), Pipeline, Processor)
+    results, failures = [], []
+    worker.succeeded.connect(lambda *args: results.append(args))
+    worker.failed.connect(lambda *args: failures.append(args))
+    worker.run()
+
+    assert not failures
+    identifier, incoming, warnings = results[0]
+    assert identifier == 'document'
+    assert warnings == ['Transcription warning']
+    assert incoming.count('\f') == 1
+    assert '          1                          EXAMINATION' in incoming
+    assert '          2    BY SPEAKER 2:' in incoming
+    assert '          3         Q    Please describe the records you reviewed\n' in incoming
+    assert '          4    before the examination.\n' in incoming
+    assert '          1         Q    Question 21?' in incoming
+    assert TranscriptFormatter().strip_formatting(incoming) == ' ' * 22 + output

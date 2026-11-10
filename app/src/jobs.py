@@ -9,6 +9,21 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline
 from app.src.processing import ProcessingClient, APP_DIR
+from transcript_formatting import TranscriptFormatter
+from evaluation.storage import atomic_bytes
+
+
+_raw_export_lock = Lock()
+
+
+def save_raw_transcription(wav_path, text):
+    path = Path(wav_path).with_suffix('.raw.txt')
+    data = text.encode('utf-8')
+    with _raw_export_lock:
+        # Shared transcription jobs can finish together for the same WAV.
+        if not path.exists() or path.read_bytes() != data:
+            atomic_bytes(path, data)
+    return path
 
 
 class TranscriptionCoordinator:
@@ -75,8 +90,12 @@ class ProcessingWorker(QThread):
             report = lambda message: self.progress.emit(request.document_id, message)
             report('Checking WAV...')
             text, warnings = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report)
+            report('Saving raw transcription...')
+            save_raw_transcription(request.wav_path, text)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
+            report('Applying transcript standards...')
+            result, _ = TranscriptFormatter().apply_formatting(result)
             self.succeeded.emit(request.document_id, result, list(warnings))
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'

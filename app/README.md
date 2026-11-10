@@ -29,7 +29,12 @@ or close it. Duplicates keep the text, pending revisions, WAV, and model setting
 but start as unsaved versions with no running request.
 
 BABABUI validates the WAV, transcribes it with Gemini 3.5 Transcribe and speaker
-tags, formats that transcription, and writes the result to Incoming. The current
+tags, and automatically saves the raw speaker-labeled text beside the WAV as
+`<wav-name>.raw.txt` before calling the editing model. This file is also written
+when cached transcription is reused, and remains available if editing fails.
+Each run replaces this raw export; save review edits in a separate file. The WAV
+folder must be writable. BABABUI then formats the transcription and writes the
+result to Incoming. The current
 transcript is never sent to the model and stays unchanged until revisions are
 accepted. Only that tab is locked during processing; scrolling and view switching
 remain available. BABABUI becomes a loading bar, with the current stage in the
@@ -52,8 +57,30 @@ Insert Sample, and Batch Strip.
 Batch Strip lets you choose a folder and writes results into its `stripped`
 subfolder. It starts from the selected document's folder when available.
 
-Edit `src/bababui_prompt.md` to replace the basic formatting placeholder. This
-is the only editor formatting prompt. Evaluation keeps its own saved prompts.
+`src/bababui_prompt.md` contains the transcript-editing instructions and the cleaned
+rules, examples, and explanations from `MWW SUMMARY - smileys fixed.pdf`. Edit the
+`# Task` section at the top to update the instructions. The task instructions
+convert speaker labels into examination headings, Q/A, and speaker-tagged colloquy,
+preserving speaker numbers, order, and testimony. The model returns one logical
+line per paragraph, with labels and paragraph indentation. Before sending the
+response to Incoming, the shared `transcript_formatting.py` formatter wraps at
+56 characters, including indentation and labels but excluding the line-number
+gutter. Continuation lines start flush left. Words and hyphenated terms are never
+split; a single longer token may exceed the width. It then adds numbered,
+25-line pages, just like Manual > Apply Standards. Reapplying standards removes
+existing numbering and wrapping first.
+
+Strip Formatting and Batch Strip remove numbering and join recognized wrapped
+continuations, including across page breaks, with one space. Speaker turns,
+indented topic paragraphs, headings, and procedural notations remain separate.
+Ambiguous line breaks and standalone numeric answers are preserved. Other
+spacing within paragraphs stays unchanged. A continuation is joined only when
+its first word would not fit on the preceding physical line with one space.
+
+Book navigation and the duplicate page are removed. Clear OCR errors are repaired,
+and correct/incorrect example markers are written as text.
+The button reloads this file on each run. This is the only editor formatting
+prompt. Evaluation keeps its own saved prompts.
 
 ## Saving and recovery
 

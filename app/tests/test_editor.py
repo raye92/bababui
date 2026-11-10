@@ -37,6 +37,19 @@ def test_toolbar_tabs_shortcuts_and_dirty_dot(window):
     assert window.file_btn.text() == 'File'
 
 
+def test_manual_formatting_wraps_and_strip_restores_paragraphs(window):
+    paragraph = '     Q    Please describe the records you reviewed before the examination.'
+    window.current.editor.setPlainText(paragraph)
+    window.apply_formatting()
+    numbered = window.current.editor.toPlainText()
+    assert '          1         Q    Please describe the records you reviewed\n' in numbered
+    assert '          2    before the examination.\n' in numbered
+    window.apply_formatting()
+    assert window.current.editor.toPlainText() == numbered
+    window.strip_formatting()
+    assert window.current.editor.toPlainText() == paragraph
+
+
 def test_click_and_drop_tab_wav(window, tmp_path, monkeypatch):
     wav = tmp_path/'meeting.wav'
     wav.write_bytes(b'wav')

@@ -47,3 +47,13 @@ in temporary folders outside `evaluation/data`.
 - Remove filler, unnecessary jargon, and repeated explanations.
 - Keep process commentary, captions, and results brief and factual.
 - Do not use em dashes. Use commas, periods, or semicolons.
+
+# Editing the transcript prompt
+
+- Keep the `# Task` section in `app/src/bababui_prompt.md` concise. Replace or
+  simplify existing rules instead of appending overlapping instructions.
+- Generalize from transcript examples. Avoid phrase-specific rules and lists
+  of exceptions; use at most one example when a rule needs clarification.
+- Remove meaningless stutters, starts, and conversational lead-ins while
+  preserving substantive meaning, uncertainty, and corrections.
+- Leave deterministic layout, such as centering and pagination, to the formatter.
