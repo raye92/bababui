@@ -29,7 +29,12 @@ or close it. Duplicates keep the text, pending revisions, WAV, and model setting
 but start as unsaved versions with no running request.
 
 BABABUI validates the WAV, transcribes it with Gemini 3.5 Transcribe and speaker
-tags, formats that transcription, and writes the result to Incoming. The current
+tags, and automatically saves the raw speaker-labeled text beside the WAV as
+`<wav-name>.raw.txt` before calling the editing model. This file is also written
+when cached transcription is reused, and remains available if editing fails.
+Each run replaces this raw export; save review edits in a separate file. The WAV
+folder must be writable. BABABUI then formats the transcription and writes the
+result to Incoming. The current
 transcript is never sent to the model and stays unchanged until revisions are
 accepted. Only that tab is locked during processing; scrolling and view switching
 remain available. BABABUI becomes a loading bar, with the current stage in the
@@ -54,8 +59,11 @@ subfolder. It starts from the selected document's folder when available.
 
 `src/bababui_prompt.md` contains the transcript-editing instructions and the cleaned
 rules, examples, and explanations from `MWW SUMMARY - smileys fixed.pdf`. Add specific
-overrides in the `# Extra instructions` section at the top. Speaker labels and
-turn order are preserved, and the result contains only the revised transcript.
+overrides in the `# Extra instructions` section at the top. The task instructions convert speaker labels into examination headings, Q/A,
+and speaker-tagged colloquy, preserving speaker numbers, order, and testimony. Output uses the
+sample's plain-text deposition layout with 56-character lines. Before sending
+the response to Incoming, BABABUI applies the shared `transcript_formatting.py`
+formatter, adding the same numbered, 25-line pages as Manual > Apply Standards.
 Book navigation and the duplicate page are removed. Clear OCR errors are repaired,
 and correct/incorrect example markers are written as text.
 The button reloads this file on each run. This is the only editor formatting
