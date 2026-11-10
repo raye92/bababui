@@ -2,8 +2,8 @@
 
 Convert the supplied speaker-labeled transcript into a deposition transcript using
 the examination, Q/A, colloquy, and plain-text layout below. Apply the punctuation,
-capitalization, spelling, and number rules in the reference. Any supplied Extra
-instructions take precedence; the cleanup, paragraphing, and output layout
+capitalization, spelling, and number rules in the reference. The cleanup,
+paragraphing, and output layout
 specified here take precedence over conflicting rules and examples in the
 reference, including rules for retaining or punctuating false starts and fillers.
 Use only the supplied transcript and instructions. Do not add facts from outside
@@ -45,21 +45,20 @@ transition, not merely a change of speaker.
 
 ## Plain-text layout
 
-Use spaces, not tabs. Wrap lines at word boundaries to a maximum of 56 characters,
-including indentation, without splitting words. Center EXAMINATION and FURTHER
-EXAMINATION within that width. Keep BY lines flush left.
+Use spaces, not tabs. Write each paragraph on one logical line, without adding
+line breaks to fit a display width. Center EXAMINATION and FURTHER EXAMINATION
+within a 56-character field. Keep BY lines flush left.
 
 Begin each Q/A paragraph with five spaces, Q or A, then four spaces. Begin each
 colloquy paragraph with five spaces, its uppercase label and colon, then two spaces.
-Wrapped continuation lines start at the left margin. A new paragraph within the
-same speaker turn begins with ten spaces and no repeated Q/A or speaker label;
-use such paragraphs only when the speaker changes to a completely different
-topic. A sentence ending, brief acknowledgment, pause, filler removal, false-start
-removal, or related follow-up question does not create a new paragraph. Keep
+A new paragraph within the same speaker turn begins with ten spaces and no
+repeated Q/A or speaker label; use such paragraphs only when the speaker changes
+to a completely different topic. A sentence ending, brief acknowledgment, pause,
+filler removal, false-start removal, or related follow-up question does not create
+a new paragraph. Keep
 "Thank you.  You are acting in the capacity of qualified medical evaluator..."
 in one paragraph. Likewise, keep "Then I have all of them.  Okay.  How many
-examinations did you perform?" in one paragraph. Normal line wrapping is not a
-paragraph break: do not indent a wrapped line as if it started a new paragraph.
+examinations did you perform?" in one paragraph.
 Always start a new labeled turn when the speaker changes. Do not add blank lines
 between turns or paragraphs.
 Use two spaces between sentences on the same line, but not within abbreviations

@@ -106,8 +106,10 @@ def test_worker_numbers_model_output_before_emitting_incoming(tmp_path):
 
     wav = tmp_path / 'sample.wav'
     wav.write_bytes(b'audio')
-    output = 'EXAMINATION\nBY SPEAKER 2:\n' + '\n'.join(
-        f'     Q    Question {i}?' for i in range(24))
+    output = (
+        'EXAMINATION\nBY SPEAKER 2:\n'
+        '     Q    Please describe the records you reviewed before the examination.\n'
+        + '\n'.join(f'     Q    Question {i}?' for i in range(23)))
 
     class Pipeline:
         def __init__(self, *args):
@@ -143,5 +145,7 @@ def test_worker_numbers_model_output_before_emitting_incoming(tmp_path):
     assert incoming.count('\f') == 1
     assert '          1    EXAMINATION' in incoming
     assert '          2    BY SPEAKER 2:' in incoming
-    assert '          1         Q    Question 23?' in incoming
+    assert '          3         Q    Please describe the records you reviewed\n' in incoming
+    assert '          4    before the examination.\n' in incoming
+    assert '          1         Q    Question 21?' in incoming
     assert TranscriptFormatter().strip_formatting(incoming) == output
