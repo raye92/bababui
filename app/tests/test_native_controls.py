@@ -160,6 +160,27 @@ def test_clipboard_reuses_unused_destination_definition():
     assert field_values(result)['WITNESS'] == 'DESTINATION NAME'
 
 
+@pytest.mark.parametrize('newline', ['\r\n', '\r'])
+def test_pasting_windows_newlines_over_a_field_keeps_model_and_editor_equal(native_window, tmp_path, newline):
+    from PySide6.QtCore import QMimeData
+    view = open_fields(native_window, tmp_path)
+    before = view.document.native.original
+    field = next(e for e in before.elements if e.kind == 'field')
+    cursor = view.editor.textCursor()
+    cursor.setPosition(field.start)
+    cursor.setPosition(field.end, QTextCursor.KeepAnchor)
+    view.editor.setTextCursor(cursor)
+    data = QMimeData()
+    data.setText('One' + newline + 'Two')
+    view.editor.insertFromMimeData(data)
+    expected = before.text[:field.start] + 'One\nTwo' + before.text[field.end:]
+    assert view.document.original == view.editor.toPlainText() == expected
+    view.editor.undo()
+    assert view.document.native.original == before
+    view.editor.redo()
+    assert view.document.original == view.editor.toPlainText() == expected
+
+
 def test_incoming_definition_only_changes_can_be_reviewed(native_window, tmp_path):
     view = open_fields(native_window, tmp_path)
     original = view.document.native.original

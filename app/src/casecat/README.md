@@ -81,8 +81,15 @@ WAV playback remains available. Missing WAV permits transcript editing.
 
 ## Verification and limits
 
-The supplied transcript's 277 nonblank reference lines matched case, punctuation,
-and wrapping. Edited copies opened, saved, and reopened in CaseCAT. A further
+The supplied transcript's 12 pages and 277 nonblank lines were compared against
+CaseCAT's printed output from the same ZIP. Wording, wrapping, paragraph indents,
+centering, and blank lines matched. Text positions were within half a printed
+point; all 300 line numbers and 12 page numbers were within one point. The
+renderer uses the embedded gutter position and supported right-footer page
+number position/font, and keeps the full final page scrollable. Courier New
+uses fractional advances with measured native tracking to preserve line width.
+These measurements allow for differences in Qt and Windows printer rasterization.
+Edited copies opened, saved, and reopened in CaseCAT. A further
 four-edit Qt/project/ZIP/native-save round trip retained the expected text and
 exact original steno/WAV bytes.
 

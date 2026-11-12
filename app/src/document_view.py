@@ -17,10 +17,10 @@ class ImportView(QWidget):
         self.document = document
         layout = QVBoxLayout(self)
         layout.addStretch()
-        layout.addWidget(QLabel('Import a CaseCAT ZIP to start editing.'))
+        layout.addWidget(QLabel('Import a CaseCAT ZIP to start editing.'), alignment=Qt.AlignHCenter)
         button = QPushButton('Import CaseCAT ZIP')
         button.clicked.connect(self.import_requested)
-        layout.addWidget(button)
+        layout.addWidget(button, alignment=Qt.AlignHCenter)
         layout.addStretch()
 
     def capture_position(self): pass
@@ -66,7 +66,7 @@ class DocumentView(QWidget):
         self.diff_view.setMinimumWidth(260)
         self.review_splitter.setStretchFactor(0, 1)
         self.review_splitter.setSizes([900, 300])
-        layout.addWidget(self.review_splitter)
+        layout.addWidget(self.review_splitter, 1)
         self.editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.editor, 'original'))
         self.incoming_editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.incoming_editor, 'incoming'))
         self.playback = None

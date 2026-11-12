@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, QUrl, QSignalBlocker
 from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlider,
-                               QTextEdit, QStyle, QStyleOptionSlider)
+                               QTextEdit, QStyle, QStyleOptionSlider, QSizePolicy)
 
 from app.src.casecat.anchors import utf16_index
 
@@ -60,6 +60,7 @@ class SeekSlider(QSlider):
 class PlaybackBar(QWidget):
     def __init__(self, wav_path, timing, context, parent=None):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.timing, self.context = timing, context
         self._highlight_editor = None
         self._pending_seek = None

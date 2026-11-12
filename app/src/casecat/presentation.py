@@ -25,7 +25,8 @@ def presentation(job, bundle):
                 # are break opportunities in CATalyst's line layout.
                 hard.update(offset + i for i, char in enumerate(token.text) if char == ' ')
             if token.raw[0] == 0x16:
-                style = int.from_bytes(token.raw[1:], 'little')
+                # By-lines may combine the paragraph record with a label.
+                style = int.from_bytes(token.raw[1:3], 'little')
                 paragraphs[offset + (1 if token.text.startswith('\n') else 0)] = (
                     definitions[style - 1] if 1 <= style <= len(definitions) else style)
             if token.raw[:2] == b'\x15\x03':
@@ -52,7 +53,7 @@ def presentation(job, bundle):
     if definitions:
         current = definitions[0]
         for group in groups:
-            first = next((int.from_bytes(t.raw[1:], 'little') for t in group if t.raw[0] == 0x16), None)
+            first = next((int.from_bytes(t.raw[1:3], 'little') for t in group if t.raw[0] == 0x16), None)
             if first is not None and 1 <= first <= len(definitions):
                 current = definitions[first - 1]
                 break

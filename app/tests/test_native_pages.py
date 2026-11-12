@@ -55,6 +55,69 @@ def test_inserted_paragraph_inherits_native_continuation_indent():
     view.close()
 
 
+def test_compound_byline_uses_its_own_native_indent():
+    import struct
+    from app.tests.test_native_casecat import job_files, zip_bytes
+    from app.tests.test_native_layout import layout_bytes
+    app, view = paged_editor()
+    files = job_files(words=('\x16\x05\x00\x11\x06\x02\x00\x00\x00BY COUNSEL:',))
+    native = bytearray(files['jobs/example.sgngl'])
+    payload = bytearray(layout_bytes(first=3600))
+    paragraph = payload[1024:1536]
+    byline = bytearray(paragraph)
+    struct.pack_into('<H', byline, 174, 2160)
+    payload[1536:1536] = paragraph * 3 + byline
+    struct.pack_into('<I', payload, 4, 5)
+    struct.pack_into('<II', native, 540, len(native), len(payload))
+    struct.pack_into('<I', native, 624, 1)
+    files['jobs/example.sgngl'] = bytes(native + payload)
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    view.set_native_source(bundle, job)
+    view.setPlainText(job.text)
+    assert view.document().firstBlock().blockFormat().textIndent() == 0
+    view.close()
+
+
+def test_double_spacing_starts_at_top_margin_instead_of_lowering_glyphs():
+    app, view = paged_editor()
+    view.setPlainText('First\nSecond')
+    lines = view.page_lines()
+    # Qt rounds root-frame margins to physical pixels.
+    assert abs(lines[0].y - view._top) < 0.5
+    assert abs(lines[1].y - lines[0].y - view._line_height) < 0.02
+    view.close()
+
+
+def test_native_courier_pitch_preserves_56_columns_without_integer_rounding():
+    import struct
+    from pathlib import Path
+    import pytest
+    from PySide6.QtGui import QFontMetricsF, QFontDatabase
+    from app.tests.test_native_casecat import job_files, zip_bytes
+    from app.tests.test_native_layout import layout_bytes
+    app, view = paged_editor()
+    font_file = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts/cour.ttf'
+    if font_file.exists():
+        QFontDatabase.addApplicationFont(str(font_file))
+    if 'Courier New' not in QFontDatabase.families():
+        pytest.skip('The native Courier New font is unavailable.')
+    files = job_files(words=('a' * 51 + ' truck',))
+    native = bytearray(files['jobs/example.sgngl'])
+    payload = layout_bytes()
+    struct.pack_into('<II', native, 540, len(native), len(payload))
+    struct.pack_into('<I', native, 624, 1)
+    files['jobs/example.sgngl'] = bytes(native + payload)
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    view.set_native_source(bundle, job)
+    view.setPlainText(job.text)
+    # Measured native 12pt Courier pitch, at the editor's 1.5px/pt scale.
+    assert abs(QFontMetricsF(view.font()).horizontalAdvance('0') - 10.86) < 0.02
+    assert [line.text for line in view.page_lines()] == ['A' + 'a' * 50, 'truck']
+    view.close()
+
+
 def test_native_page_edit_and_undo_use_logical_offsets_across_wrapped_lines():
     app, view = paged_editor()
     text = '     Q    ' + 'Word ' * 30
@@ -236,4 +299,109 @@ def test_page_click_selects_change_and_insertion_keeps_text_unchanged(tmp_path, 
     assert (doc.native.original, doc.native.incoming) == before
     view.review(index, True)
     assert doc.original == 'The red car is very large.'
+    view.close()
+
+
+def test_resize_preserves_page_breaks_and_positive_line_numbers():
+    app, view = paged_editor()
+    text = '\n'.join('     Q    ' + 'Word ' * 15 for _ in range(60))
+    view.setPlainText(text)
+    baseline = [(line.page, line.number, line.text) for line in view.page_lines()]
+    for width, height in ((900, 650), (720, 900), (1250, 700), (1000, 700)):
+        view.resize(width, height)
+        app.processEvents()
+        assert view.document().pageSize().height() == view._page_height
+        lines = view.page_lines()
+        assert [(line.page, line.number, line.text) for line in lines] == baseline
+        assert all(1 <= line.number <= view.lines_per_page for line in lines)
+        assert view.toPlainText() == text
+        assert not view.document().isUndoAvailable()
+    view.close()
+
+
+def test_page_number_is_in_bottom_right_footer():
+    app, view = paged_editor()
+    view.setPlainText('First page.\n' * 60)
+    for page in range(view.document().pageCount()):
+        footer = view.page_number_rect(page)
+        assert footer.top() >= (page + 1) * view._page_height - view._bottom
+        assert footer.bottom() < (page + 1) * view._page_height
+        assert footer.right() == view._page_width - view._right
+        assert footer.left() > view._page_width / 2
+    view.close()
+
+
+def test_short_final_page_can_scroll_to_its_footer_after_resize():
+    app, view = paged_editor()
+    view.setPlainText('\n'.join('Transcript line.' for _ in range(28)))
+    for height in (500, 800, 600):
+        view.resize(1000, height)
+        app.processEvents()
+        footer = view.page_number_rect(view.document().pageCount() - 1)
+        assert view.verticalScrollBar().maximum() + view.viewport().height() >= footer.bottom()
+    view.close()
+
+
+def test_short_page_scrollbar_settles_without_repeated_resize_events():
+    from pathlib import Path
+    from PySide6.QtGui import QFontDatabase
+    from PySide6.QtTest import QTest, QSignalSpy
+    app = QApplication.instance() or QApplication([])
+    font_file = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts/cour.ttf'
+    if font_file.exists():
+        QFontDatabase.addApplicationFont(str(font_file))
+    app, view = paged_editor()
+    view.setPlainText('Short transcript.')
+    view.resize(1050, 650)
+    spy = QSignalSpy(view.verticalScrollBar().rangeChanged)
+    QTest.qWait(20)
+    assert spy.count() < 10
+    assert view.verticalScrollBar().maximum() > 0
+    view.close()
+
+
+def test_formatter_defaults_center_heading_without_changing_stored_text():
+    from PySide6.QtCore import Qt
+    from app.tests.test_native_casecat import job_files, zip_bytes
+    app, view = paged_editor()
+    text = 'EXAMINATION\nBY SPEAKER 2:\n     Q    Please describe the records you reviewed before the examination.'
+    bundle = inspect_archive(zip_bytes(job_files(words=(text,), audio=False)))
+    job = load_job(bundle, bundle.jobs[0])
+    view.set_native_source(bundle, job)
+    view.setPlainText(job.text)
+    assert view.document().firstBlock().blockFormat().alignment() == Qt.AlignHCenter
+    assert view.document().firstBlock().next().blockFormat().alignment() == Qt.AlignLeft
+    assert view.columns == 56 and view.lines_per_page == 25
+    assert view.toPlainText() == text
+    view.close()
+
+
+def test_embedded_page_layout_survives_resize_and_review(tmp_path, monkeypatch):
+    import struct
+    from app.src import documents
+    from app.src.document_view import DocumentView
+    from app.tests.test_native_casecat import job_files, zip_bytes
+    from app.tests.test_native_layout import layout_bytes
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path/'assets')
+    files = job_files(words=('First long paragraph with repeated words. ' * 250,), audio=False)
+    native = bytearray(files['jobs/example.sgngl'])
+    payload = layout_bytes(lines=28)
+    struct.pack_into('<II', native, 540, len(native), len(payload))
+    struct.pack_into('<I', native, 624, 1)
+    files['jobs/example.sgngl'] = bytes(native) + payload
+    doc = documents.import_casecat(inspect_archive(zip_bytes(files)))
+    view = DocumentView(doc)
+    view.resize(1100, 800)
+    view.show()
+    view.receive(doc.original.replace('First', 'Second', 1), [])
+    original = doc.native.original
+    for width in (900, 1300, 1100):
+        view.resize(width, 700)
+        view.review_splitter.setSizes([width-300, 300])
+        app.processEvents()
+        for ed in (view.editor, view.incoming_editor):
+            assert ed.document().pageSize().height() == ed._page_height
+            assert all(1 <= line.number <= 28 for line in ed.page_lines())
+        assert doc.native.original == original
     view.close()

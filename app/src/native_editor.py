@@ -10,6 +10,19 @@ from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
 from app.src.casecat.layout import read_layouts, ParagraphStyle
+from transcript_formatting import TranscriptFormatter
+
+
+def _paper_font(family, pixels):
+    font = QFont(family)
+    font.setPixelSize(round(pixels))
+    if family.casefold() == 'courier new':
+        # Measured against CaseCAT's Courier output. Fractional advances avoid
+        # Windows hinting rounding every 18px glyph up to an 11px cell. The
+        # small tracking preserves CAT's 56-column wrapping at native margins.
+        font.setHintingPreference(QFont.PreferNoHinting)
+        font.setLetterSpacing(QFont.AbsoluteSpacing, pixels / 256)
+    return font
 
 
 class _NativeTransactions:
@@ -72,8 +85,6 @@ class _NativeTransactions:
             self.transcript_clicked.emit()
 
     def contextMenuEvent(self, event):
-        if not True:
-            return super().contextMenuEvent(event)
         if event.reason() == QContextMenuEvent.Mouse:
             clicked = self.cursorForPosition(event.pos())
             selection = self.textCursor()
@@ -114,8 +125,8 @@ class PageLine:
 
 
 class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
-    columns = 56
-    lines_per_page = 25
+    columns = TranscriptFormatter.LINE_WIDTH
+    lines_per_page = TranscriptFormatter.LINES_PER_PAGE
     """CaseCAT page presentation over structured edit transactions."""
 
     def copy(self):
@@ -240,7 +251,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                               (self.textCursor().selectionStart(), self.textCursor().selectionEnd()))
                 if any(start < e.end and end > e.start for e in revision.elements):
                     start, end = revision.atomic_range(start, end)
-                    self.apply_native_revision(revision._replace(start, end, data.text()), start+len(data.text()))
+                    text = data.text().replace('\r\n', '\n').replace('\r', '\n')
+                    self.apply_native_revision(revision._replace(start, end, text), start+len(text))
                     return
             return super().insertFromMimeData(data)
         from app.src.casecat.anchors import utf16_index
@@ -435,8 +447,12 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         self.setLineWrapMode(QTextEdit.FixedPixelWidth)
         self.setLineWrapColumnOrWidth(math.ceil(self._page_width))
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        # Qt's text-only range must not hide/show the bar while the page range
+        # includes blank footer space, which otherwise causes resize oscillation.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         # Use the same application palette as the original text editor.
         self.setStyleSheet('QTextEdit { border: 0; }')
+        self.document().documentLayout().documentSizeChanged.connect(self._update_page_scroll_range)
         self._after_set_plaintext()
 
     def setReadOnly(self, readonly):
@@ -461,8 +477,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         style = layout.paragraphs[0]
         # Keep a comfortable screen size while using the source's proportions.
         self._twip_scale = 18 / style.font_twips
-        font = QFont(style.font_family)
-        font.setPixelSize(18)
+        font = _paper_font(style.font_family, 18)
         self.setFont(font)
         self.document().setDefaultFont(font)
         self.lines_per_page = layout.lines_per_page
@@ -513,6 +528,19 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         inset = max(0, (available - math.ceil(self._page_width)) // 2)
         if margins.left() != inset or margins.right() != inset:
             self.setViewportMargins(inset, 0, inset, 0)
+        # QTextEdit resets page height to -1 when its viewport changes. Restore
+        # the same geometry used by the decorations and cursor hit testing.
+        # This is layout only: it must not create text edits or undo entries.
+        size = QSizeF(self._page_width, self._page_height)
+        if self.document().pageSize() != size:
+            self.document().setPageSize(size)
+        self._update_page_scroll_range()
+
+    def _update_page_scroll_range(self, *_):
+        # QTextEdit stops at the last text block. A short final page still needs
+        # its remaining numbered rows and footer to be reachable.
+        height = self.document().pageCount() * self._page_height
+        self.verticalScrollBar().setMaximum(max(0, math.ceil(height - self.viewport().height())))
 
     def _presentation_text(self, text):
         self._paragraph_styles = {}
@@ -544,7 +572,9 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         cursor.setBlockFormat(block)
         self._apply_paragraph_styles()
         self.document().setPageSize(QSizeF(self._page_width, self._page_height))
+        self._align_page_top()
         self.document().clearUndoRedoStacks()
+        self._update_page_scroll_range()
         self._refresh_element_marks()
 
     def refresh_native_presentation(self):
@@ -565,6 +595,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     cursor.insertText(wanted)
                 offset += width
             self._apply_paragraph_styles()
+            self._align_page_top()
             cursor.endEditBlock()
 
     def sync_native_text(self, text):
@@ -585,8 +616,14 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
     def _apply_paragraph_styles(self):
         cursor = QTextCursor(self.document())
         plain = self.toPlainText()
-        for position, style in self._paragraph_styles.items():
-            cursor.setPosition(len(plain[:position].encode('utf-16-le')) // 2)
+        positions, offset, qt_offset = [], 0, 0
+        for text in plain.split('\n'):
+            positions.append((offset, qt_offset))
+            offset += len(text) + 1
+            qt_offset += len(text.encode('utf-16-le')) // 2 + 1
+        for position, qt_position in positions:
+            style = self._paragraph_styles.get(position)
+            cursor.setPosition(qt_position)
             paragraph = cursor.blockFormat()
             if isinstance(style, ParagraphStyle) and self._native_layout:
                 scale = self._twip_scale
@@ -597,30 +634,49 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 paragraph.setTextIndent((style.first - style.left) * scale -
                                         QFontMetricsF(self.font()).horizontalAdvance(' ' * prefix))
                 paragraph.setAlignment(Qt.AlignHCenter if style.alignment == 2 else Qt.AlignLeft)
+                char_format = cursor.blockCharFormat()
+                font = _paper_font(style.font_family, style.font_twips * scale)
+                font.setBold(style.font_weight >= 700)
+                font.setItalic(style.italic)
+                font.setUnderline(style.underline)
                 paragraph.setLineHeight(self._line_height * (0.5 if style.spacing == 1 else 1),
                                         QTextBlockFormat.FixedHeight.value)
                 if paragraph != cursor.blockFormat():
                     cursor.setBlockFormat(paragraph)
-                char_format = cursor.blockCharFormat()
-                font = QFont(style.font_family)
-                font.setPixelSize(round(style.font_twips * scale))
-                font.setBold(style.font_weight >= 700)
-                font.setItalic(style.italic)
-                font.setUnderline(style.underline)
                 char_format.setFont(font)
                 if cursor.charFormat().font() != font:
                     cursor.select(QTextCursor.BlockUnderCursor)
                     cursor.mergeCharFormat(char_format)
-            elif style == 7:
-                paragraph.setAlignment(Qt.AlignHCenter)
+            else:
+                # Imported paragraph styles take precedence. With no native
+                # style, use the documented transcript heading convention.
+                centered = style == 7 or bool(TranscriptFormatter.examination_heading.fullmatch(cursor.block().text().strip()))
+                paragraph.setAlignment(Qt.AlignHCenter if centered else Qt.AlignLeft)
                 if paragraph != cursor.blockFormat():
                     cursor.setBlockFormat(paragraph)
+
+    def _align_page_top(self):
+        # Qt places extra fixed-height leading above the glyphs. CaseCAT puts
+        # the glyph row at the top margin. Transfer that leading to the bottom
+        # margin, keeping the text area height and exact line pitch unchanged.
+        # LineDistanceHeight cannot do this: Qt includes font leading between
+        # wrapped lines but excludes it at paragraph boundaries.
+        self.document().documentLayout().documentSize()
+        layout = self.document().firstBlock().layout()
+        leading = layout.lineAt(0).y() if layout.lineCount() else 0
+        frame = self.document().rootFrame()
+        fmt = frame.frameFormat()
+        fmt.setTopMargin(self._top - leading)
+        fmt.setBottomMargin(self._bottom + leading)
+        if fmt != frame.frameFormat():
+            frame.setFrameFormat(fmt)
 
     def page_lines(self):
         # Force layout before reading QTextLine coordinates, including offscreen
         # pages. QTextCursor and native edit transactions keep logical offsets.
         self.document().documentLayout().documentSize()
         result = []
+        page_numbers = {}
         block = self.document().begin()
         while block.isValid():
             layout = block.layout()
@@ -630,11 +686,35 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     line = layout.lineAt(index)
                     y = layout.position().y() + line.y()
                     page = int(y // self._page_height)
-                    number = round((y - page * self._page_height - self._top) / self._line_height) + 1
+                    # Number physical lines, not rounded glyph coordinates:
+                    # font ascent and paragraph spacing vary independently.
+                    number = page_numbers.get(page, 0) + 1
+                    page_numbers[page] = number
                     text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
                     result.append(PageLine(page + 1, number, block.position() + line.textStart(), text.rstrip(), y))
             block = block.next()
         return result
+
+    def page_number_rect(self, page):
+        """Zero-based page's footer, outside the transcript's text area."""
+        height = QFontMetricsF(self.page_number_font()).height()
+        if self._native_layout and self._native_layout.page_number_top is not None:
+            top = page * self._page_height + self._native_layout.page_number_top * self._twip_scale
+            return QRectF(self._page_width - self._right - 80, top, 80, height)
+        top = (page + 1) * self._page_height - self._bottom
+        return QRectF(self._page_width - self._right - 80,
+                      top + max(0, (self._bottom - height) / 2 - 6), 80, height)
+
+    def page_number_font(self):
+        if self._native_layout and self._native_layout.page_number_top is not None:
+            return _paper_font(self.font().family(), self._native_layout.page_number_font_twips * self._twip_scale)
+        return self.font()
+
+    def line_number_rect(self, y):
+        right = (self._native_layout.line_number_right * self._twip_scale
+                 if self._native_layout and self._native_layout.line_number_right
+                 else self._left - 14)
+        return QRectF(16, y, max(0, right - 16), self.fontMetrics().height())
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -644,9 +724,10 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         painter.translate(-scroll_x, -scroll_y)
         painter.setFont(self.font())
         painter.setPen(QColor('#8a8f98'))
-        for line in self.page_lines():
+        lines = self.page_lines()
+        for line in lines:
             if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():
-                painter.drawText(QRectF(16, line.y, self._left - 30, self.fontMetrics().height()),
+                painter.drawText(self.line_number_rect(line.y),
                                  Qt.AlignRight | Qt.AlignVCenter, str(line.number))
         for position, _ in getattr(self, '_review_insertions', []):
             cursor = QTextCursor(self.document())
@@ -663,7 +744,15 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             painter.setPen(self.palette().color(QPalette.Mid))
             painter.drawRect(QRectF(1, y + 1, self._page_width - 2, self._page_height - 2))
             painter.setPen(QColor('#8a8f98'))
-            painter.drawText(QRectF(self._page_width - 120, y + 8, 80, 26), Qt.AlignRight, str(page + 1))
+            page_lines = [line for line in lines if line.page == page + 1]
+            # CaseCAT numbers the unused rows on the final page too.
+            for number in range(len(page_lines) + 1, self.lines_per_page + 1):
+                row_y = (page_lines[-1].y + (number - len(page_lines)) * self._line_height
+                         if page_lines else y + self._top + (number - 1) * self._line_height)
+                painter.drawText(self.line_number_rect(row_y), Qt.AlignRight | Qt.AlignVCenter, str(number))
+            painter.setFont(self.page_number_font())
+            painter.drawText(self.page_number_rect(page), Qt.AlignRight | Qt.AlignVCenter, str(page + 1))
+            painter.setFont(self.font())
             painter.fillRect(QRectF(0, y + self._page_height - 12, self.viewport().width(), 12), self.palette().color(QPalette.Window))
         if self.viewport().width() > self._page_width:
             painter.fillRect(QRectF(self._page_width, scroll_y, self.viewport().width() - self._page_width,

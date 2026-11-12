@@ -41,6 +41,18 @@ def test_native_import_uses_casecat_pages(native_window, tmp_path):
         assert editor.toPlainText() == view.document.native.original.text
 
 
+def test_playback_stays_compact_when_window_resizes(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path))
+    view = native_window.current
+    app = QApplication.instance()
+    for height in (650, 900):
+        native_window.resize(1100, height)
+        app.processEvents()
+        assert view.playback.height() <= view.playback.sizeHint().height() + 2
+        assert view.review_splitter.height() > view.height() * 0.8
+        assert view.playback.geometry().bottom() >= view.height() - 2
+
+
 def test_import_cancel_and_parse_failure_leave_active_document_untouched(native_window, tmp_path, monkeypatch):
     window = native_window
     window.import_zip(0, source_zip(tmp_path, audio=False))

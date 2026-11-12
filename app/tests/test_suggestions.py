@@ -2,6 +2,14 @@ from app.src.casecat.anchors import Revision, AnchoredSpan
 from app.src.suggestions import suggestions, propose, resolve
 
 
+def test_invalid_proposed_field_values_are_rejected_before_review():
+    import pytest
+    old = revision('one ').insert_field(4, 'NAME', 'Jane')
+    for value in ('Ja \noe', 'Ja😀ne'):
+        with pytest.raises(ValueError, match='single line|Windows-1252'):
+            propose(old, 'one ' + value)
+
+
 def revision(text):
     return Revision((AnchoredSpan('test', (0,), (), text),))
 

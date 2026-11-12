@@ -58,6 +58,25 @@ def test_inline_first_indent_delta_uses_native_twips():
         list(layout.read_deltas(b'\x0a\x40'))
 
 
+def test_embedded_number_positions_and_footer_font_are_read():
+    payload = bytearray(layout_bytes())
+    struct.pack_into('<H', payload, 54, 1626)
+    footer = bytearray(68)
+    struct.pack_into('<I', footer, 0, 0x200)
+    struct.pack_into('<I', footer, 4, 14759)
+    struct.pack_into('<I', footer, 24, 10)
+    struct.pack_into('<H', footer, 28, 10)
+    struct.pack_into('<I', payload, 12, 8)
+    payload[1536:] = bytes(68 * 7) + footer + bytes.fromhex('150704000000bb3c5149')
+    native = bytearray(1024)
+    struct.pack_into('<II', native, 540, 1024, len(payload))
+    struct.pack_into('<I', native, 624, 1)
+    value = layout.read_layouts(native + payload)[0]
+    assert value.line_number_right == 1626
+    assert value.page_number_top == 14759
+    assert value.page_number_font_twips == 200
+
+
 def test_job_loading_validates_layout_before_document_replacement():
     from app.tests.test_native_casecat import job_files, zip_bytes
     from app.src.casecat.archive import inspect_archive

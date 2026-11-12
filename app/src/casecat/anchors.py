@@ -20,6 +20,15 @@ def _ordered(values):
     return tuple(dict.fromkeys(values))
 
 
+def _validate_field_value(value):
+    if not isinstance(value, str) or any(ord(c) < 32 for c in value):
+        raise ValueError('A field value must be a single line.')
+    try:
+        value.encode('cp1252')
+    except UnicodeEncodeError as exc:
+        raise ValueError('Field values must use Windows-1252 characters.') from exc
+
+
 def utf16_index(text, offset):
     """Convert a Qt offset, rejecting a position inside a surrogate pair."""
     if not isinstance(offset, int) or offset < 0:
@@ -77,12 +86,7 @@ class Revision:
         return self._replace(start, end, content)
 
     def set_field(self, name, value):
-        if not isinstance(value, str) or any(ord(c) < 32 for c in value):
-            raise ValueError('A field value must be a single line.')
-        try:
-            value.encode('cp1252')
-        except UnicodeEncodeError as exc:
-            raise ValueError('Field values must use Windows-1252 characters.') from exc
+        _validate_field_value(value)
         fields = [e for e in self.elements if e.kind == 'field' and e.name == name]
         definitions = dict(self.definitions)
         if not fields and name not in definitions:
@@ -115,12 +119,7 @@ class Revision:
         self.atomic_range(position, position)
         name = name.strip().upper()
         raw = field_record(name)
-        if not isinstance(value, str) or any(ord(c) < 32 for c in value):
-            raise ValueError('A field value must be a single line.')
-        try:
-            value.encode('cp1252')
-        except UnicodeEncodeError as exc:
-            raise ValueError('Field values must use Windows-1252 characters.') from exc
+        _validate_field_value(value)
         existing = next((e for e in self.elements if e.kind == 'field' and e.name == name), None)
         if existing:
             raw = bytes.fromhex(existing.raw)
@@ -277,6 +276,7 @@ class Revision:
             value = self.text[field.start:field.end]
             for start, end, content in reversed(edits):
                 value = value[:start-field.start] + content + value[end-field.start:]
+            _validate_field_value(value)
             if field.name in definitions and definitions[field.name] != value:
                 raise ValueError('The proposal assigns conflicting values to one speaker field.')
             definitions[field.name] = value

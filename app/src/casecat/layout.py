@@ -85,6 +85,9 @@ class Layout:
     lines_per_page: int
     paragraphs: tuple[ParagraphStyle, ...]
     raw: bytes
+    line_number_right: int = 0
+    page_number_top: int | None = None
+    page_number_font_twips: int = 200
 
 
 def read_layouts(native):
@@ -120,12 +123,30 @@ def read_layouts(native):
                 _u32(raw, 48), bool(raw[52]), bool(raw[53]),
                 *struct.unpack_from('<5H', raw, 170), raw))
             cursor += 512
+        footer_start = cursor
         text_lengths = [struct.unpack_from('<H', native, cursor + i * 68 + 28)[0]
                         for i in range(footer_count)]
         cursor += footer_count * 68 + sum(text_lengths)
         if cursor > end:
             raise ValueError('Truncated native layout header/footer text.')
-        result.append(Layout(*geometry, tuple(paragraphs), bytes(native[start:cursor])))
+        page_number_top, page_number_font = None, 200
+        text_start = footer_start + footer_count * 68
+        for index, length in enumerate(text_lengths):
+            record = footer_start + index * 68
+            content = native[text_start:text_start + length]
+            # Verified right-footer page-number token in CaseCAT 22.1. Other
+            # footer content stays opaque and is preserved by the native writer.
+            if (index == 7 and _u32(native, record) == 0x200
+                    and content == bytes.fromhex('150704000000bb3c5149')):
+                page_number_top = _u32(native, record + 4)
+                points = _u32(native, record + 24)
+                if not 1 <= points <= 144 or not 0 <= page_number_top < geometry[1]:
+                    raise ValueError('Invalid native page-number geometry.')
+                page_number_font = points * 20
+            text_start += length
+        result.append(Layout(*geometry, tuple(paragraphs), bytes(native[start:cursor]),
+                             struct.unpack_from('<H', native, start + 54)[0],
+                             page_number_top, page_number_font))
     if cursor != end:
         raise ValueError('Unaccounted native layout bytes.')
     return tuple(result)
