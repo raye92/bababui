@@ -59,3 +59,7 @@ htmlcov/
 /evaluation/data/
 /app/data/
 
+# Local investigation and generated implementation plans
+/research/
+/docs/
+
