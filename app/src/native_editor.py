@@ -1,12 +1,15 @@
 """Qt edit transactions and exact revision restoration for native tabs."""
+from dataclasses import dataclass
+import math
 from difflib import SequenceMatcher
 
 from PySide6.QtGui import (QKeySequence, QTextCursor,
-                          QColor, QPalette, QContextMenuEvent)
-from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer
+                          QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
+                          QTextBlockFormat, QTextOption, QPainter)
+from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
-from app.src.diff_view import LineNumberedEditor
+from app.src.casecat.layout import read_layouts, ParagraphStyle
 
 
 class _NativeTransactions:
@@ -101,8 +104,19 @@ class _NativeTransactions:
         menu.exec(event.globalPos())
 
 
-class NativeTranscriptEditor(_NativeTransactions, LineNumberedEditor):
-    """Original editor appearance with native association-aware transactions."""
+@dataclass(frozen=True)
+class PageLine:
+    page: int
+    number: int
+    position: int
+    text: str
+    y: float
+
+
+class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
+    columns = 56
+    lines_per_page = 25
+    """CaseCAT page presentation over structured edit transactions."""
 
     def copy(self):
         if self.textCursor().hasSelection():
@@ -401,31 +415,79 @@ class NativeTranscriptEditor(_NativeTransactions, LineNumberedEditor):
 
 
     def __init__(self, font, parent=None):
+        super().__init__(parent)
         self._native_source = None
-        super().__init__(font, parent=parent)
+        self._native_layout = None
+        self._paragraph_styles = {}
+        self.setAcceptRichText(False)
+        paper_font = QFont(font)
+        paper_font.setPixelSize(18)
+        self.setFont(paper_font)
+        self.document().setDefaultFont(paper_font)
+        metrics = QFontMetricsF(paper_font)
+        self._line_height = math.ceil(metrics.height()) * 2
+        self._left = 78
+        self._right = 48
+        self._top = 48
+        self._bottom = 48
+        self._page_width = metrics.horizontalAdvance('0') * self.columns + self._left + self._right
+        self._page_height = self._top + self.lines_per_page * self._line_height + self._bottom
+        self.setLineWrapMode(QTextEdit.FixedPixelWidth)
+        self.setLineWrapColumnOrWidth(math.ceil(self._page_width))
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        # Use the same application palette as the original text editor.
+        self.setStyleSheet('QTextEdit { border: 0; }')
+        self._after_set_plaintext()
 
     def setReadOnly(self, readonly):
         super().setReadOnly(readonly)
         if readonly and getattr(self, '_field_dialog', None):
             self._field_dialog.close()
 
-
     def hideEvent(self, event):
         if getattr(self, '_field_dialog', None):
             self._field_dialog.close()
         super().hideEvent(event)
 
-
     def set_native_source(self, bundle, job):
         self._native_source = (bundle, job)
         self._refresh_element_marks()
-        if getattr(self, "_field_dialog", None):
+        if getattr(self, '_field_dialog', None):
             QTimer.singleShot(0, self._field_dialog.refresh_if_idle)
+        layouts = read_layouts(job.native_bytes)
+        if not layouts or not layouts[0].paragraphs:
+            return
+        self._native_layout = layout = layouts[0]
+        style = layout.paragraphs[0]
+        # Keep a comfortable screen size while using the source's proportions.
+        self._twip_scale = 18 / style.font_twips
+        font = QFont(style.font_family)
+        font.setPixelSize(18)
+        self.setFont(font)
+        self.document().setDefaultFont(font)
+        self.lines_per_page = layout.lines_per_page
+        self._left = style.left * self._twip_scale
+        self._right = (layout.width - style.right) * self._twip_scale
+        self._top = layout.top * self._twip_scale
+        self._bottom = (layout.height - layout.bottom) * self._twip_scale
+        self._page_width = layout.width * self._twip_scale
+        self._page_height = layout.height * self._twip_scale
+        self._line_height = (layout.bottom - layout.top) * self._twip_scale / layout.lines_per_page
+        self.columns = round((style.right - style.left) * self._twip_scale / QFontMetricsF(font).horizontalAdvance('0'))
+        self.setLineWrapColumnOrWidth(math.ceil(self._page_width))
+        # QTextEdit's wrap-width setter changes the document height to -1.
+        # Restore pagination on every native refresh, including equal text.
+        self.document().setPageSize(QSizeF(self._page_width, self._page_height))
+
+    def set_review_marks(self, selections, insertions):
+        self._review_selections = selections
+        self._review_insertions = insertions
+        self._refresh_element_marks()
+        self.viewport().update()
 
     def setExtraSelections(self, selections):
         self._external_selections = selections
         self._refresh_element_marks()
-
 
     def _refresh_element_marks(self):
         selections = []
@@ -440,15 +502,70 @@ class NativeTranscriptEditor(_NativeTransactions, LineNumberedEditor):
                 color = ('#eab46a' if dark else '#a15a10') if element.kind == 'field' else ('#91bce9' if dark else '#276394')
                 mark.format.setForeground(QColor(color))
                 selections.append(mark)
-        super().setExtraSelections([*selections, *getattr(self, '_external_selections', [])])
+        super().setExtraSelections([*selections, *getattr(self, '_external_selections', []), *getattr(self, '_review_selections', [])])
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, '_page_width'):
+            return
+        margins = self.viewportMargins()
+        available = self.viewport().width() + margins.left() + margins.right()
+        inset = max(0, (available - math.ceil(self._page_width)) // 2)
+        if margins.left() != inset or margins.right() != inset:
+            self.setViewportMargins(inset, 0, inset, 0)
+
+    def _presentation_text(self, text):
+        self._paragraph_styles = {}
+        if self._native_source:
+            bundle, job = self._native_source
+            if job.text == text:
+                from app.src.casecat.presentation import presentation
+                try:
+                    display, styles = presentation(job, bundle)
+                except ValueError:
+                    return text
+                if display.replace('\u00a0', ' ') == text:
+                    self._paragraph_styles = styles
+                    return display
+        return text
 
     def _after_set_plaintext(self):
+        frame = self.document().rootFrame()
+        fmt = frame.frameFormat()
+        fmt.setLeftMargin(self._left)
+        fmt.setRightMargin(self._right)
+        fmt.setTopMargin(self._top)
+        fmt.setBottomMargin(self._bottom)
+        frame.setFrameFormat(fmt)
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.Document)
+        block = QTextBlockFormat()
+        block.setLineHeight(self._line_height, QTextBlockFormat.FixedHeight.value)
+        cursor.setBlockFormat(block)
+        self._apply_paragraph_styles()
+        self.document().setPageSize(QSizeF(self._page_width, self._page_height))
         self.document().clearUndoRedoStacks()
         self._refresh_element_marks()
 
     def refresh_native_presentation(self):
-        self._refresh_element_marks()
+        """Join derived styling to the text edit without replacing the document."""
+        plain = self.toPlainText()
+        display = self._presentation_text(plain)
+        cursor = QTextCursor(self.document())
+        with QSignalBlocker(self), QSignalBlocker(self.document()):
+            cursor.joinPreviousEditBlock()
+            # Normal and hard spaces share the same logical Qt text offset.
+            raw = self.document().toRawText().replace('\u2029', '\n')
+            offset = 0
+            for original, wanted in zip(raw, display):
+                width = len(original.encode('utf-16-le')) // 2
+                if original != wanted and {original, wanted} == {' ', '\u00a0'}:
+                    cursor.setPosition(offset)
+                    cursor.setPosition(offset + width, QTextCursor.KeepAnchor)
+                    cursor.insertText(wanted)
+                offset += width
+            self._apply_paragraph_styles()
+            cursor.endEditBlock()
 
     def sync_native_text(self, text):
         """Join linked field updates and atomic symbol edits to one Qt undo."""
@@ -464,3 +581,101 @@ class NativeTranscriptEditor(_NativeTransactions, LineNumberedEditor):
                     cursor.setPosition(len(old[:b].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
                     cursor.insertText(text[c:d])
             cursor.endEditBlock()
+
+    def _apply_paragraph_styles(self):
+        cursor = QTextCursor(self.document())
+        plain = self.toPlainText()
+        for position, style in self._paragraph_styles.items():
+            cursor.setPosition(len(plain[:position].encode('utf-16-le')) // 2)
+            paragraph = cursor.blockFormat()
+            if isinstance(style, ParagraphStyle) and self._native_layout:
+                scale = self._twip_scale
+                paragraph.setLeftMargin(style.left * scale - self._left)
+                paragraph.setRightMargin((self._native_layout.width - style.right) * scale - self._right)
+                text = cursor.block().text()
+                prefix = 10 if text.startswith(('     Q    ', '     A    ')) else 5 if text.startswith('     ') else 0
+                paragraph.setTextIndent((style.first - style.left) * scale -
+                                        QFontMetricsF(self.font()).horizontalAdvance(' ' * prefix))
+                paragraph.setAlignment(Qt.AlignHCenter if style.alignment == 2 else Qt.AlignLeft)
+                paragraph.setLineHeight(self._line_height * (0.5 if style.spacing == 1 else 1),
+                                        QTextBlockFormat.FixedHeight.value)
+                if paragraph != cursor.blockFormat():
+                    cursor.setBlockFormat(paragraph)
+                char_format = cursor.blockCharFormat()
+                font = QFont(style.font_family)
+                font.setPixelSize(round(style.font_twips * scale))
+                font.setBold(style.font_weight >= 700)
+                font.setItalic(style.italic)
+                font.setUnderline(style.underline)
+                char_format.setFont(font)
+                if cursor.charFormat().font() != font:
+                    cursor.select(QTextCursor.BlockUnderCursor)
+                    cursor.mergeCharFormat(char_format)
+            elif style == 7:
+                paragraph.setAlignment(Qt.AlignHCenter)
+                if paragraph != cursor.blockFormat():
+                    cursor.setBlockFormat(paragraph)
+
+    def page_lines(self):
+        # Force layout before reading QTextLine coordinates, including offscreen
+        # pages. QTextCursor and native edit transactions keep logical offsets.
+        self.document().documentLayout().documentSize()
+        result = []
+        block = self.document().begin()
+        while block.isValid():
+            layout = block.layout()
+            if block.isVisible():
+                raw = block.text().encode('utf-16-le')
+                for index in range(layout.lineCount()):
+                    line = layout.lineAt(index)
+                    y = layout.position().y() + line.y()
+                    page = int(y // self._page_height)
+                    number = round((y - page * self._page_height - self._top) / self._line_height) + 1
+                    text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
+                    result.append(PageLine(page + 1, number, block.position() + line.textStart(), text.rstrip(), y))
+            block = block.next()
+        return result
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        scroll_y = self.verticalScrollBar().value()
+        scroll_x = self.horizontalScrollBar().value()
+        painter.translate(-scroll_x, -scroll_y)
+        painter.setFont(self.font())
+        painter.setPen(QColor('#8a8f98'))
+        for line in self.page_lines():
+            if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():
+                painter.drawText(QRectF(16, line.y, self._left - 30, self.fontMetrics().height()),
+                                 Qt.AlignRight | Qt.AlignVCenter, str(line.number))
+        for position, _ in getattr(self, '_review_insertions', []):
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(position)
+            rect = self.cursorRect(cursor)
+            painter.setPen(QColor('#116329'))
+            x, y = rect.x() + scroll_x, rect.y() + scroll_y
+            painter.drawLine(x, y, x, y + rect.height())
+            painter.drawText(QRectF(x - 6, y - 12, 14, 14), Qt.AlignCenter, '+')
+        first = max(0, int(scroll_y // self._page_height))
+        last = min(self.document().pageCount(), int((scroll_y + self.viewport().height()) // self._page_height) + 1)
+        for page in range(first, last):
+            y = page * self._page_height
+            painter.setPen(self.palette().color(QPalette.Mid))
+            painter.drawRect(QRectF(1, y + 1, self._page_width - 2, self._page_height - 2))
+            painter.setPen(QColor('#8a8f98'))
+            painter.drawText(QRectF(self._page_width - 120, y + 8, 80, 26), Qt.AlignRight, str(page + 1))
+            painter.fillRect(QRectF(0, y + self._page_height - 12, self.viewport().width(), 12), self.palette().color(QPalette.Window))
+        if self.viewport().width() > self._page_width:
+            painter.fillRect(QRectF(self._page_width, scroll_y, self.viewport().width() - self._page_width,
+                                    self.viewport().height()), self.palette().color(QPalette.Window))
+
+    def center_line(self):
+        lines = self.page_lines()
+        middle = self.verticalScrollBar().value() + self.viewport().height() / 2
+        return min(range(len(lines)), key=lambda i: abs(lines[i].y - middle)) if lines else 0
+
+    def scroll_to_center_line(self, line):
+        lines = self.page_lines()
+        if lines:
+            target = lines[min(max(0, int(line)), len(lines) - 1)]
+            self.verticalScrollBar().setValue(max(0, int(target.y - self.viewport().height() / 2)))

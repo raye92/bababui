@@ -6,15 +6,15 @@ target is CaseCAT 22.1.5.46514. No CaseCAT, REA, or Ghidra runtime is required.
 
 ## Code boundaries
 
-This package contains the archive, native codec, revision associations, layout
-metadata, timing, and project persistence. Native layout metadata is retained
-for import/export; it does not dictate the application's editor appearance.
+This package contains archive handling, native structures, revision associations,
+layout projection, timing, and project persistence. UI widgets live beside it:
+`app/src/native_editor.py`, `native_dialogs.py`, `playback.py`, and `review_view.py`.
 
-The UI uses the original dark, line-numbered plain-text editor, with no separate
-paper pages, forced native fonts, or page margins. `app/src/native_editor.py`
-adapts that editor for native transactions, fields, and clipboard operations.
-Field dialogs live in `app/src/native_dialogs.py`, and the audio controls live
-in `app/src/playback.py`, alongside the existing application UI.
+The editor displays native page margins, paragraph styles, fonts, spacing, and
+page/line numbers using the existing application palette. Page decorations and
+wrapping never become stored text. A review panel sits beside the pages; red/green
+highlights and insertion markers show individual wording changes. Show, Previous,
+and Next navigate between suggestions. Clicking changed text selects its card.
 
 ## Workflow
 
@@ -28,7 +28,7 @@ in `app/src/playback.py`, alongside the existing application UI.
   preserving other jobs and companions. Pending Incoming stays in the project.
 - Unedited export is the exact original ZIP. Edited export validates the rebuilt
   native transcript and every companion before atomic publication.
-- Native equal-text review blocks are read-only. Use Incoming while reviewing.
+- Original and Incoming pages are read-only while reviewing pending proposals.
 
 ## Name fields and paragraph symbols
 
@@ -52,8 +52,7 @@ A By-line retains its native style and orphan control separately from its speake
 field. These commands are also available in the editor's context menu.
 
 Original and Incoming keep independent definitions. Changes that have identical
-displayed text, such as an unused field definition, have explicit Accept/Reject
-Field/Symbol Changes controls. Undo, redo, project saves, and copying complete
+displayed text, such as an unused field definition, appear in the same review panel. Undo, redo, project saves, and copying complete
 elements within the app retain their identities. Copying to another application
 also supplies plain text. The field list closes when its editor enters review or
 becomes read-only.
@@ -141,5 +140,5 @@ The Manual menu is retired. `transcript_formatting.py` and the formatter wrapper
 remain reference material and evaluation support, not an editor processing path.
 AI proposals retain paragraph indentation and Q/A spacing from matched source
 paragraphs. Review decisions operate on exact word/phrase ranges, with linked
-fields grouped atomically. The list offers independent Accept/Reject decisions;
+fields grouped atomically. The panel offers independent Accept/Reject decisions;
 Edit > Undo review / Redo review restores both revisions together.

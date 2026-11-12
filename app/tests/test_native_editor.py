@@ -30,19 +30,14 @@ def source_zip(tmp_path, *, audio=True):
     return source
 
 
-def test_native_import_uses_the_original_plain_editor(native_window, tmp_path):
-    from PySide6.QtWidgets import QPlainTextEdit
-    from app.src.diff_view import LineNumberedEditor
-    from PySide6.QtGui import QFont
-    legacy_font = QFont("Courier New", 12)
+def test_native_import_uses_casecat_pages(native_window, tmp_path):
+    from PySide6.QtWidgets import QTextEdit
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     for editor in (view.editor, view.incoming_editor):
-        assert isinstance(editor, LineNumberedEditor)
-        assert isinstance(editor, QPlainTextEdit)
-        assert editor.lineWrapMode() == QPlainTextEdit.NoWrap
-        assert editor.font().family() == legacy_font.family()
-        assert not hasattr(editor, '_page_width')
+        assert isinstance(editor, QTextEdit)
+        assert editor.lineWrapMode() == QTextEdit.FixedPixelWidth
+        assert editor._page_width > 0
         assert editor.toPlainText() == view.document.native.original.text
 
 

@@ -1,7 +1,7 @@
 """One structured document and its review transactions."""
-from PySide6.QtCore import Signal, QTimer
-from PySide6.QtGui import QFont, QShortcut, QKeySequence
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel
+from PySide6.QtCore import Signal, QTimer, Qt
+from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
 from app.src.casecat.anchors import utf16_index
@@ -50,17 +50,25 @@ class DocumentView(QWidget):
         self.incoming_editor = NativeTranscriptEditor(font)
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self.review)
+        self.diff_view.selected.connect(self.select_suggestion)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
             editor.whole_text_set.connect(lambda text, s=side, e=editor: self._native_whole_text(s, e, text))
             editor.document().contentsChange.connect(lambda p, r, a, s=side, e=editor: self._native_edit(s, e, p, r, a))
         self.original_stack.addWidget(self.editor)
-        self.original_stack.addWidget(self.diff_view)
         self.stack.addWidget(self.original_stack)
         self.stack.addWidget(self.incoming_editor)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.stack)
+        self.review_splitter = QSplitter(Qt.Horizontal)
+        self.review_splitter.addWidget(self.stack)
+        self.review_splitter.addWidget(self.diff_view)
+        self.diff_view.setMinimumWidth(260)
+        self.review_splitter.setStretchFactor(0, 1)
+        self.review_splitter.setSizes([900, 300])
+        layout.addWidget(self.review_splitter)
+        self.editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.editor, 'original'))
+        self.incoming_editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.incoming_editor, 'incoming'))
         self.playback = None
         if document.wav_path:
             self.setup_playback(layout)
@@ -195,9 +203,52 @@ class DocumentView(QWidget):
         self._set_text(self.editor, doc.original)
         self._set_text(self.incoming_editor, doc.incoming)
         self.diff_view.set_revisions(doc.native.original, doc.native.incoming)
-        self.original_stack.setCurrentWidget(self.diff_view if self.diff_view.has_changes else self.editor)
+        self.original_stack.setCurrentWidget(self.editor)
+        self.diff_view.setVisible(self.diff_view.has_changes)
+        self.highlight_suggestions()
         self._updating = False
         self.set_busy(doc.busy)
+
+    def highlight_suggestions(self):
+        for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
+            text = getattr(self.document, side)
+            marks, insertions = [], []
+            for index, change in enumerate(self.diff_view.changes):
+                for a, b, c, d in change.ranges:
+                    start, end = (a, b) if side == 'original' else (c, d)
+                    if start == end:
+                        insertions.append((len(text[:start].encode('utf-16-le')) // 2, index))
+                        continue
+                    mark = QTextEdit.ExtraSelection()
+                    mark.cursor = QTextCursor(editor.document())
+                    mark.cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
+                    mark.cursor.setPosition(len(text[:end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
+                    mark.format.setBackground(QColor('#ffd7d5' if side == 'original' else '#ccffd8'))
+                    mark.format.setForeground(QColor('#82071e' if side == 'original' else '#116329'))
+                    marks.append(mark)
+            editor.set_review_marks(marks, insertions)
+
+    def select_suggestion(self, index):
+        if not 0 <= index < len(self.diff_view.changes):
+            return
+        change = self.diff_view.changes[index]
+        if change.ranges:
+            side = 'incoming' if self.stack.currentIndex() else 'original'
+            editor = self.incoming_editor if self.stack.currentIndex() else self.editor
+            start = change.ranges[0][2 if side == 'incoming' else 0]
+            cursor = editor.textCursor()
+            cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
+            editor.setTextCursor(cursor)
+            editor.ensureCursorVisible()
+
+    def select_at_cursor(self, editor, side):
+        position = utf16_index(getattr(self.document, side), editor.textCursor().position())
+        for index, change in enumerate(self.diff_view.changes):
+            for a, b, c, d in change.ranges:
+                start, end = (a, b) if side == 'original' else (c, d)
+                if start <= position <= end:
+                    self.diff_view.select(index)
+                    return
 
     def edited(self):
         self.document.dirty = True
