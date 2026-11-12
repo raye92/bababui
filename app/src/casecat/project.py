@@ -31,6 +31,7 @@ class NativeState:
     job: codec.NativeJob
     original: Revision
     incoming: Revision
+    review: dict | None = None
 
     @classmethod
     def load(cls, bundle, key):
@@ -38,12 +39,14 @@ class NativeState:
         return cls(bundle, job, job.revision, job.revision)
 
     def duplicate(self):
-        return NativeState(self.bundle, self.job, self.original, self.incoming)
+        from copy import deepcopy
+        return NativeState(self.bundle, self.job, self.original, self.incoming, deepcopy(self.review))
 
     def to_dict(self):
         return {'job': self.job.key, 'source_sha256': self.bundle.digest,
                 'source_name': self.bundle.name, 'source_path': self.bundle.source_path,
-                'original': self.original.to_dict(), 'incoming': self.incoming.to_dict()}
+                'original': self.original.to_dict(), 'incoming': self.incoming.to_dict(),
+                'review': self.review}
 
     @classmethod
     def restore(cls, bundle, record):
@@ -57,6 +60,10 @@ class NativeState:
             state = cls.load(bundle, record['job'])
             state.original = Revision.from_dict(record['original'])
             state.incoming = Revision.from_dict(record['incoming'])
+            state.review = record.get('review')
+            if state.review is not None:
+                from app.src.suggestion_filter import validate_review
+                validate_review(state.review, state.incoming.text)
             for side in ('original', 'incoming'):
                 if 'definitions' not in record[side]:
                     from .fields import field_values

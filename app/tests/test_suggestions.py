@@ -43,7 +43,8 @@ def test_structural_change_and_repeated_words():
     assert len(changes) == 1
     assert changes[0].kind == 'structure'
     accepted, pending = resolve(old, new, changes[0], True)
-    assert accepted == pending == new
+    assert accepted == pending
+    assert accepted.text == new.text
 
 
 def test_linked_fields_are_one_decision():

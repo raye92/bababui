@@ -76,7 +76,12 @@ def suggestions(original, incoming):
         return result
     oa, ob = offsets(lines_a), offsets(lines_b)
     ops = []
-    for tag, i, j, k, l in _paragraph_ops(lines_a, lines_b):
+    # Speaker labels and Q/A prefixes must not steer wording alignment toward
+    # a different repeated turn. Still compare the complete paragraph tokens.
+    from app.src.suggestion_filter import _paragraphs
+    bodies_a = [p[3] for p in _paragraphs(a)][:len(lines_a)]
+    bodies_b = [p[3] for p in _paragraphs(b)][:len(lines_b)]
+    for tag, i, j, k, l in _paragraph_ops(bodies_a, bodies_b):
         if tag == 'equal' and a[oa[i]:oa[j]] == b[ob[k]:ob[l]]:
             continue
         aa, bb = tokens(a[oa[i]:oa[j]]), tokens(b[ob[k]:ob[l]])
@@ -98,6 +103,15 @@ def suggestions(original, incoming):
     # Expand both sides together so adopting a field/symbol cannot cut it in half.
     expanded = []
     for start, end, ns, ne in gaps:
+        left_field = next((e for e in original.elements if e.kind == 'field'
+                           and e.start <= start <= end <= e.end and start < e.end), None)
+        right_field = next((e for e in incoming.elements if e.kind == 'field'
+                            and e.start <= ns <= ne <= e.end and ns < e.end), None)
+        if left_field and right_field:
+            # Field values need not have equal lengths. Expanding both by the
+            # same number of characters can swallow the following colon.
+            start, end = left_field.start, left_field.end
+            ns, ne = right_field.start, right_field.end
         changed = True
         while changed:
             before = (start, end, ns, ne)
@@ -147,12 +161,11 @@ def resolve(original, incoming, change, accept):
             target = target.set_field(change.field, value)
         else:
             for a, b, c, d in reversed(change.ranges):
-                target = target.adopt(a, b, source, c, d) if accept else target.adopt(c, d, source, a, b)
+                target = target.adopt(a, b, source, c, d, at_destination=True) if accept else target.adopt(c, d, source, a, b)
     else:
         for a, b, c, d in reversed(change.ranges):
-            target = target.adopt(a, b, source, c, d) if accept else target.adopt(c, d, source, a, b)
+            target = target.adopt(a, b, source, c, d, at_destination=True) if accept else target.adopt(c, d, source, a, b)
     original, incoming = (target, incoming) if accept else (original, target)
     if original.text == incoming.text and original.elements == incoming.elements and original.definitions == incoming.definitions:
-        original = incoming if accept else original
         incoming = original
     return original, incoming

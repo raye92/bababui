@@ -1,4 +1,5 @@
 """One structured document and its review transactions."""
+from copy import deepcopy
 from PySide6.QtCore import Signal, QTimer, Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit
@@ -7,6 +8,7 @@ from app.src.review_view import ReviewView
 from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
 from app.src.suggestions import propose, resolve
+from app.src.suggestion_filter import begin_review, override_speaker, track_decision, auto_accept
 
 
 class ImportView(QWidget):
@@ -40,10 +42,16 @@ class DocumentView(QWidget):
         if document.native is None:
             raise ValueError('An editor requires an imported CaseCAT job.')
         self.document = document
+        from app.src.suggestion_filter import LABEL, GENERIC
+        if (document.native.review is None and document.native.original != document.native.incoming
+                and any((m := LABEL.match(p)) and GENERIC.fullmatch(m['name']) for p in document.incoming.split('\n'))):
+            begin_review(document.native, document.native.incoming.text)
         self._updating = False
         self._position_pending = True
         self._native_history = {'original': {}, 'incoming': {}}
         self._review_undo, self._review_redo = [], []
+        if document.native.original != document.native.incoming:
+            self._automatic_review()
         self.stack = QStackedWidget()
         self.original_stack = QStackedWidget()
         font = QFont('Courier New', 12)
@@ -52,6 +60,7 @@ class DocumentView(QWidget):
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self.review)
         self.diff_view.selected.connect(self.select_suggestion)
+        self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
             editor.whole_text_set.connect(lambda text, s=side, e=editor: self._native_whole_text(s, e, text))
@@ -193,6 +202,7 @@ class DocumentView(QWidget):
             history[steps] = revision
         doc.set_text(side, revision.text, revision=revision)
         if side == 'original':
+            doc.native.review = None
             doc.set_text('incoming', revision.text, revision=revision)
 
     def _native_whole_text(self, side, editor, text):
@@ -207,6 +217,7 @@ class DocumentView(QWidget):
         editor.document().clearUndoRedoStacks()
         self._native_history[side] = {editor.document().availableUndoSteps(): revision}
         if side == 'original':
+            doc.native.review = None
             doc.set_text('incoming', revision.text, revision=revision)
         self.edited()
 
@@ -215,11 +226,12 @@ class DocumentView(QWidget):
         doc = self.document
         self._set_text(self.editor, doc.original)
         self._set_text(self.incoming_editor, doc.incoming)
-        self.diff_view.set_revisions(doc.native.original, doc.native.incoming, page_lines=self.editor.page_lines())
+        self.diff_view.set_revisions(doc.native.original, doc.native.incoming,
+                                     review=doc.native.review, page_lines=self.editor.page_lines())
         self.original_stack.setCurrentWidget(self.original_page)
         self.original_page.fit_page()
         self.incoming_page.fit_page()
-        self.diff_view.setVisible(self.diff_view.has_changes)
+        self.diff_view.setVisible(self.diff_view.has_changes or bool((doc.native.review or {}).get('evidence', {}).get('speakers')))
         self.highlight_suggestions()
         self._updating = False
         self.set_busy(doc.busy)
@@ -289,9 +301,10 @@ class DocumentView(QWidget):
         if self.document.busy:
             return
         state = self.document.native
-        before = state.original, state.incoming
+        before = state.original, state.incoming, deepcopy(state.review)
         try:
-            result = resolve(*before, self.diff_view.changes[index], accept)
+            change = self.diff_view.changes[index]
+            result = resolve(state.original, state.incoming, change, accept)
         except (ValueError, IndexError) as exc:
             self.document.status = str(exc)
             self.refresh()
@@ -299,14 +312,32 @@ class DocumentView(QWidget):
         self._review_undo.append(before)
         self._review_redo.clear()
         state.original, state.incoming = result
+        track_decision(state.review, change, before[1].text, state.incoming.text)
+        self.refresh()
+        visible = self.diff_view.visible_indices
+        if visible:
+            self.diff_view.select(next((i for i in visible if i >= index), visible[-1]))
+        self.edited()
+
+    def change_speaker_mapping(self, speaker, name):
+        state = self.document.native
+        before = state.original, state.incoming, deepcopy(state.review)
+        try:
+            override_speaker(state, speaker, name)
+        except ValueError as exc:
+            self.document.status = str(exc)
+            self.changed.emit()
+            return
+        self._review_undo.append(before)
+        self._review_redo.clear()
         self.refresh()
         self.edited()
 
     def _review_history(self, source, target):
         if source and not self.document.busy:
             state = self.document.native
-            target.append((state.original, state.incoming))
-            state.original, state.incoming = source.pop()
+            target.append((state.original, state.incoming, deepcopy(state.review)))
+            state.original, state.incoming, state.review = source.pop()
             self.refresh()
             self.edited()
 
@@ -348,19 +379,32 @@ class DocumentView(QWidget):
     def receive(self, text, warnings):
         self.capture_position()
         try:
-            proposal = propose(self.document.native.original, text)
+            begin_review(self.document.native, text)
         except ValueError as exc:
             self.document.status = str(exc)
             self.changed.emit()
             return
-        self.document.native.incoming = proposal
         self._review_undo.clear()
         self._review_redo.clear()
         self.document.warnings = list(dict.fromkeys([*self.document.native.job.warnings, *warnings]))
         self.document.status = 'Incoming updated. Review the suggested revisions.'
+        self._automatic_review()
         self.refresh()
         self.edited()
         self.schedule_restore()
+
+    def _automatic_review(self):
+        state = self.document.native
+        before = state.original, state.incoming, deepcopy(state.review)
+        records = auto_accept(state)
+        if records:
+            # Keep the version marker on undo so reopening does not silently
+            # reapply a batch that the user explicitly undid.
+            undo_review = deepcopy(state.review)
+            undo_review['automatic_changes'] = []
+            self._review_undo.append((before[0], before[1], undo_review))
+            self.document.status = f'{len(records)} changes automatically accepted. Review the remaining suggestions. Undo restores the batch.'
+            self.document.dirty = True
 
     def set_busy(self, busy):
         self.document.busy = busy

@@ -156,7 +156,8 @@ def test_native_review_preserves_blank_paragraphs_and_accepts_associations(nativ
     while view.diff_view.has_changes:
         next(b for b in view.diff_view.findChildren(QPushButton) if 'Accept' in b.text()).click()
     assert view.document.original == 'Hello\n\nworld.\n'
-    assert view.document.native.original == proposal
+    assert view.document.native.original == view.document.native.incoming
+    assert view.document.native.original.text == proposal.text
     assert view.document.warnings
 
 
@@ -169,7 +170,7 @@ def test_native_generated_layout_never_enters_text(native_window, tmp_path):
     assert not window.current.document.original.startswith('          1')
 
 
-def test_partial_accept_uses_incoming_passage_associations(native_window, tmp_path):
+def test_partial_accept_keeps_destination_passage_associations(native_window, tmp_path):
     from app.src.casecat.anchors import AnchoredSpan, Revision
     source = tmp_path/'example.zip'
     source.write_bytes(zip_bytes(job_files(words=('First.\n', 'Middle.\n', 'Last.\n'))))
@@ -184,7 +185,7 @@ def test_partial_accept_uses_incoming_passage_associations(native_window, tmp_pa
     assert view.document.original == 'Replacement.\nMiddle.\nLast.\n'
     assert view.document.incoming == 'Replacement.\nMiddle.\nEnd.\n'
     accepted = next(s for s in view.document.native.original.spans if s.content == 'Replacement')
-    assert accepted.stroke_refs == (2,)
+    assert accepted.stroke_refs == (0,)
 
 
 def test_speaker_typing_propagates_and_undo_restores_fields(native_window, tmp_path):
@@ -397,3 +398,71 @@ def test_programmatic_whole_text_replacement_inherits_the_affected_passage(nativ
     assert view.document.original == 'Rewritten'
     written = next(s for s in view.document.native.original.spans if s.content == 'Rewritten')
     assert written.stroke_refs == (0, 1)
+
+def test_completed_review_can_be_edited_and_saved(native_window,tmp_path):
+    from app.src.casecat.project import project_bytes
+    native_window.import_zip(0,source_zip(tmp_path))
+    view=native_window.current
+    view.receive('Changed words.\n',[])
+    while view.diff_view.changes:
+        view.review(0,False)
+    view.editor.selectAll()
+    view.editor.textCursor().insertText('Short.')
+    assert view.document.native.review is None
+    project_bytes(view.document.native,{})
+
+def test_native_speaker_override_undo_and_project_reopen(native_window,tmp_path):
+    from app.tests.test_native_fields import field_files
+    from app.src.casecat.project import project_bytes,read_project
+    path=tmp_path/'speakers.zip'
+    files=field_files();del files['jobs/example.wav']
+    path.write_bytes(zip_bytes(files));native_window.import_zip(0,path)
+    view=native_window.current
+    before=view.document.native.original
+    view.receive(before.text.replace('MS. OLD','SPEAKER 3'),[])
+    assert not view.diff_view.changes
+    assert not view.editor.isReadOnly()
+    view.change_speaker_mapping('SPEAKER 3',None)
+    proposed=view.document.native.incoming
+    assert 'SPEAKER 3' in proposed.text
+    view.undo_review();assert view.document.native.incoming==before
+    view.redo_review();assert view.document.native.incoming==proposed
+    state,_=read_project(project_bytes(view.document.native,{}))
+    assert state.review==view.document.native.review
+    while view.diff_view.changes:view.review(0,False)
+    view.editor.selectAll();view.editor.textCursor().insertText('Short.')
+    assert view.document.native.review is None
+    project_bytes(view.document.native,{})
+
+
+def test_automatic_review_batch_is_native_undoable_and_persisted(native_window, tmp_path):
+    from app.src.casecat.project import project_bytes, read_project
+    from app.src.casecat import archive, codec
+    from app.tests.test_native_structure import container_files
+    files = container_files()
+    del files['jobs/example.wav']
+    source = tmp_path/'automatic-source.zip'
+    source.write_bytes(zip_bytes(files))
+    native_window.import_zip(0, source)
+    view = native_window.current
+    before = view.document.native.original
+    incoming = before.text.replace('Hello', 'HELLO').replace('.', '?')
+    assert incoming != before.text
+    view.receive(incoming, [])
+    assert view.document.original == incoming
+    assert 'automatically accepted' in view.document.status
+    assert not view.diff_view.changes
+    after = view.document.native.original
+    assert view.document.native.review['automatic_changes']
+    view.undo_review()
+    assert view.document.native.original == before
+    assert view.diff_view.changes
+    view.redo_review()
+    assert view.document.native.original == after
+    restored, _ = read_project(project_bytes(view.document.native, {}))
+    assert restored.original == after
+    assert restored.review == view.document.native.review
+    view.document.export_casecat(tmp_path/'automatic.zip')
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'automatic.zip'), view.document.native.job.key)
+    assert loaded.text == after.text
+    assert loaded.notes_bytes == view.document.native.job.notes_bytes

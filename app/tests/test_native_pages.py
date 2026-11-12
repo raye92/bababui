@@ -405,3 +405,15 @@ def test_embedded_page_layout_survives_resize_and_review(tmp_path, monkeypatch):
             assert all(1 <= line.number <= 28 for line in ed.page_lines())
         assert doc.native.original == original
     view.close()
+
+def test_hyphens_do_not_create_native_wrap_points_or_enter_clipboard():
+    app,view=paged_editor()
+    text='     Q    '+('word '*8)+'handyman-type work.'
+    view.setPlainText(text)
+    app.processEvents()
+    assert all(not p.text.endswith('handyman-') for p in view.page_lines())
+    assert view.toPlainText()==text
+    view.selectAll()
+    assert view.createMimeDataFromSelection().text()==text
+    assert len(view.document().toRawText())==len(text)
+    view.close()

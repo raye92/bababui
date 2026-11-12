@@ -2,12 +2,47 @@
 from difflib import SequenceMatcher
 from dataclasses import replace
 import struct
+import re
+from functools import lru_cache
 
 from .structure import projected_groups, group_targets
 from .layout import read_layouts, read_deltas, ParagraphStyle
 
 
+@lru_cache(maxsize=8)
 def presentation(job, bundle):
+    if job.revision != job.baseline:
+        # Preview the same native controls that export will write. Matching
+        # text fragments alone can carry a removed paragraph style or hard space
+        # into a new passage, so it is not a faithful layout projection.
+        from .codec import serialize_native, load_job
+        from .fields import serialize_metadata
+        try:
+            native = serialize_native(job, bundle)
+        except ValueError:
+            # An unsupported container remains editable and visibly styled;
+            # export still reports its validation error before publishing.
+            return _presentation(job, bundle)
+        metadata = serialize_metadata(job, bundle)
+
+        class Overlay:
+            jobs, digest = bundle.jobs, bundle.digest
+
+            def member(self, name):
+                return bundle.member(name)
+
+            def read(self, name):
+                if name == bundle.member(job.key + '.sgngl'):
+                    return native
+                if name == bundle.member(job.key + '.sgxml'):
+                    return metadata
+                return bundle.read(name)
+
+        return _presentation(load_job(Overlay(), job.key), bundle)
+    return _presentation(job, bundle)
+
+
+def _presentation(job, bundle):
     groups = projected_groups(job, bundle)
     targets = group_targets(job)
     layouts = read_layouts(job.native_bytes)
@@ -28,7 +63,8 @@ def presentation(job, bundle):
                 # By-lines may combine the paragraph record with a label.
                 style = int.from_bytes(token.raw[1:3], 'little')
                 paragraphs[offset + (1 if token.text.startswith('\n') else 0)] = (
-                    definitions[style - 1] if 1 <= style <= len(definitions) else style)
+                    replace(definitions[style - 1], prefix_length=10 if style in (2,3) else 5 if style == 4 else 0)
+                    if 1 <= style <= len(definitions) else style)
             if token.raw[:2] == b'\x15\x03':
                 destination = paragraphs if paragraphs else styles
                 if destination:
@@ -60,14 +96,17 @@ def presentation(job, bundle):
         position = 0
         for paragraph in job.text.split('\n'):
             style = styles.get(position)
-            if isinstance(style, ParagraphStyle):
+            if re.fullmatch(r'(?:FURTHER )?EXAMINATION', paragraph) and len(definitions) >= 7:
+                current = definitions[6]
+                styles[position] = current
+            elif isinstance(style, ParagraphStyle):
                 current = style
             else:
                 label = 2 if paragraph.startswith('     Q    ') else 3 if paragraph.startswith('     A    ') else None
                 if label and label <= len(definitions):
-                    current = definitions[label - 1]
+                    current = replace(definitions[label - 1], prefix_length=10)
                 elif position:
-                    current = replace(current, first=current.continuation)
+                    current = replace(current, first=current.continuation, prefix_length=0)
                 styles[position] = current
             position += len(paragraph) + 1
     return ''.join(result), styles

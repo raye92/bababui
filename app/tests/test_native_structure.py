@@ -132,3 +132,48 @@ def test_joining_question_paragraph_keeps_its_label_as_literal_text():
     files['jobs/example.sgngl'] = source.native_bytes.replace(b'Question?', b'question?')
     _, after = rewritten_job(files, lambda r: r.replace(7, 8, ''))
     assert after.text == 'Byline:     Q    Question?'
+
+def test_coarse_legacy_insertion_is_bounded_by_surviving_source_anchors():
+    from dataclasses import replace
+    from app.src.casecat.anchors import AnchoredSpan
+    def edit(r):
+        broad = AnchoredSpan('legacy-insert', (0, 1, 2), (), '\n')
+        return replace(r, spans=(r.spans[0], broad, *r.spans[1:]))
+    _, after = rewritten_job(container_files(('First.', 'Second.', 'Third.')), edit)
+    assert after.text == 'First.\nSecond.Third.'
+    assert after.baseline.spans[-1].content == 'Third.'
+
+def test_inserted_examination_heading_uses_native_centered_paragraph():
+    _,after=rewritten_job(container_files(),lambda r:r._replace(0,0,'EXAMINATION\n'))
+    start=codec.u32(after.native_bytes,532)
+    controls=[raw for _,raw in codec.records(after.native_bytes,start,start+codec.u32(after.native_bytes,536)) if raw[0]==0x16]
+    assert controls[0]==bytes.fromhex('160700')
+    assert after.text=='EXAMINATION\nHello world.'
+
+def test_heading_before_native_byline_does_not_duplicate_paragraph_boundary():
+    from app.tests.test_native_fields import field_files
+    _,after=rewritten_job(field_files(),lambda r:r._replace(0,0,'EXAMINATION\n'))
+    assert after.text.startswith('EXAMINATION\nBY MS. OLD:\n     Q')
+    start=codec.u32(after.native_bytes,532)
+    assert bytes.fromhex('160700') in after.native_bytes[start:]
+
+@pytest.mark.parametrize('prefix',['\n     Q','\n     A','\n     MS.'])
+def test_blank_paragraph_before_native_label_survives(prefix):
+    from app.tests.test_native_fields import field_files
+    def edit(r):
+        p=r.text.index(prefix)
+        return r._replace(p,p,'\n')
+    before,after=rewritten_job(field_files(),edit)
+    assert after.text==before.text.replace(prefix,'\n'+prefix,1)
+
+def test_accept_insertion_uses_destination_clock_not_repeated_word_source():
+    from dataclasses import replace
+    from app.src.casecat.anchors import AnchoredSpan
+    from app.src.suggestions import suggestions,resolve
+    def edit(r):
+        copied=replace(r.spans[0],identity='ai-copy',content='Extra ')
+        incoming=replace(r,spans=(*r.spans[:2],copied,*r.spans[2:]))
+        return resolve(r,incoming,suggestions(r,incoming)[0],True)[0]
+    _,after=rewritten_job(container_files(('First. ', 'Second. ', 'Third.')),edit)
+    assert after.text=='First. Second. Extra Third.'
+    assert after.baseline.spans[-1].content=='Extra Third.'

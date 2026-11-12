@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from PySide6.QtGui import (QKeySequence, QTextCursor,
                           QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
                           QTextBlockFormat, QTextOption, QPainter)
-from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF
+from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
 from app.src.casecat.layout import read_layouts, ParagraphStyle
@@ -229,7 +229,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
     def createMimeDataFromSelection(self):
         data = QMimeData()
-        data.setText(self.textCursor().selectedText().replace('\u2029', '\n').replace('\u00a0', ' '))
+        data.setText(self.textCursor().selectedText().replace('\u2029', '\n').replace('\u00a0', ' ').replace('\u2011', '-'))
         if self._native_source:
             from app.src.casecat.anchors import utf16_index
             from app.src.casecat.clipboard import MIME_TYPE, selection_data
@@ -554,8 +554,13 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     return text
                 if display.replace('\u00a0', ' ') == text:
                     self._paragraph_styles = styles
-                    return display
-        return text
+                    return display.replace('-', '\u2011')
+        return text.replace('-', '\u2011')
+
+    def toPlainText(self):
+        # Same-width nonbreaking hyphens prevent Qt-only wrap opportunities.
+        # They occupy one cursor position and never enter native stored text.
+        return super().toPlainText().replace('\u2011', '-')
 
     def _after_set_plaintext(self):
         frame = self.document().rootFrame()
@@ -589,7 +594,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             offset = 0
             for original, wanted in zip(raw, display):
                 width = len(original.encode('utf-16-le')) // 2
-                if original != wanted and {original, wanted} == {' ', '\u00a0'}:
+                if original != wanted and ({original, wanted} == {' ', '\u00a0'} or {original, wanted} == {'-', '\u2011'}):
                     cursor.setPosition(offset)
                     cursor.setPosition(offset + width, QTextCursor.KeepAnchor)
                     cursor.insertText(wanted)
@@ -630,7 +635,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 paragraph.setLeftMargin(style.left * scale - self._left)
                 paragraph.setRightMargin((self._native_layout.width - style.right) * scale - self._right)
                 text = cursor.block().text()
-                prefix = 10 if text.startswith(('     Q    ', '     A    ')) else 5 if text.startswith('     ') else 0
+                prefix = style.prefix_length
                 paragraph.setTextIndent((style.first - style.left) * scale -
                                         QFontMetricsF(self.font()).horizontalAdvance(' ' * prefix))
                 paragraph.setAlignment(Qt.AlignHCenter if style.alignment == 2 else Qt.AlignLeft)
@@ -690,7 +695,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     # font ascent and paragraph spacing vary independently.
                     number = page_numbers.get(page, 0) + 1
                     page_numbers[page] = number
-                    text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
+                    text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le').replace('\u2011', '-')
                     result.append(PageLine(page + 1, number, block.position() + line.textStart(), text.rstrip(), y))
             block = block.next()
         return result
@@ -723,6 +728,36 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         scroll_x = self.horizontalScrollBar().value()
         painter.translate(-scroll_x, -scroll_y)
         painter.setFont(self.font())
+        # Courier variants may lack U+2011. Keep its nonbreaking layout cell,
+        # but draw the original hyphen glyph with the current selection colors.
+        block = self.document().begin()
+        selections = self.extraSelections()
+        active = self.textCursor()
+        while block.isValid():
+            layout = block.layout()
+            if layout.position().y() <= scroll_y + self.viewport().height() and layout.position().y()+layout.boundingRect().height() >= scroll_y:
+                raw = block.text().encode('utf-16-le')
+                for offset in range(len(raw)//2):
+                    if raw[offset*2:offset*2+2] != b'\x11\x20':
+                        continue
+                    line = layout.lineForTextPosition(offset)
+                    x = layout.position().x()+line.cursorToX(offset)[0]
+                    right = layout.position().x()+line.cursorToX(offset+1)[0]
+                    y = layout.position().y()+line.y()
+                    position = block.position()+offset
+                    background, foreground = self.palette().base(), self.palette().text()
+                    for selection in selections:
+                        if selection.cursor.selectionStart() <= position < selection.cursor.selectionEnd():
+                            if selection.format.background().style() != Qt.NoBrush:
+                                background = selection.format.background()
+                            if selection.format.foreground().style() != Qt.NoBrush:
+                                foreground = selection.format.foreground()
+                    if active.selectionStart() <= position < active.selectionEnd():
+                        background, foreground = self.palette().highlight(), self.palette().highlightedText()
+                    painter.fillRect(QRectF(x, y, right-x, line.height()), background)
+                    painter.setPen(foreground.color())
+                    painter.drawText(QPointF(x, y+line.ascent()), '-')
+            block = block.next()
         painter.setPen(QColor('#8a8f98'))
         lines = self.page_lines()
         for line in lines:

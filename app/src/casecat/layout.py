@@ -74,6 +74,7 @@ class ParagraphStyle:
     continuation: int
     alignment: int
     raw: bytes
+    prefix_length: int = 0  # Generated logical label width, never literal indentation.
 
 
 @dataclass(frozen=True)

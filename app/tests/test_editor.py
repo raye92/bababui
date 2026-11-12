@@ -170,7 +170,7 @@ def test_diff_review_and_busy_scroll(window):
     button = next(b for b in view.diff_view.findChildren(QPushButton) if 'Accept' in b.text())
     button.click()
     assert view.document.original == view.document.incoming == 'Shared\nIncoming'
-    assert view.original_stack.currentWidget() is view.editor
+    assert view.original_stack.currentWidget().editor is view.editor
 
 
 def test_recovered_scroll_position_is_not_overwritten(tmp_path, monkeypatch):

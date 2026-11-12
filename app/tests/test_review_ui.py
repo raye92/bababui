@@ -1,6 +1,29 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication
+from app.src.review_view import ReviewView
+from app.tests.test_suggestion_filter import speakers
+
+
+def test_speaker_summary_is_fixed_and_cards_filter_to_mismatches():
+    from app.src.suggestion_filter import prepare
+    app = QApplication.instance() or QApplication([])
+    original = speakers(['MS. SIEMENS']*8 + ['MR. LEISER']*2)
+    incoming, evidence = prepare(original, original.text.replace('MS. SIEMENS:', 'SPEAKER 3:').replace('MR. LEISER:', 'SPEAKER 3:'))
+    view = ReviewView()
+    view.set_revisions(original, incoming, review={'evidence':evidence,'overrides':{},'locations':[]})
+    assert view.summary.parent() is view
+    assert '8 matches' in view.summary.text()
+    view.filter_speaker('SPEAKER 3')
+    assert len(view.visible_indices) == 2
+    assert sum(not card.isHidden() for card in view.cards) == 1
+    previous = view.current
+    view.navigate(1)
+    assert view.current != previous
+    assert sum(not card.isHidden() for card in view.cards) == 1
+    view.select(1)
+    assert view.current == 1
+    view.close()
 
 
 def test_diff_places_inserted_heading_before_unchanged_context():

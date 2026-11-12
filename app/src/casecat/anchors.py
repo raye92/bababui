@@ -148,7 +148,7 @@ class Revision:
                 start, end = min(start, element.start), max(end, element.end)
         return start, end
 
-    def adopt(self, start, end, source, source_start, source_end):
+    def adopt(self, start, end, source, source_start, source_end, *, at_destination=False):
         """Accept/deny a passage using the selected revision's associations."""
         if not 0 <= source_start <= source_end <= len(source.text):
             raise ValueError('Invalid source revision range.')
@@ -159,7 +159,7 @@ class Revision:
                 text = span.content[max(0, source_start - cursor):source_end - cursor]
                 copied.append(replace(span, identity=uuid.uuid4().hex, content=text))
             cursor = stop
-        result = self._replace(start, end, ''.join(s.content for s in copied), copied)
+        result = self._replace(start, end, ''.join(s.content for s in copied), None if at_destination else copied)
         elements = [e for e in result.elements if e.end <= start or e.start >= start + source_end - source_start]
         elements.extend(replace(e, start=start + e.start - source_start, end=start + e.end - source_start)
                         for e in source.elements if source_start <= e.start and e.end <= source_end)

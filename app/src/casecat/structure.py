@@ -79,12 +79,25 @@ def group_targets(job):
     by_stroke = {ref: index for index, span in enumerate(job.baseline.spans) for ref in span.stroke_refs}
     result = [''] * len(sources)
     current = 0
-    for span in job.revision.spans:
+    following, bound = {}, len(sources)-1
+    for index in range(len(job.revision.spans)-1, -1, -1):
+        span = job.revision.spans[index]
+        following[index] = bound
+        if span.content and span.identity in sources:
+            bound = sources[span.identity]
+    previous = 0
+    for index, span in enumerate(job.revision.spans):
         if span.identity in sources:
             current = sources[span.identity]
             target = current
         elif span.stroke_refs:
             candidates = sorted({by_stroke[ref] for ref in span.stroke_refs})
+            # Legacy whole-text edits can carry overly broad associations.
+            # Retained source anchors bound the passage's physical location;
+            # choose only an associated clock within that ordered interval.
+            candidates = [n for n in candidates if previous <= n <= following[index]]
+            if not candidates:
+                raise ValueError('The revision requires native anchor reordering, which is not yet verified.')
             # The measured cross-anchor CATalyst replacement uses the final
             # affected stroke clock. Keeping wording at the first group makes
             # the unchanged suffix seek early at its leading word boundary.
@@ -94,6 +107,7 @@ def group_targets(job):
             target = current
         if span.content:
             result[target] += span.content
+            previous = target
     if ''.join(result) != job.text:
         raise ValueError('The revision requires native anchor reordering, which is not yet verified.')
     return result
@@ -111,6 +125,8 @@ def encode_text(text, *, paragraph_start=False, atoms=None):
         # 16 08 00. Whole-document pagination also depends on other controls;
         # neither record alone resolves that remaining compatibility gap.
         style, body = 255, paragraph
+        if (index or paragraph_start) and re.fullmatch(r'(?:FURTHER )?EXAMINATION', paragraph):
+            style = 7  # Native Centered Paragraph Style, not padding spaces.
         if paragraph_start and index == 1 and not text.split('\n', 1)[0]:
             style = 8
         for prefix, value in (('     Q    ', 2), ('     A    ', 3)):
@@ -149,9 +165,15 @@ def rewrite_group(tokens, target, *, paragraph_start=False, atoms=None):
             result.append((token, token.raw))
             continue
         end = position + len(token.text)
-        leading = encode_text(insertions.pop(position, ''),
-                              paragraph_start=paragraph_start and position == 0 and token.raw[:1] != b'\x16', atoms=atoms)
-        if all(keep[position:end]) and not any(i in insertions for i in range(position + 1, end)):
+        leading_text = insertions.pop(position, '')
+        retained = all(keep[position:end]) and not any(i in insertions for i in range(position + 1, end))
+        if retained and token.raw[:1] == b'\x16' and not token.text.startswith('\n') and leading_text.endswith('\n'):
+            # A retained native paragraph control supplies this boundary itself.
+            # Encoding both the inserted LF and the control adds an empty line.
+            leading_text = leading_text[:-1]
+        leading = encode_text(leading_text,
+                              paragraph_start=paragraph_start and position == 0, atoms=atoms)
+        if retained:
             rewritten = leading + token.raw
         else:
             visible = ''
@@ -275,6 +297,7 @@ def serialize_candidate(job, bundle):
     validate_job(bundle, job)
     if job.revision == job.baseline:
         return job.native_bytes
+    text = job.text
     groups = projected_groups(job, bundle)
     targets = group_targets(job)
     # A surviving symbol owns its paragraph break, even if range deletion left
@@ -323,32 +346,32 @@ def serialize_candidate(job, bundle):
             encoded = bytearray()
             for _, raw in records(rewritten, 0, len(rewritten)):
                 if (raw[0] == 0x16 and int.from_bytes(raw[1:], 'little') not in (8, 255)
-                        and not renderer.has_content and job.text.startswith('\n', visible)):
+                        and not renderer.has_content and text.startswith('\n', visible)):
                     encoded += b'\x16\xff\x00'
                     renderer.paragraph(255)
                 trial = copy(renderer)
-                text = render_record(trial, raw, speakers)
-                if text and not job.text.startswith(text, visible) and raw[0] >= 32:
+                rendered = render_record(trial, raw, speakers)
+                if rendered and not text.startswith(rendered, visible) and raw[0] >= 32:
                     literal = raw.decode('cp1252')
                     marker = None
                     if literal.islower() and not all_caps:
-                        if job.text.startswith(literal, visible):
+                        if text.startswith(literal, visible):
                             marker = b'\x12\x8e'
-                        elif job.text.startswith(literal.upper(), visible):
+                        elif text.startswith(literal.upper(), visible):
                             marker = b'\x12\x0e'
                     if marker:
                         encoded += marker
                         renderer.control(marker)
                         trial = copy(renderer)
-                        text = render_record(trial, raw, speakers)
-                if not job.text.startswith(text, visible):
+                        rendered = render_record(trial, raw, speakers)
+                if not text.startswith(rendered, visible):
                     raise ValueError(f'Native rendering cannot preserve the edit at character {visible}.')
-                visible += len(text)
+                visible += len(rendered)
                 renderer = trial
                 encoded += raw
             positions.append((token.offset - start, len(stream), len(token.raw), len(encoded)))
             stream += encoded
-    if visible != len(job.text):
+    if visible != len(text):
         raise ValueError('Native serialization lost displayed content.')
     stream = repair_history(bytes(stream))
     result = relocate(job.native_bytes, stream, positions)
