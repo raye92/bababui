@@ -729,14 +729,18 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():
                 painter.drawText(self.line_number_rect(line.y),
                                  Qt.AlignRight | Qt.AlignVCenter, str(line.number))
-        for position, _ in getattr(self, '_review_insertions', []):
+        for position, index in getattr(self, '_review_insertions', []):
             cursor = QTextCursor(self.document())
             cursor.setPosition(position)
             rect = self.cursorRect(cursor)
-            painter.setPen(QColor('#116329'))
             x, y = rect.x() + scroll_x, rect.y() + scroll_y
-            painter.drawLine(x, y, x, y + rect.height())
-            painter.drawText(QRectF(x - 6, y - 12, 14, 14), Qt.AlignCenter, '+')
+            selected = index == getattr(self, '_selected_review', -1)
+            color = QColor('#7ee2a8' if selected else '#2da44e')
+            painter.fillRect(QRectF(x - 2, y, 4, rect.height()), color)
+            badge = QRectF(x - 10, y - 18, 20, 18)
+            painter.fillRect(badge, color)
+            painter.setPen(QColor('#052e16'))
+            painter.drawText(badge, Qt.AlignCenter, '+')
         first = max(0, int(scroll_y // self._page_height))
         last = min(self.document().pageCount(), int((scroll_y + self.viewport().height()) // self._page_height) + 1)
         for page in range(first, last):

@@ -1,6 +1,6 @@
 # Project workflow
 
-- Work directly on `main` in the existing checkout by default.
+- Work on the currently checked-out branch in the existing checkout. Do not switch to `main` automatically.
 - Do not create or switch to another branch, including `codex/*`, unless I explicitly ask.
 - Do not create additional worktrees unless I explicitly ask.
 - Do not use a branching or worktree skill as permission to override these preferences.

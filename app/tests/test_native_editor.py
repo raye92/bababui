@@ -30,6 +30,30 @@ def source_zip(tmp_path, *, audio=True):
     return source
 
 
+def test_review_card_click_and_space_playback(native_window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+    native_window.import_zip(0, source_zip(tmp_path))
+    view = native_window.current
+    view.receive('A different proposed passage.', [])
+    app = QApplication.instance()
+    app.processEvents()
+    assert view.diff_view.changes
+    centered = []
+    monkeypatch.setattr(view.editor, 'scroll_to_center_line', centered.append)
+    card = view.diff_view.cards[0]
+    QTest.mouseClick(card.findChild(QLabel), Qt.LeftButton)
+    assert centered
+    toggles = []
+    monkeypatch.setattr(view.playback, 'toggle', lambda: toggles.append(True))
+    native_window.activateWindow()
+    for target in (view.editor, card.findChild(QPushButton)):
+        target.setFocus()
+        app.processEvents()
+        before = len(toggles)
+        QTest.keyClick(target, Qt.Key_Space)
+        assert len(toggles) == before + 1
+
+
 def test_native_import_uses_casecat_pages(native_window, tmp_path):
     from PySide6.QtWidgets import QTextEdit
     native_window.import_zip(0, source_zip(tmp_path, audio=False))

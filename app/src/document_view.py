@@ -1,9 +1,10 @@
 """One structured document and its review transactions."""
 from PySide6.QtCore import Signal, QTimer, Qt
-from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor
+from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
+from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
 from app.src.suggestions import propose, resolve
 
@@ -55,9 +56,11 @@ class DocumentView(QWidget):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
             editor.whole_text_set.connect(lambda text, s=side, e=editor: self._native_whole_text(s, e, text))
             editor.document().contentsChange.connect(lambda p, r, a, s=side, e=editor: self._native_edit(s, e, p, r, a))
-        self.original_stack.addWidget(self.editor)
+        self.original_page = PageView(self.editor)
+        self.incoming_page = PageView(self.incoming_editor)
+        self.original_stack.addWidget(self.original_page)
         self.stack.addWidget(self.original_stack)
-        self.stack.addWidget(self.incoming_editor)
+        self.stack.addWidget(self.incoming_page)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.review_splitter = QSplitter(Qt.Horizontal)
@@ -65,7 +68,8 @@ class DocumentView(QWidget):
         self.review_splitter.addWidget(self.diff_view)
         self.diff_view.setMinimumWidth(260)
         self.review_splitter.setStretchFactor(0, 1)
-        self.review_splitter.setSizes([900, 300])
+        self.review_splitter.setStretchFactor(1, 1)
+        self.review_splitter.setSizes([900, 380])
         layout.addWidget(self.review_splitter, 1)
         self.editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.editor, 'original'))
         self.incoming_editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.incoming_editor, 'incoming'))
@@ -90,6 +94,15 @@ class DocumentView(QWidget):
             timing = None
         self.playback = PlaybackBar(doc.wav_path, timing, self._playback_context, self)
         layout.addWidget(self.playback)
+        if not hasattr(self, '_space_shortcuts'):
+            self._space_shortcuts = []
+            for owner in (self, self.editor, self.incoming_editor):
+                shortcut = QShortcut(QKeySequence(Qt.Key_Space), owner)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.setAutoRepeat(False)
+                shortcut.setEnabled(False)
+                shortcut.activated.connect(lambda: self.playback.toggle())
+                self._space_shortcuts.append(shortcut)
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
             self.stack.currentChanged.connect(lambda _: self.playback.stop())
@@ -101,7 +114,7 @@ class DocumentView(QWidget):
                 shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
 
     def active_view(self):
-        return self.incoming_editor if self.stack.currentIndex() else self.original_stack.currentWidget()
+        return self.incoming_editor if self.stack.currentIndex() else self.editor
 
     def _playback_context(self):
         editor = self.incoming_editor if self.stack.currentIndex() else self.editor
@@ -202,8 +215,10 @@ class DocumentView(QWidget):
         doc = self.document
         self._set_text(self.editor, doc.original)
         self._set_text(self.incoming_editor, doc.incoming)
-        self.diff_view.set_revisions(doc.native.original, doc.native.incoming)
-        self.original_stack.setCurrentWidget(self.editor)
+        self.diff_view.set_revisions(doc.native.original, doc.native.incoming, page_lines=self.editor.page_lines())
+        self.original_stack.setCurrentWidget(self.original_page)
+        self.original_page.fit_page()
+        self.incoming_page.fit_page()
         self.diff_view.setVisible(self.diff_view.has_changes)
         self.highlight_suggestions()
         self._updating = False
@@ -216,6 +231,13 @@ class DocumentView(QWidget):
             for index, change in enumerate(self.diff_view.changes):
                 for a, b, c, d in change.ranges:
                     start, end = (a, b) if side == 'original' else (c, d)
+                    if index == self.diff_view.current:
+                        focus = QTextEdit.ExtraSelection()
+                        focus.cursor = QTextCursor(editor.document())
+                        focus.cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
+                        focus.format.setBackground(QColor('#394b60'))
+                        focus.format.setProperty(QTextFormat.FullWidthSelection, True)
+                        marks.append(focus)
                     if start == end:
                         insertions.append((len(text[:start].encode('utf-16-le')) // 2, index))
                         continue
@@ -225,13 +247,18 @@ class DocumentView(QWidget):
                     mark.cursor.setPosition(len(text[:end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
                     mark.format.setBackground(QColor('#ffd7d5' if side == 'original' else '#ccffd8'))
                     mark.format.setForeground(QColor('#82071e' if side == 'original' else '#116329'))
+                    if index == self.diff_view.current:
+                        mark.format.setBackground(QColor('#ffaaa5' if side == 'original' else '#7ee2a8'))
+                        mark.format.setFontUnderline(True)
                     marks.append(mark)
+            editor._selected_review = self.diff_view.current
             editor.set_review_marks(marks, insertions)
 
     def select_suggestion(self, index):
         if not 0 <= index < len(self.diff_view.changes):
             return
         change = self.diff_view.changes[index]
+        self.highlight_suggestions()
         if change.ranges:
             side = 'incoming' if self.stack.currentIndex() else 'original'
             editor = self.incoming_editor if self.stack.currentIndex() else self.editor
@@ -240,6 +267,10 @@ class DocumentView(QWidget):
             cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
             editor.setTextCursor(cursor)
             editor.ensureCursorVisible()
+            lines = editor.page_lines()
+            line = next((i for i in range(len(lines)-1, -1, -1)
+                         if lines[i].position <= cursor.position()), 0)
+            editor.scroll_to_center_line(line)
 
     def select_at_cursor(self, editor, side):
         position = utf16_index(getattr(self.document, side), editor.textCursor().position())
@@ -336,6 +367,10 @@ class DocumentView(QWidget):
         pending = self.document.native.original != self.document.native.incoming
         self.editor.setReadOnly(busy or pending)
         self.incoming_editor.setReadOnly(True)
+        for shortcut, editor in zip(getattr(self, '_space_shortcuts', ()),
+                                    (None, self.editor, self.incoming_editor)):
+            shortcut.setEnabled(not self.diff_view.isHidden() and
+                                (editor is None or editor.isReadOnly()))
         self.diff_view.setEnabled(not busy)
 
     def active_editor(self):

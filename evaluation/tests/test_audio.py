@@ -219,7 +219,10 @@ def test_advisory_lock_released_when_worker_is_killed(tmp_path):
     marker = tmp_path / "ready"
     script = ("from evaluation.storage import file_lock; from pathlib import Path; import sys,time; "
               "\nwith file_lock(sys.argv[1]):\n Path(sys.argv[2]).touch()\n time.sleep(60)\n")
-    worker = subprocess.Popen([sys.executable, "-c", script, str(lock), str(marker)],
+    # Windows venv python.exe can be a launcher for a second process. Kill the
+    # interpreter that owns the lock, rather than only its launcher process.
+    interpreter = sys._base_executable if os.name == "nt" else sys.executable
+    worker = subprocess.Popen([interpreter, "-c", script, str(lock), str(marker)],
                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     try:
         deadline = time.monotonic() + 10
