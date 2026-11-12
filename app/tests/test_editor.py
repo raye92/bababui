@@ -12,7 +12,7 @@ import main
 
 
 @pytest.fixture
-def window(tmp_path):
+def window(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     if os.name == 'nt':
         for font in ('segoeui.ttf', 'cour.ttf'):
@@ -21,9 +21,16 @@ def window(tmp_path):
     w = main.TranscriptEditor(session_path=tmp_path/'session.json', legacy_dir=tmp_path)
     w.show()
     app.processEvents()
+    from app.src import documents
+    from app.tests.test_native_casecat import zip_bytes, job_files
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path/'assets')
+    source = tmp_path/'test.zip'
+    source.write_bytes(zip_bytes(job_files(audio=False)))
+    w.import_zip(0, source)
     yield w
     for view in w.views():
-        view.set_busy(False)
+        if view.document.native:
+            view.set_busy(False)
     w.close()
 
 
@@ -31,40 +38,40 @@ def test_toolbar_tabs_shortcuts_and_dirty_dot(window):
     assert not window.toolbar.isMovable() and not window.toolbar.isFloatable()
     assert window.tabs.count() == 1 and window.current.document.dirty
     assert '●' in window.tabs.tabText(0)
-    assert window.tabs.tabBar().is_empty(0)
+    assert not window.tabs.tabBar().is_empty(0)
     QTest.keyClick(window, Qt.Key_T, Qt.ControlModifier)
     assert window.tabs.count() == 2
     assert window.file_btn.text() == 'File'
 
 
-def test_manual_formatting_wraps_and_strip_restores_paragraphs(window):
-    paragraph = '     Q    Please describe the records you reviewed before the examination.'
-    window.current.editor.setPlainText(paragraph)
-    window.apply_formatting()
-    numbered = window.current.editor.toPlainText()
-    assert '          1         Q    Please describe the records you reviewed\n' in numbered
-    assert '          2    before the examination.\n' in numbered
-    window.apply_formatting()
-    assert window.current.editor.toPlainText() == numbered
-    window.strip_formatting()
-    assert window.current.editor.toPlainText() == paragraph
+def test_import_screen_and_no_manual_menu(window):
+    window.new_tab()
+    assert window.current.active_editor() is None
+    assert not hasattr(window.current, 'editor')
+    assert not hasattr(window, 'manual_btn')
+    assert not window.file_actions['Save'].isEnabled()
 
 
-def test_click_and_drop_tab_wav(window, tmp_path, monkeypatch):
-    wav = tmp_path/'meeting.wav'
-    wav.write_bytes(b'wav')
-    monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *a, **k: (str(wav), ''))
+def test_click_and_drop_tab_zip(window, tmp_path, monkeypatch):
+    from app.tests.test_native_casecat import zip_bytes
+    from app.src import documents
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path/'assets')
+    source = tmp_path/'meeting.zip'
+    source.write_bytes(zip_bytes())
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *a, **k: (str(source), ''))
+    monkeypatch.setattr(window, 'confirm_native_replace', lambda view: 'replace')
+    window.choose_zip(0)
     bar = window.tabs.tabBar()
     QTest.mouseClick(bar, Qt.LeftButton, pos=bar.tabRect(0).center())
-    assert window.current.document.wav_path == str(wav)
-    assert 'meeting.wav' in window.tabs.tabText(0) and not bar.is_empty(0)
+    assert Path(window.current.document.wav_path).read_bytes() == b'RIFF synthetic audio bytes'
+    assert 'meeting.zip' in window.tabs.tabText(0) and not bar.is_empty(0)
     window.new_tab()
     QApplication.processEvents()
     mime = QMimeData()
-    mime.setUrls([QUrl.fromLocalFile(str(wav))])
+    mime.setUrls([QUrl.fromLocalFile(str(source))])
     event = QDropEvent(bar.tabRect(1).center(), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
     bar.dropEvent(event)
-    assert event.isAccepted() and window.current.document.wav_path == str(wav)
+    assert event.isAccepted() and window.current.document.native
 
 
 def test_tabs_duplicate_settings_and_save(window, tmp_path, monkeypatch):
@@ -78,11 +85,11 @@ def test_tabs_duplicate_settings_and_save(window, tmp_path, monkeypatch):
     assert first.document.id != second.document.id
     window.set_processing_model('gemini-3.8-flash')
     assert first.document.model == 'deepseek-v4-pro'
-    target = tmp_path/'version.txt'
+    target = tmp_path/'version.bababui'
     monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a, **k: (str(target), ''))
     QTest.keyClick(window, Qt.Key_S, Qt.ControlModifier)
-    assert target.read_text() == 'Reviewed' and not second.document.dirty
-    assert window.tabs.tabText(1) == 'version.txt'
+    assert main.open_document(target).original == 'Reviewed' and not second.document.dirty
+    assert window.tabs.tabText(1) == 'version.bababui'
     window.open_file(target)
     assert window.tabs.count() == 2 and window.current is second
 
@@ -100,8 +107,10 @@ def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, 
     assert window.progress.isVisible() and not window.bababui_btn.isVisible()
     window.new_tab()
     second = window.current
+    window.import_zip(1, tmp_path/'test.zip')
+    second = window.current
     second.editor.setPlainText('Second original')
-    assert window.bababui_btn.isEnabled() and window.manual_btn.isEnabled()
+    assert not window.bababui_btn.isEnabled() and window.edit_btn.isEnabled()
     window.attach_wav(1, str(wav))
     window.run_bababui()
     window.jobs.succeeded.emit(second.document.id, 'Second result', [])
@@ -111,7 +120,7 @@ def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, 
     assert first.document.original == 'First original' and first.document.incoming == 'First result'
     assert second.document.original == 'Second original' and second.document.incoming == 'Second result'
     assert window.current is second and len(requests) == 2
-    assert first.document.warnings == ['Review speakers']
+    assert 'Review speakers' in first.document.warnings
 
 
 def test_session_restore_and_legacy_migration(window, tmp_path):
@@ -128,7 +137,7 @@ def test_session_restore_and_legacy_migration(window, tmp_path):
     (tmp_path/'original.txt').write_text('Legacy')
     (tmp_path/'incoming.txt').write_text('Legacy incoming')
     legacy = main.TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
-    assert legacy.current.document.original == 'Legacy' and legacy.current.document.incoming == 'Legacy incoming'
+    assert legacy.current.document.native is None
     assert (tmp_path/'original.txt').read_text() == 'Legacy'
     legacy.close()
 
@@ -154,7 +163,7 @@ def test_diff_review_and_busy_scroll(window):
     view.editor.setPlainText('Shared\nOriginal')
     view.receive('Shared\nIncoming', [])
     view.set_busy(True)
-    assert view.diff_view.isEnabled()
+    assert not view.diff_view.isEnabled()
     assert all(e.isReadOnly() for e in view.diff_view.findChildren(QPlainTextEdit))
     assert all(not b.isEnabled() for b in view.diff_view.findChildren(QPushButton))
     view.set_busy(False)
@@ -164,11 +173,15 @@ def test_diff_review_and_busy_scroll(window):
     assert view.original_stack.currentWidget() is view.editor
 
 
-def test_recovered_scroll_position_is_not_overwritten(tmp_path):
+def test_recovered_scroll_position_is_not_overwritten(tmp_path, monkeypatch):
     from app.src.documents import Document, save_session, load_session
     app = QApplication.instance() or QApplication([])
     text = '\n'.join(f'Line {i}' for i in range(300))
-    doc = Document(original=text, incoming=text, center_line=150)
+    from app.tests.test_native_projects import native_doc
+    doc, _ = native_doc(tmp_path, monkeypatch)
+    doc.set_text('original', text)
+    doc.set_text('incoming', text)
+    doc.center_line = 150
     session = tmp_path/'session.json'
     save_session(session, [doc], doc.id)
     w = main.TranscriptEditor(session_path=session, legacy_dir=tmp_path)
@@ -208,18 +221,16 @@ def test_saved_name_conflict_and_close_save_cancel_preserve_tabs(window, tmp_pat
     assert window.current.document.id == identifier
 
 
-def test_manual_operations_and_replacing_wav_are_tab_local(window, tmp_path):
+def test_replacing_wav_is_tab_local(window, tmp_path):
     first = window.current
-    first.editor.setPlainText('Unchanged')
-    window.new_tab()
+    window.duplicate_tab()
     second = window.current
-    window.insert_sample_text()
-    assert first.document.original == 'Unchanged'
     before = second.document.original
     wav = tmp_path/'replacement.wav'
     wav.write_bytes(b'wav')
     window.attach_wav(1, str(wav))
-    assert second.document.original == before and second.document.dirty
+    assert second.document.original == before
+    assert first.document.wav_path is None
     second.set_busy(True)
     window.set_processing_model('deepseek-v4-pro')
     assert second.document.model == 'gemini-3.8-flash'
@@ -244,7 +255,7 @@ def test_header_alignment_and_editor_resize_grip(window):
     for width in (720, 1100, 1600):
         window.resize(width, 800)
         QApplication.processEvents()
-        heights = {button.height() for button in (window.file_btn, window.manual_btn,
+        heights = {button.height() for button in (window.file_btn, window.edit_btn,
             window.settings_btn, window.bababui_btn, window.toggle_view_btn, window.progress)}
         assert len(heights) == 1
         plus, bar = window.plus_btn.geometry(), window.tabs.tabBar().geometry()

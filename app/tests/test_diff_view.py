@@ -56,13 +56,10 @@ def test_heading_name_and_examiner_have_separate_controls(view):
 
 def test_layout_only_incoming_does_not_leave_unresolvable_review(view):
     plain = 'Q Please describe the records you reviewed before the examination.\nA Yes.'
-    document = Document(original=plain, incoming=TranscriptFormatter().apply_formatting(plain)[0])
-    widget = DocumentView(document)
-    try:
-        assert widget.original_stack.currentWidget() is widget.editor
-        assert document.original == document.incoming == plain
-    finally:
-        widget.close()
+    from app.src.casecat.anchors import Revision, AnchoredSpan
+    from app.src.suggestions import propose, suggestions
+    original = Revision((AnchoredSpan('test', (), (), plain),))
+    assert suggestions(original, propose(original, plain)) == []
 
 
 def test_repeated_equal_edits_keep_later_accept_at_correct_location(view):

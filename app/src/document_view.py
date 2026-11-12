@@ -1,8 +1,34 @@
-"""One document's editor, Incoming view, and revision controls."""
+"""One structured document and its review transactions."""
 from PySide6.QtCore import Signal, QTimer
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPlainTextEdit, QPushButton
-from app.src.diff_view import DiffView, LineNumberedEditor
+from PySide6.QtGui import QFont, QShortcut, QKeySequence
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel
+from app.src.native_editor import NativeTranscriptEditor
+from app.src.review_view import ReviewView
+from app.src.casecat.anchors import utf16_index
+from app.src.suggestions import propose, resolve
+
+
+class ImportView(QWidget):
+    changed = Signal()
+    import_requested = Signal()
+
+    def __init__(self, document):
+        super().__init__()
+        self.document = document
+        layout = QVBoxLayout(self)
+        layout.addStretch()
+        layout.addWidget(QLabel('Import a CaseCAT ZIP to start editing.'))
+        button = QPushButton('Import CaseCAT ZIP')
+        button.clicked.connect(self.import_requested)
+        layout.addWidget(button)
+        layout.addStretch()
+
+    def capture_position(self): pass
+    def schedule_restore(self): pass
+    def active_editor(self): return None
+    def undo_review(self): pass
+    def redo_review(self): pass
+    def edited(self): self.changed.emit()
 
 
 class DocumentView(QWidget):
@@ -10,16 +36,24 @@ class DocumentView(QWidget):
 
     def __init__(self, document):
         super().__init__()
+        if document.native is None:
+            raise ValueError('An editor requires an imported CaseCAT job.')
         self.document = document
         self._updating = False
         self._position_pending = True
+        self._native_history = {'original': {}, 'incoming': {}}
+        self._review_undo, self._review_redo = [], []
         self.stack = QStackedWidget()
         self.original_stack = QStackedWidget()
         font = QFont('Courier New', 12)
-        font.setStyleHint(QFont.Monospace)
-        self.editor = LineNumberedEditor(font)
-        self.incoming_editor = LineNumberedEditor(font)
-        self.diff_view = DiffView()
+        self.editor = NativeTranscriptEditor(font)
+        self.incoming_editor = NativeTranscriptEditor(font)
+        self.diff_view = ReviewView()
+        self.diff_view.requested.connect(self.review)
+        for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
+            editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
+            editor.whole_text_set.connect(lambda text, s=side, e=editor: self._native_whole_text(s, e, text))
+            editor.document().contentsChange.connect(lambda p, r, a, s=side, e=editor: self._native_edit(s, e, p, r, a))
         self.original_stack.addWidget(self.editor)
         self.original_stack.addWidget(self.diff_view)
         self.stack.addWidget(self.original_stack)
@@ -27,16 +61,48 @@ class DocumentView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.stack)
+        self.playback = None
+        if document.wav_path:
+            self.setup_playback(layout)
         self.editor.textChanged.connect(self._original_changed)
         self.incoming_editor.textChanged.connect(self._incoming_changed)
-        self.diff_view.resolved.connect(self._resolved)
-        self.diff_view.autosaved.connect(self._diff_edited)
         self.refresh()
         self.stack.setCurrentIndex(document.view)
         self.schedule_restore()
 
+    def setup_playback(self, layout):
+        from app.src.casecat.timing import AudioMap
+        from app.src.playback import PlaybackBar
+        from PySide6.QtCore import Qt
+        import wave
+        doc = self.document
+        try:
+            timing = AudioMap.from_job(doc.native.bundle, doc.native.job, doc.wav_path)
+        except (ValueError, OSError, wave.Error, EOFError):
+            timing = None
+        self.playback = PlaybackBar(doc.wav_path, timing, self._playback_context, self)
+        layout.addWidget(self.playback)
+        if not getattr(self, '_playback_connected', False):
+            self._playback_connected = True
+            self.stack.currentChanged.connect(lambda _: self.playback.stop())
+            for editor in (self.editor, self.incoming_editor):
+                editor.transcript_clicked.connect(lambda: self.playback.seek_from_cursor())
+            for key, method in (('Shift+F9', 'seek_from_cursor'), ('Ctrl+F9', 'stop')):
+                shortcut = QShortcut(QKeySequence(key), self)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
+
     def active_view(self):
-        return self.incoming_editor if self.stack.currentIndex() == 1 else self.original_stack.currentWidget()
+        return self.incoming_editor if self.stack.currentIndex() else self.original_stack.currentWidget()
+
+    def _playback_context(self):
+        editor = self.incoming_editor if self.stack.currentIndex() else self.editor
+        return editor, getattr(self.document.native, 'incoming' if self.stack.currentIndex() else 'original')
+
+    def _seek_review_passage(self, side, position):
+        if self.playback:
+            revision = getattr(self.document.native, side)
+            self.playback.seek_passage(revision, utf16_index(revision.text, position))
 
     def capture_position(self):
         self.document.view = self.stack.currentIndex()
@@ -52,25 +118,84 @@ class DocumentView(QWidget):
         self._position_pending = False
 
     def _set_text(self, editor, text):
-        if editor.toPlainText() != text:
+        changed = editor.toPlainText() != text
+        side = 'original' if editor is self.editor else 'incoming'
+        state = self.document.native
+        revision = getattr(state, side)
+        editor.set_native_source(state.bundle, state.job.with_revision(revision))
+        if changed:
             editor.setPlainText(text)
+        steps = editor.document().availableUndoSteps()
+        if changed or not self._native_history[side]:
+            self._native_history[side] = {steps: revision}
+        elif self._native_history[side].get(steps) != revision:
+            editor.document().clearUndoRedoStacks()
+            self._native_history[side] = {0: revision}
+
+    def _native_edit(self, side, editor, position, removed, added):
+        doc = self.document
+        if self._updating or editor.whole_text_update:
+            return
+        old = getattr(doc.native, side)
+        new_text = editor.toPlainText()
+        pending = getattr(editor, 'pending_native_revision', None)
+        if new_text == old.text and pending is None and not editor.history_action:
+            return  # Presentation-only changes do not create native transactions.
+        steps = editor.document().availableUndoSteps()
+        history = self._native_history[side]
+        restored = history.get(steps) if editor.history_action else None
+        if restored is not None and restored.text != new_text:
+            return  # Qt is traversing an intermediate part of an atomic edit.
+        if restored is not None and restored.text == new_text:
+            revision = restored
+        else:
+            # Qt's setPlainText notifications can include its implicit final
+            # paragraph terminator, which is not transcript content.
+            old_length = len(old.text.encode('utf-16-le')) // 2
+            new_length = len(new_text.encode('utf-16-le')) // 2
+            start = min(position, old_length)
+            end = min(position + removed, old_length)
+            new_start = utf16_index(new_text, min(position, new_length))
+            new_end = utf16_index(new_text, min(position + added, new_length))
+            try:
+                revision = pending or old.replace_utf16(start, end - start, new_text[new_start:new_end])
+            except ValueError as exc:
+                revision = old
+                doc.status = str(exc)
+            if (old.text[:utf16_index(old.text, start)] + new_text[new_start:new_end]
+                    + old.text[utf16_index(old.text, end):]) != new_text:
+                # A programmatic whole-document update is aligned by paragraph.
+                revision = old.revise(new_text)
+            if not editor.history_action:
+                history = {key: value for key, value in history.items() if key <= steps}
+                self._native_history[side] = history
+            history[steps] = revision
+        doc.set_text(side, revision.text, revision=revision)
+        if side == 'original':
+            doc.set_text('incoming', revision.text, revision=revision)
+
+    def _native_whole_text(self, side, editor, text):
+        doc = self.document
+        if self._updating:
+            return
+        doc.set_text(side, text)
+        revision = getattr(doc.native, side)
+        editor.set_native_source(doc.native.bundle, doc.native.job.with_revision(revision))
+        editor.sync_native_text(revision.text)
+        editor.refresh_native_presentation()
+        editor.document().clearUndoRedoStacks()
+        self._native_history[side] = {editor.document().availableUndoSteps(): revision}
+        if side == 'original':
+            doc.set_text('incoming', revision.text, revision=revision)
+        self.edited()
 
     def refresh(self):
         self._updating = True
         doc = self.document
         self._set_text(self.editor, doc.original)
         self._set_text(self.incoming_editor, doc.incoming)
-        if doc.original == doc.incoming:
-            self.original_stack.setCurrentWidget(self.editor)
-        else:
-            self.diff_view.set_texts(doc.original, doc.incoming)
-            if self.diff_view.has_changes:
-                self.original_stack.setCurrentWidget(self.diff_view)
-            else:
-                # Layout is generated, not a pending editorial decision.
-                doc.incoming = doc.original
-                self._set_text(self.incoming_editor, doc.incoming)
-                self.original_stack.setCurrentWidget(self.editor)
+        self.diff_view.set_revisions(doc.native.original, doc.native.incoming)
+        self.original_stack.setCurrentWidget(self.diff_view if self.diff_view.has_changes else self.editor)
         self._updating = False
         self.set_busy(doc.busy)
 
@@ -78,51 +203,78 @@ class DocumentView(QWidget):
         self.document.dirty = True
         self.changed.emit()
 
-    def _original_changed(self):
-        if self._updating:
+    def review(self, index, accept):
+        if self.document.busy:
             return
-        self.document.original = self.editor.toPlainText()
-        self.document.incoming = self.document.original
+        state = self.document.native
+        before = state.original, state.incoming
+        try:
+            result = resolve(*before, self.diff_view.changes[index], accept)
+        except (ValueError, IndexError) as exc:
+            self.document.status = str(exc)
+            self.refresh()
+            return
+        self._review_undo.append(before)
+        self._review_redo.clear()
+        state.original, state.incoming = result
+        self.refresh()
         self.edited()
+
+    def _review_history(self, source, target):
+        if source and not self.document.busy:
+            state = self.document.native
+            target.append((state.original, state.incoming))
+            state.original, state.incoming = source.pop()
+            self.refresh()
+            self.edited()
+
+    def undo_review(self): self._review_history(self._review_undo, self._review_redo)
+    def redo_review(self): self._review_history(self._review_redo, self._review_undo)
+
+    def _original_changed(self):
+        if not self._updating:
+            self._review_undo.clear()
+            self._review_redo.clear()
+            self._refresh_native_presentation('original', self.editor)
+            self.edited()
 
     def _incoming_changed(self):
-        if self._updating:
+        if not self._updating:
+            self._refresh_native_presentation('incoming', self.incoming_editor)
+            self.edited()
+
+    def _refresh_native_presentation(self, side, editor):
+        if editor.whole_text_update:
             return
-        self.document.incoming = self.incoming_editor.toPlainText()
-        self.edited()
-
-    def _diff_edited(self, original, incoming):
-        self.document.original, self.document.incoming = original, incoming
-        self._updating = True
-        self._set_text(self.incoming_editor, incoming)
-        self._updating = False
-        self.edited()
-
-    def _resolved(self, original, incoming):
-        self._diff_edited(original, incoming)
-        if original == incoming:
-            self.refresh()
+        state = self.document.native
+        revision = getattr(state, side)
+        editor.set_native_source(state.bundle, state.job.with_revision(revision))
+        if editor.history_action:
+            return
+        editor.sync_native_text(revision.text)
+        editor.refresh_native_presentation()
+        self._native_history[side][editor.document().availableUndoSteps()] = revision
 
     def toggle_view(self):
         self.capture_position()
-        line = self.document.center_line
-        if self.stack.currentIndex() == 0:
-            self._updating = True
-            self._set_text(self.incoming_editor, self.document.incoming)
-            self._updating = False
-            self.stack.setCurrentIndex(1)
-        else:
-            self.refresh()
-            self.stack.setCurrentIndex(0)
+        self.refresh()
+        self.stack.setCurrentIndex(1-self.stack.currentIndex())
         self.document.view = self.stack.currentIndex()
-        self.document.center_line = line
         self.schedule_restore()
         self.changed.emit()
 
     def receive(self, text, warnings):
         self.capture_position()
-        self.document.incoming = text
-        self.document.warnings = list(warnings)
+        try:
+            proposal = propose(self.document.native.original, text)
+        except ValueError as exc:
+            self.document.status = str(exc)
+            self.changed.emit()
+            return
+        self.document.native.incoming = proposal
+        self._review_undo.clear()
+        self._review_redo.clear()
+        self.document.warnings = list(dict.fromkeys([*self.document.native.job.warnings, *warnings]))
         self.document.status = 'Incoming updated. Review the suggested revisions.'
         self.refresh()
         self.edited()
@@ -130,18 +282,10 @@ class DocumentView(QWidget):
 
     def set_busy(self, busy):
         self.document.busy = busy
-        self.editor.setReadOnly(busy)
-        self.incoming_editor.setReadOnly(busy)
-        for editor in self.diff_view.findChildren(QPlainTextEdit):
-            editor.setReadOnly(busy)
-        for button in self.diff_view.findChildren(QPushButton):
-            button.setEnabled(not busy)
+        pending = self.document.native.original != self.document.native.incoming
+        self.editor.setReadOnly(busy or pending)
+        self.incoming_editor.setReadOnly(True)
+        self.diff_view.setEnabled(not busy)
 
     def active_editor(self):
-        if self.document.busy:
-            return None
-        if self.stack.currentIndex() == 1:
-            return self.incoming_editor
-        if self.original_stack.currentWidget() is self.editor:
-            return self.editor
-        return None
+        return self.editor if not self.document.busy and not self.stack.currentIndex() and not self.editor.isReadOnly() else None
