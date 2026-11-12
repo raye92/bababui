@@ -466,3 +466,62 @@ def test_automatic_review_batch_is_native_undoable_and_persisted(native_window, 
     loaded = codec.load_job(archive.inspect_archive(tmp_path/'automatic.zip'), view.document.native.job.key)
     assert loaded.text == after.text
     assert loaded.notes_bytes == view.document.native.job.notes_bytes
+
+
+def test_off_record_batch_undo_reopen_and_native_export(native_window, tmp_path):
+    import re
+    from app.tests.test_off_record import ORIGINAL, INCOMING, NOTE
+    from app.tests.test_native_fields import field_files
+    from app.src.casecat.project import project_bytes, read_project
+    from app.src.casecat import archive, codec
+    from app.src.suggestion_filter import auto_accept
+    files = field_files('MS. SIEMENS')
+    del files['jobs/example.wav']
+    source = tmp_path/'off-record.zip'
+    source.write_bytes(zip_bytes(files))
+    native_window.import_zip(0, source)
+    view = native_window.current
+    state = view.document.native
+    original = state.original.revise(ORIGINAL)
+    # Give both surviving SIEMENS occurrences real native field identities.
+    for start in reversed([m.start() for m in re.finditer('MS. SIEMENS', ORIGINAL)]):
+        original = original._replace(start, start+len('MS. SIEMENS'), '')
+        original = original.insert_field(start, 'EZ SPEAKER 01', 'MS. SIEMENS')
+    state.original = state.incoming = original
+    view.refresh()
+    view.receive(INCOMING, [])
+    assert 'review the transcripts' not in state.incoming.text
+    assert NOTE in state.incoming.text
+    assert state.original == original
+    assert len([e for e in state.incoming.elements if e.kind == 'field']) == 2
+    filtered = state.incoming
+    view.undo_review()
+    assert 'review the transcripts' in state.incoming.text
+    restored, _ = read_project(project_bytes(state, {}))
+    assert auto_accept(restored) == []
+    assert 'review the transcripts' in restored.incoming.text
+    view.redo_review()
+    assert state.incoming == filtered
+    restored, _ = read_project(project_bytes(state, {}))
+    assert restored.review == state.review
+    assert restored.incoming == filtered
+    for _ in range(50):
+        if not view.diff_view.changes:
+            break
+        view.review(0, True)
+    assert not view.diff_view.changes
+    view.document.export_casecat(tmp_path/'off-record-export.zip')
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'off-record-export.zip'), state.job.key)
+    assert loaded.text == state.original.text
+    assert loaded.notes_bytes == state.job.notes_bytes
+
+
+def test_reopening_unfiltered_review_keeps_incoming_native_fields(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    document = native_window.current.document
+    incoming = document.native.original.insert_field(0, 'CUSTOM', 'Named speaker')
+    document.native.incoming = incoming
+    document.native.review = None
+    reopened = DocumentView(document)
+    assert document.native.incoming == incoming
+    reopened.close()

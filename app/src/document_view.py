@@ -42,16 +42,17 @@ class DocumentView(QWidget):
         if document.native is None:
             raise ValueError('An editor requires an imported CaseCAT job.')
         self.document = document
+        automatic_before = None
         from app.src.suggestion_filter import LABEL, GENERIC
         if (document.native.review is None and document.native.original != document.native.incoming
                 and any((m := LABEL.match(p)) and GENERIC.fullmatch(m['name']) for p in document.incoming.split('\n'))):
-            begin_review(document.native, document.native.incoming.text)
+            automatic_before = begin_review(document.native, document.native.incoming.text)
         self._updating = False
         self._position_pending = True
         self._native_history = {'original': {}, 'incoming': {}}
         self._review_undo, self._review_redo = [], []
-        if document.native.original != document.native.incoming:
-            self._automatic_review()
+        if document.native.original != document.native.incoming or automatic_before:
+            self._automatic_review(automatic_before)
         self.stack = QStackedWidget()
         self.original_stack = QStackedWidget()
         font = QFont('Courier New', 12)
@@ -379,7 +380,7 @@ class DocumentView(QWidget):
     def receive(self, text, warnings):
         self.capture_position()
         try:
-            begin_review(self.document.native, text)
+            automatic_before = begin_review(self.document.native, text)
         except ValueError as exc:
             self.document.status = str(exc)
             self.changed.emit()
@@ -388,22 +389,25 @@ class DocumentView(QWidget):
         self._review_redo.clear()
         self.document.warnings = list(dict.fromkeys([*self.document.native.job.warnings, *warnings]))
         self.document.status = 'Incoming updated. Review the suggested revisions.'
-        self._automatic_review()
+        self._automatic_review(automatic_before)
         self.refresh()
         self.edited()
         self.schedule_restore()
 
-    def _automatic_review(self):
+    def _automatic_review(self, automatic_before=None):
         state = self.document.native
         before = state.original, state.incoming, deepcopy(state.review)
         records = auto_accept(state)
         if records:
             # Keep the version marker on undo so reopening does not silently
             # reapply a batch that the user explicitly undid.
-            undo_review = deepcopy(state.review)
-            undo_review['automatic_changes'] = []
-            self._review_undo.append((before[0], before[1], undo_review))
-            self.document.status = f'{len(records)} changes automatically accepted. Review the remaining suggestions. Undo restores the batch.'
+            if automatic_before:
+                self._review_undo.append(automatic_before)
+            else:
+                undo_review = deepcopy(state.review)
+                undo_review['automatic_changes'] = []
+                self._review_undo.append((before[0], before[1], undo_review))
+            self.document.status = f'{len(records)} changes automatically accepted or filtered. Review the remaining suggestions. Undo restores the batch.'
             self.document.dirty = True
 
     def set_busy(self, busy):

@@ -23,6 +23,21 @@ def _layout(line):
 
 def _paragraph_ops(left, right):
     """Trim shared ends, anchor paragraphs, and bound similarity alignment work."""
+    from app.src.off_record import NOTE
+    aa = [i for i, line in enumerate(left) if NOTE.fullmatch(line)]
+    bb = [i for i, line in enumerate(right) if NOTE.fullmatch(line)]
+    if aa and len(aa) == len(bb):
+        # Confirmed notes separate alignment domains, even if distant repeated
+        # testimony would otherwise win the global paragraph matching.
+        result, i, j = [], 0, 0
+        for a, b in zip(aa, bb):
+            result.extend((tag, x+i, y+i, z+j, w+j)
+                          for tag, x, y, z, w in _paragraph_ops(left[i:a], right[j:b]))
+            result.append(('equal' if left[a] == right[b] else 'replace', a, a+1, b, b+1))
+            i, j = a+1, b+1
+        result.extend((tag, x+i, y+i, z+j, w+j)
+                      for tag, x, y, z, w in _paragraph_ops(left[i:], right[j:]))
+        return result
     prefix = 0
     while prefix < min(len(left), len(right)) and left[prefix] == right[prefix]:
         prefix += 1
@@ -79,8 +94,8 @@ def suggestions(original, incoming):
     # Speaker labels and Q/A prefixes must not steer wording alignment toward
     # a different repeated turn. Still compare the complete paragraph tokens.
     from app.src.suggestion_filter import _paragraphs
-    bodies_a = [p[3] for p in _paragraphs(a)][:len(lines_a)]
-    bodies_b = [p[3] for p in _paragraphs(b)][:len(lines_b)]
+    bodies_a = [p[3] for p in _paragraphs(a, byline_context=False)][:len(lines_a)]
+    bodies_b = [p[3] for p in _paragraphs(b, byline_context=False)][:len(lines_b)]
     for tag, i, j, k, l in _paragraph_ops(bodies_a, bodies_b):
         if tag == 'equal' and a[oa[i]:oa[j]] == b[ob[k]:ob[l]]:
             continue

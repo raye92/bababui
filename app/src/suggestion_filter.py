@@ -27,6 +27,9 @@
    native fields/symbols, numbers, hard spaces, indentation and paragraph breaks.
    Other wording and spacing stays pending. test_automatic_suggestions covers
    examples, whole-word guards, native application, idempotence and undo.
+8. Original off-record notes authorize discussion suppression only with unique
+   approximate departure/return matches and subsequent corroborating testimony.
+   Excluded text is audited and restored by Undo. Ambiguous intervals stay pending.
 """
 from collections import Counter
 from dataclasses import replace
@@ -116,7 +119,7 @@ def auto_accept(state):
     original, incoming = state.original, state.incoming
     candidates = [(change, reason) for change in suggestions(original, incoming)
                   if (reason := automatic_reason(change))]
-    records = []
+    records = list(reversed(review.get('off_record_changes', [])))
     # Descending positions preserve all earlier offsets. Resolve uses the same
     # anchored operations as an individual Accept, retaining destination audio.
     for change, reason in reversed(candidates):
@@ -132,13 +135,13 @@ def auto_accept(state):
     return review['automatic_changes']
 
 
-def _paragraphs(text):
+def _paragraphs(text, *, byline_context=True):
     result, offset = [], 0
     parts = text.split('\n')
     for index, line in enumerate(parts):
         label = LABEL.match(line)
         body = line[label.end():].strip() if label else re.sub(r'^\s*[QA]\s+', '', line).strip()
-        if label and not body and 'BY' in label['prefix'].upper():
+        if byline_context and label and not body and 'BY' in label['prefix'].upper():
             body = next((re.sub(r'^\s*[QA]\s+', '', p).strip() for p in parts[index+1:] if p.strip()), '')
         result.append((offset, line, label, body.casefold()))
         offset += len(line) + 1
@@ -262,9 +265,22 @@ def prepare(original, text, *, evidence=None, overrides=None):
     return revision, evidence
 
 
-def begin_review(state, text):
-    """Freeze evidence once, before any accept/reject decisions."""
+def begin_review(state, text, *, exclude_off_record=True):
+    """Freeze evidence and return an optional pre-exclusion undo snapshot."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
+    undo, excluded = None, []
+    if exclude_off_record:
+        from types import SimpleNamespace
+        from app.src.off_record import exclude_discussions
+        filtered, excluded = exclude_discussions(state.original.text, text)
+        if excluded:
+            # Build raw speaker evidence only for Undo, never use it to vote in
+            # the filtered proposal. It has different paragraph offsets.
+            raw = SimpleNamespace(original=state.original)
+            begin_review(raw, text, exclude_off_record=False)
+            raw.review.update(automatic_filter=1, automatic_changes=[])
+            undo = (state.original, raw.incoming, raw.review)
+            text = filtered
     incoming, evidence = prepare(state.original, text)
     if (incoming.text == state.original.text and incoming.elements == state.original.elements
             and incoming.definitions == state.original.definitions):
@@ -281,6 +297,9 @@ def begin_review(state, text):
                               'end': offset+label.end('name'), 'resolved': False})
     state.incoming = incoming
     state.review = {'version': 1, 'evidence': evidence, 'overrides': {}, 'locations': locations}
+    if excluded:
+        state.review['off_record_changes'] = excluded
+    return undo
 
 
 def validate_review(review, text):
