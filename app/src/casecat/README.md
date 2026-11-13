@@ -79,6 +79,16 @@ replacements use the writer's source-group associations. No individual word time
 are invented. Unsupported or missing timing disables cursor seeking while plain
 WAV playback remains available. Missing WAV permits transcript editing.
 
+Import accepts an extra embedded stroke only when its complete eight-byte record
+matches a previously consumed original note. Every original note must still be
+covered in order. Each embedded occurrence has a separate editorial reference,
+so editing a repeated stroke's text cannot move it to the earlier occurrence.
+For playback in this app, repeats inherit the preceding occurrence's effective
+clock before pause and PCM drift correction. This is passage timing, not a
+measured word timestamp. Projects reconstruct the same clocks from the source.
+Original steno, timestamps, and audio records remain byte-identical on export;
+this playback adjustment does not rewrite CaseCAT's own timing behavior.
+
 ## Verification and limits
 
 The supplied transcript's 12 pages and 277 nonblank lines were compared against

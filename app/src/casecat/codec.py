@@ -58,6 +58,9 @@ class NativeJob:
     baseline: Revision
     revision: Revision
     warnings: tuple[str, ...]
+    # One effective playback clock per embedded stroke occurrence. Reused
+    # records keep their source bytes but inherit the preceding passage clock.
+    stroke_clocks: tuple[int, ...]
 
     @property
     def text(self):
@@ -100,6 +103,7 @@ def load_job(bundle, key):
     spans, refs, content, audio, formatting = [], (), [], [], []
     elements, position, content_length, byline = [], 0, 0, None
     stroke = 0
+    seen_strokes, stroke_clocks = set(), []
     renderer = TextRenderer(all_caps=all_caps)
     from .field_table import field_texts
     has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
@@ -123,10 +127,21 @@ def load_job(bundle, key):
             position += before
             before, part_count = 0, 0
             kind, size = raw[1:3]
-            if kind not in (1, 2) or not size or raw[3:] != notes[640 + stroke * 8:640 + (stroke + size) * 8]:
+            if kind not in (1, 2) or not size:
                 raise ValueError(f'Native steno association mismatch at byte {offset}.')
-            refs = tuple(range(stroke, stroke + size))
-            stroke += size
+            # References identify occurrences in the transcript, not offsets
+            # into .sgstn. Otherwise editing one copy could target another copy.
+            refs = tuple(range(len(stroke_clocks), len(stroke_clocks) + size))
+            for index in range(size):
+                record = raw[3 + index * 8:11 + index * 8]
+                if record == notes[640 + stroke * 8:648 + stroke * 8]:
+                    seen_strokes.add(record)
+                    stroke += 1
+                    stroke_clocks.append(u32(record, 4))
+                elif record in seen_strokes:
+                    stroke_clocks.append(stroke_clocks[-1])
+                else:
+                    raise ValueError(f'Native steno association mismatch at byte {offset}.')
             content, audio, formatting = [], [], []
         elif op >= 32:
             try:
@@ -191,7 +206,8 @@ def load_job(bundle, key):
     warnings = [RENDERING_NOTICE]
     if audio_member is None:
         warnings.append('This job has no WAV. Transcript editing is available; audio processing is disabled.')
-    return NativeJob(key, bundle.digest, native, notes, audio_member, revision, revision, tuple(warnings))
+    return NativeJob(key, bundle.digest, native, notes, audio_member, revision, revision,
+                     tuple(warnings), tuple(stroke_clocks))
 
 
 def validate_job(bundle, job):
@@ -203,8 +219,8 @@ def validate_job(bundle, job):
         raise ValueError('Native job does not belong to the source archive.')
     if job.native_bytes != bundle.read(bundle.member(job.key + '.sgngl')) or job.notes_bytes != bundle.read(bundle.member(job.key + '.sgstn')):
         raise ValueError('Original native source bytes were modified.')
-    count = u32(job.notes_bytes, 516)
-    if any(ref >= count for span in job.revision.spans for ref in span.stroke_refs):
+    count = len(job.stroke_clocks)
+    if any(not 0 <= ref < count for span in job.revision.spans for ref in span.stroke_refs):
         raise ValueError('Invalid source steno reference.')
     sources = {span.identity: span for span in job.baseline.spans}
     retained = [span for span in job.revision.spans if span.identity in sources]

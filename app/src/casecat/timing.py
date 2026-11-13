@@ -85,8 +85,7 @@ class AudioMap:
             raise ValueError('No native audio synchronization markers were found.')
         clocks = [m[0] for m in markers]
         times = []
-        for offset in range(644, len(job.notes_bytes), 8):
-            clock = struct.unpack_from('<I', job.notes_bytes, offset)[0]
+        for clock in job.stroke_clocks:
             elapsed = result.elapsed_centiseconds(clock)
             marker = bisect_right(clocks, clock) - 1
             if elapsed is None or marker < 0:

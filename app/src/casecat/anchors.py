@@ -10,6 +10,8 @@ from .elements import NativeElement, edited_elements, paragraph_symbols
 @dataclass(frozen=True)
 class AnchoredSpan:
     identity: str
+    # Ordered embedded stroke occurrences, including distinct copies of a
+    # reused original note. They index NativeJob.stroke_clocks for playback.
     stroke_refs: tuple[int, ...]
     audio: tuple[str, ...]
     content: str
