@@ -88,6 +88,52 @@ def test_cross_anchor_replacement_uses_the_final_affected_source_group():
         ((0,), 'He'), ((1,), 'changed ld.')]
 
 
+def test_replacing_an_edited_passage_exports_despite_empty_edit_fragments(tmp_path):
+    from app.src.casecat.archive import export_zip
+    bundle = inspect_archive(zip_bytes(container_files(('First. ', 'Second. ', 'Third.'))))
+    before = codec.load_job(bundle, bundle.jobs[0])
+    revision = before.baseline.replace(0, 5, 'New').replace(0, 13, 'Joined. ')
+    target = tmp_path / 'edited.zip'
+
+    export_zip(bundle, before.with_revision(revision), target)
+
+    exported = inspect_archive(target)
+    after = codec.load_job(exported, before.key)
+    assert after.text == 'Joined. Third.'
+    assert [(s.stroke_refs, s.content) for s in after.baseline.spans] == [
+        ((0,), ''), ((1,), 'Joined. '), ((2,), 'Third.')]
+    assert after.notes_bytes == before.notes_bytes
+    assert after.stroke_clocks == before.stroke_clocks
+    for name in bundle.members:
+        if name != bundle.member(before.key + '.sgngl'):
+            assert exported.read(name) == bundle.read(name)
+
+
+def test_nonempty_edit_fragment_cannot_move_back_to_an_earlier_anchor():
+    from dataclasses import replace
+    from app.src.casecat.anchors import AnchoredSpan
+
+    def edit(r):
+        misplaced = AnchoredSpan('misplaced', (0,), (), 'Extra ')
+        return replace(r, spans=(*r.spans[:2], misplaced, *r.spans[2:]))
+
+    with pytest.raises(ValueError, match='native anchor reordering'):
+        rewritten_job(container_files(('First. ', 'Second. ', 'Third.')), edit)
+
+
+def test_empty_source_anchor_still_locates_unassociated_insertion():
+    from dataclasses import replace
+    from app.src.casecat.anchors import AnchoredSpan
+
+    def edit(r):
+        inserted = AnchoredSpan('inserted', (), (), 'New. ')
+        return replace(r, spans=(r.spans[0], replace(r.spans[1], content=''), inserted, r.spans[2]))
+
+    _, after = rewritten_job(container_files(('First. ', 'Second. ', 'Third.')), edit)
+    assert [(s.stroke_refs, s.content) for s in after.baseline.spans] == [
+        ((0,), 'First. '), ((1,), 'New. '), ((2,), 'Third.')]
+
+
 def test_inserted_paragraph_uses_the_observed_native_enter_control():
     _, after = rewritten_job(container_files(), lambda r: r.replace(0, len(r.text), 'First.\nSecond.'))
     start, length = codec.u32(after.native_bytes, 532), codec.u32(after.native_bytes, 536)

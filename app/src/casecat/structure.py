@@ -90,6 +90,10 @@ def group_targets(job):
         if span.identity in sources:
             current = sources[span.identity]
             target = current
+        elif not span.content:
+            # Deleted edit fragments have no text to place. Empty source
+            # anchors above still locate later unassociated insertions.
+            continue
         elif span.stroke_refs:
             candidates = sorted({by_stroke[ref] for ref in span.stroke_refs})
             # Legacy whole-text edits can carry overly broad associations.
