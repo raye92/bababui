@@ -10,16 +10,16 @@ from app.tests.test_native_structure import container_files
 from app.tests.test_native_audio import audio_archive
 
 
-def duplicate_files():
-    files = container_files(('First ', 'nearby ', 'copy ', 'again ', 'last.'))
+def duplicate_files(*, forward=False):
+    files = container_files(('First ', 'nearby ', 'copy ', 'again ', 'bridge ', 'last.'))
     native = bytearray(files['jobs/example.sgngl'])
     groups = [(offset, raw) for offset, raw in codec.records(
         native, 1024, 1024 + codec.u32(native, 536)) if raw[0] == 0x13]
     for offset, _ in groups[2:4]:
-        native[offset + 3:offset + 11] = groups[0][1][3:]
+        native[offset + 3:offset + 11] = groups[-1 if forward else 0][1][3:]
     notes = bytearray(files['jobs/example.sgstn'])
-    struct.pack_into('<I', notes, 516, 3)
-    files['jobs/example.sgstn'] = bytes(notes[:656] + notes[672:680])
+    struct.pack_into('<I', notes, 516, 4)
+    files['jobs/example.sgstn'] = bytes(notes[:656] + notes[672:688])
     files['jobs/example.sgngl'] = bytes(native)
     return files
 
@@ -39,9 +39,9 @@ def steno_records(job):
 def test_duplicates_have_distinct_occurrences_and_inherit_preceding_clock(tmp_path):
     files = duplicate_files()
     bundle, job = load(files)
-    assert job.text == 'First nearby copy again last.'
-    assert [s.stroke_refs for s in job.baseline.spans] == [(0,), (1,), (2,), (3,), (4,)]
-    assert job.stroke_clocks == (1000, 1010, 1010, 1010, 1040)
+    assert job.text == 'First nearby copy again bridge last.'
+    assert [s.stroke_refs for s in job.baseline.spans] == [(0,), (1,), (2,), (3,), (4,), (5,)]
+    assert job.stroke_clocks == (1000, 1010, 1010, 1010, 1040, 1050)
     assert job.native_bytes == files['jobs/example.sgngl']
     assert job.notes_bytes == files['jobs/example.sgstn']
     codec.validate_job(bundle, job)
@@ -54,6 +54,9 @@ def test_duplicates_have_distinct_occurrences_and_inherit_preceding_clock(tmp_pa
     (((0, 1), (0, 1), (2,)), (1000, 1010, 1010, 1010, 1020)),
     (((0,), (0, 1, 0, 2)), (1000, 1000, 1010, 1010, 1020)),
     (((0, 1, 2), (0, 0)), (1000, 1010, 1020, 1020, 1020)),
+    (((0,), (2, 2), (1, 2)), (1000, 1000, 1000, 1010, 1020)),
+    (((2, 1), (0,), (1, 2)), (1000, 1000, 1000, 1010, 1020)),
+    (((0, 2, 1, 0, 2),), (1000, 1000, 1010, 1010, 1020)),
 ])
 def test_repeated_groups_mixed_groups_and_trailing_duplicates(groups, expected):
     files = job_files(('a', 'b', 'c'))
@@ -105,9 +108,10 @@ def test_duplicate_support_does_not_accept_other_steno_mismatches(problem):
         load(files)
 
 
+@pytest.mark.parametrize('forward', [False, True])
 @pytest.mark.parametrize('word', ['First', 'nearby', 'copy', 'again', 'last'])
-def test_edit_export_and_project_restore_keep_duplicates_at_their_own_locations(tmp_path, word):
-    bundle, job = load(duplicate_files())
+def test_edit_export_and_project_restore_keep_duplicates_at_their_own_locations(tmp_path, word, forward):
+    bundle, job = load(duplicate_files(forward=forward))
     at = job.text.index(word)
     edited = job.with_revision(job.revision.replace(at, at + len(word), 'Changed'))
     state = project.NativeState(bundle, job, edited.revision, job.baseline)
@@ -133,31 +137,33 @@ def test_edit_export_and_project_restore_keep_duplicates_at_their_own_locations(
 
 def test_duplicate_refs_cannot_exceed_occurrence_count():
     bundle, job = load(duplicate_files())
-    span = replace(job.baseline.spans[-1], stroke_refs=(5,))
+    span = replace(job.baseline.spans[-1], stroke_refs=(6,))
     revision = replace(job.baseline, spans=(*job.baseline.spans[:-1], span))
     with pytest.raises(ValueError, match='steno reference'):
         codec.validate_job(bundle, job.with_revision(revision))
 
 
-def test_duplicate_playback_uses_local_clock_through_pause_and_pcm_correction(tmp_path):
+@pytest.mark.parametrize('forward', [False, True])
+def test_duplicate_playback_uses_local_clock_through_pause_and_pcm_correction(tmp_path, forward):
     source = audio_archive(tmp_path)
     files = {name: source.read(name) for name in source.members}
     native = bytearray(files['jobs/example.sgngl'])
     end = 1024 + codec.u32(native, 536)
     groups = [(o, r) for o, r in codec.records(native, 1024, end) if r[0] == 0x13]
-    duplicate = groups[0][1] + b'copy '
-    at = groups[-1][0]
+    duplicate = groups[-1 if forward else 0][1] + b'copy '
+    at = groups[1 if forward else -1][0]
     native[at:at] = duplicate
     struct.pack_into('<I', native, 536, end - 1024 + len(duplicate))
     files['jobs/example.sgngl'] = bytes(native)
     bundle, job = load(files)
     times = timing.AudioMap.from_job(bundle, job, tmp_path / 'sample.wav')
-    assert times.stroke_ms[:3] == (5940, 11940, 11940)
-    assert times.position_ms(job.baseline, job.text.index('copy')) == 11940
-    assert times.range_at(job.baseline, 12000) == (6, 16)
+    expected_time = 5940 if forward else 11940
+    assert times.stroke_ms[:3] == ((5940, 5940, 11940) if forward else (5940, 11940, 11940))
+    assert times.position_ms(job.baseline, job.text.index('copy')) == expected_time
+    assert times.range_at(job.baseline, expected_time) == ((0, 11) if forward else (6, 16))
     at = job.text.index('copy')
     edited = job.revision.replace(at, at + 4, 'replacement')
-    assert times.position_ms(edited, at) == 11940
+    assert times.position_ms(edited, at) == expected_time
     # The original occurrence and the following passage keep their own timing.
     original_job = codec.load_job(source, source.jobs[0])
     original_times = timing.AudioMap.from_job(source, original_job, tmp_path / 'sample.wav')

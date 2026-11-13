@@ -103,7 +103,8 @@ def load_job(bundle, key):
     spans, refs, content, audio, formatting = [], (), [], [], []
     elements, position, content_length, byline = [], 0, 0, None
     stroke = 0
-    seen_strokes, stroke_clocks = set(), []
+    original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
+    stroke_clocks = []
     renderer = TextRenderer(all_caps=all_caps)
     from .field_table import field_texts
     has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
@@ -135,11 +136,13 @@ def load_job(bundle, key):
             for index in range(size):
                 record = raw[3 + index * 8:11 + index * 8]
                 if record == notes[640 + stroke * 8:648 + stroke * 8]:
-                    seen_strokes.add(record)
                     stroke += 1
                     stroke_clocks.append(u32(record, 4))
-                elif record in seen_strokes:
-                    stroke_clocks.append(stroke_clocks[-1])
+                elif record in original_strokes:
+                    # An extra occurrence may precede its original. Ordered
+                    # coverage is still required at EOF. Leading copies use
+                    # the first original clock because no passage precedes them.
+                    stroke_clocks.append(stroke_clocks[-1] if stroke_clocks else u32(notes, 644))
                 else:
                     raise ValueError(f'Native steno association mismatch at byte {offset}.')
             content, audio, formatting = [], [], []
