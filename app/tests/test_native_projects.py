@@ -122,7 +122,9 @@ def test_project_export_uses_original_and_does_not_mark_saved(tmp_path, monkeypa
     doc = documents.import_casecat(bundle)
     doc.set_text('incoming', 'Proposal')
     doc.export_casecat(tmp_path/'output.zip')
-    assert (tmp_path/'output.zip').read_bytes() == bundle.data
+    copied = archive.inspect_archive(tmp_path/'output.zip')
+    assert copied.jobs == ('jobs/example_AI',)
+    assert load_job(copied, 'jobs/example_AI').text == doc.original
     assert doc.dirty and doc.save_path is None
     doc.set_text('original', 'Reviewed')
     doc.export_casecat(tmp_path/'edited.zip')

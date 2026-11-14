@@ -65,7 +65,7 @@ class Document:
         if not self.native:
             raise ValueError('Import a CaseCAT ZIP before exporting.')
         archive.export_zip(self.native.bundle, self.native.job.with_revision(self.native.original),
-                           target, overwrite=overwrite)
+                           target, overwrite=overwrite, ai_copy=True)
 
 
 def import_casecat(source, key=None):

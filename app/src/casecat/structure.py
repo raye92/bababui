@@ -8,8 +8,10 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 from copy import copy
 from difflib import SequenceMatcher
+from pathlib import PureWindowsPath
 import re
 import struct
+import unicodedata
 import xml.etree.ElementTree as ET
 
 from .codec import records, u32, validate_job
@@ -295,6 +297,39 @@ def relocate(native, stream, positions):
         struct.pack_into('<I', result, field, mapped(position))
     result[start:end] = stream
     return bytes(result)
+
+
+def relink_wave(native, old_name, new_name):
+    """Update the bundled WAV filename in the known CATalyst audio section."""
+    if len(native) < 1024 or not native.startswith(b'SGCAT32\0'):
+        return native
+    start, size = struct.unpack_from('<II', native, 556)
+    path_width = 260
+    if start < u32(native, 532) + u32(native, 536) or size < path_width + 4 or start + size > len(native):
+        return native
+    path_end = start + path_width
+    if size != path_width + 4 + 12 * u32(native, path_end):
+        return native
+    paths, terminator, padding = native[start:path_end].partition(b'\0\0')
+    if not terminator or any(padding):
+        return native
+    old_key = unicodedata.normalize('NFC', old_name).casefold()
+    paths = paths.split(b'\0')
+    matches = [index for index, path in enumerate(paths)
+               if unicodedata.normalize('NFC', PureWindowsPath(path.decode('cp1252', errors='replace')).name).casefold() == old_key]
+    if not matches:
+        return native
+    try:
+        name = new_name.encode('cp1252')
+    except UnicodeEncodeError as exc:
+        raise ValueError('The exported WAV filename must use Windows-1252 characters.') from exc
+    # A local filename follows the job when restored into another case.
+    for index in matches:
+        paths[index] = name
+    linked = b'\0'.join(paths)
+    if len(linked) > path_width - 2:
+        raise ValueError('The exported WAV filenames are too long for CaseCAT.')
+    return native[:start] + linked.ljust(path_width, b'\0') + native[path_end:]
 
 
 def serialize_candidate(job, bundle):

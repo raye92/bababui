@@ -109,6 +109,8 @@ def test_import_save_before_replace_and_missing_audio(native_window, tmp_path, m
 
 
 def test_zip_drop_and_baseline_export(native_window, tmp_path, monkeypatch):
+    from app.src.casecat import archive, codec
+
     source = source_zip(tmp_path)
     bar = native_window.tabs.tabBar()
     mime = QMimeData()
@@ -118,8 +120,10 @@ def test_zip_drop_and_baseline_export(native_window, tmp_path, monkeypatch):
     assert event.isAccepted() and native_window.current.document.native
     target = tmp_path/'example_AI.zip'
     monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a, **k: (str(target), ''))
-    native_window.export_casecat()
-    assert target.read_bytes() == source.read_bytes()
+    assert native_window.export_casecat()
+    exported = archive.inspect_archive(target)
+    assert exported.jobs == ('jobs/example_AI',)
+    assert codec.load_job(exported, 'jobs/example_AI').text == native_window.current.document.original
     assert native_window.current.document.dirty
 
 
@@ -355,7 +359,7 @@ def test_cut_and_paste_preserves_native_field_identity(native_window, tmp_path):
     view.editor.redo()
     target = tmp_path/'pasted.zip'
     view.document.export_casecat(target)
-    restored = codec.load_job(archive.inspect_archive(target), 'jobs/example')
+    restored = codec.load_job(archive.inspect_archive(target), 'jobs/example_AI')
     assert restored.text == pasted.text
     assert native_stream(restored).count(FIELD) == 2
     QApplication.clipboard().clear()
@@ -463,7 +467,7 @@ def test_automatic_review_batch_is_native_undoable_and_persisted(native_window, 
     assert restored.original == after
     assert restored.review == view.document.native.review
     view.document.export_casecat(tmp_path/'automatic.zip')
-    loaded = codec.load_job(archive.inspect_archive(tmp_path/'automatic.zip'), view.document.native.job.key)
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'automatic.zip'), 'jobs/example_AI')
     assert loaded.text == after.text
     assert loaded.notes_bytes == view.document.native.job.notes_bytes
 
@@ -511,7 +515,7 @@ def test_off_record_batch_undo_reopen_and_native_export(native_window, tmp_path)
         view.review(0, True)
     assert not view.diff_view.changes
     view.document.export_casecat(tmp_path/'off-record-export.zip')
-    loaded = codec.load_job(archive.inspect_archive(tmp_path/'off-record-export.zip'), state.job.key)
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'off-record-export.zip'), 'jobs/example_AI')
     assert loaded.text == state.original.text
     assert loaded.notes_bytes == state.job.notes_bytes
 

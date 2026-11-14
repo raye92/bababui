@@ -99,7 +99,7 @@ def test_field_list_separates_creation_fill_and_insertion(native_window, tmp_pat
     assert not dialog.isVisible()
     target = tmp_path/'controls.zip'
     view.document.export_casecat(target)
-    restored = codec.load_job(archive.inspect_archive(target), 'jobs/example')
+    restored = codec.load_job(archive.inspect_archive(target), 'jobs/example_AI')
     assert len([e for e in restored.revision.elements if e.name == 'WITNESS']) == 2
 
 
@@ -194,7 +194,7 @@ def test_incoming_definition_only_changes_can_be_reviewed(native_window, tmp_pat
     assert view.document.native.original == proposed
     assert not view.diff_view.has_changes
     view.document.export_casecat(tmp_path/'accepted-fields.zip')
-    restored = codec.load_job(archive.inspect_archive(tmp_path/'accepted-fields.zip'), 'jobs/example')
+    restored = codec.load_job(archive.inspect_archive(tmp_path/'accepted-fields.zip'), 'jobs/example_AI')
     assert field_values(restored.revision)['WITNESS'] == 'MS. WITNESS'
 
 

@@ -123,7 +123,34 @@ def materialize_audio(bundle, job, directory):
     return target
 
 
-def export_zip(bundle, job, target, *, overwrite=False):
+def _ai_member_names(bundle):
+    """Reserve a distinct stem for each job and its same-folder companions."""
+    by_stem, occupied = {}, set()
+    for member in bundle.members:
+        stem, dot, extension = safe_member(member).rpartition('.')
+        if dot and '/' not in extension:
+            occupied.add(stem)
+            if not member.endswith('/'):
+                by_stem.setdefault(stem, []).append(member)
+
+    renamed = {}
+    for key in bundle.jobs:
+        if key.lower().endswith('_ai'):
+            continue
+        candidate, version = f'{key}_AI', 2
+        while safe_member(candidate) in occupied:
+            candidate = f'{key}_{version}_AI'
+            version += 1
+        occupied.add(safe_member(candidate))
+        basename = candidate.rsplit('/', 1)[-1]
+        for member in by_stem[safe_member(key + '.sgngl')[:-6]]:
+            folder, slash, filename = member.rpartition('/')
+            renamed[member] = f'{folder}{slash}{basename}.{filename.rsplit(".", 1)[-1]}'
+    return renamed
+
+
+def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False):
+    """Export reviewed text, optionally using distinct job names for restore."""
     from .codec import validate_job, serialize_native, load_job
     target = Path(target).resolve()
     if target.suffix.lower() != '.zip':
@@ -138,31 +165,46 @@ def export_zip(bundle, job, target, *, overwrite=False):
     serialized = serialize_native(job, bundle)
     from .fields import serialize_metadata
     metadata = serialize_metadata(job, bundle)
-    data = bundle.data
+    native_member = bundle.member(job.key + '.sgngl')
     metadata_member = bundle.member(job.key + '.sgxml')
     changed = {}
     if serialized != job.native_bytes:
-        changed[bundle.member(job.key + '.sgngl')] = serialized
+        changed[native_member] = serialized
     if metadata_member and metadata != bundle.read(metadata_member):
         changed[metadata_member] = metadata
-    if changed:
+    names = _ai_member_names(bundle) if ai_copy else {}
+    if names:
+        from .structure import relink_wave
+        for key in bundle.jobs:
+            transcript = bundle.member(key + '.sgngl')
+            audio = bundle.member(key + '.wav')
+            if audio not in names:
+                continue
+            raw = changed[transcript] if transcript in changed else bundle.read(transcript)
+            updated = relink_wave(raw, PurePosixPath(audio).name, PurePosixPath(names[audio]).name)
+            if updated != raw:
+                changed[transcript] = updated
+    data = bundle.data
+    if changed or names:
         buffer = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(bundle.data)) as source, zipfile.ZipFile(buffer, 'w') as output:
             output.comment = source.comment
             for info in source.infolist():
-                payload = changed.get(info.filename, source.read(info))
-                output.writestr(copy(info), payload)
+                member = info.filename
+                payload = changed[member] if member in changed else source.read(info)
+                renamed = copy(info)
+                renamed.filename = renamed.orig_filename = names.get(member, member)
+                output.writestr(renamed, payload)
         data = buffer.getvalue()
-        checked = inspect_archive(data, name=bundle.export_name)
-        restored = load_job(checked, job.key)
-        if restored.text != job.text or restored.notes_bytes != job.notes_bytes:
-            raise ValueError('Export validation found changed text or original steno.')
-        # Validate all companion jobs, dictionaries, audio and opaque payloads,
-        # including their names. No companion metadata is rewritten speculatively.
-        if checked.members != bundle.members or any(
-                checked.read(name) != bundle.read(name)
-                for name in bundle.members if name not in changed and not name.endswith('/')):
-            raise ValueError('Export validation found a changed companion asset.')
-    # Baseline export preserves compression, ZIP headers, timestamps and comments.
-    # All bytes were validated at import and the immutable source is unchanged.
+        checked = inspect_archive(data, name=target.name)
+        restored = load_job(checked, names.get(native_member, native_member)[:-6])
+        if (restored.text != job.text or restored.notes_bytes != job.notes_bytes
+                or restored.audio_member != names.get(job.audio_member, job.audio_member)):
+            raise ValueError('Export validation found changed text, steno, or audio association.')
+        expected = tuple(names.get(member, member) for member in bundle.members)
+        with zipfile.ZipFile(io.BytesIO(bundle.data)) as source, zipfile.ZipFile(io.BytesIO(data)) as output:
+            if checked.members != expected or any(
+                    output.read(renamed) != source.read(member)
+                    for member, renamed in zip(bundle.members, expected) if member not in changed):
+                raise ValueError('Export validation found a changed companion asset.')
     atomic_publish(target, data, overwrite=overwrite)

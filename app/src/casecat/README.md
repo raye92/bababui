@@ -24,10 +24,13 @@ and Next navigate between suggestions. Clicking changed text selects its card.
 - Actual edit ranges, whole-text proposals, review, and undo retain source anchors.
   Deleted anchors remain present. New wording inherits source passage timing.
 - Save creates a movable working project containing the source ZIP and both revisions.
-- File > Export CaseCAT ZIP defaults to `<source>_AI.zip`. It exports Original,
-  preserving other jobs and companions. Pending Incoming stays in the project.
-- Unedited export is the exact original ZIP. Edited export validates the rebuilt
-  native transcript and every companion before atomic publication.
+- File > Export CaseCAT ZIP defaults to `<source>_AI.zip`. It adds `_AI` to each
+  job and its companion filenames so CaseCAT can restore them beside the originals.
+  Existing `_AI` job names are reused. Restoring a second copy of the same `_AI`
+  job can still prompt for replacement.
+- Export writes the reviewed Original and updates matching WAV references to the
+  new local filenames. It validates the ZIP, transcript, steno, and companions
+  before publication. Pending Incoming stays in the project.
 - Original and Incoming pages are read-only while reviewing pending proposals.
 
 ## Name fields and paragraph symbols
