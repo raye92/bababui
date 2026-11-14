@@ -183,6 +183,77 @@ def set_playback_state(player, state):
     return player.playbackState()
 
 
+@pytest.mark.parametrize('decision', ['Accept', 'Reject'])
+@pytest.mark.parametrize('state', ['paused', 'playing'])
+@pytest.mark.parametrize('remaining', [True, False])
+@pytest.mark.parametrize('side', ['original', 'incoming'])
+def test_review_decisions_seek_without_changing_playback_state(audio_view, decision, state, remaining, side):
+    from PySide6.QtCore import Qt
+    from PySide6.QtMultimedia import QMediaPlayer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    view = audio_view
+    revision = view.document.native.original.revise('Alpha \nAn unchanged sentence.\nbeta \ngamma.')
+    view.document.set_text('original', revision.text, revision=revision)
+    view.document.set_text('incoming', revision.text, revision=revision)
+    incoming = revision.text.replace('beta', 'copper')
+    if remaining:
+        incoming = incoming.replace('Alpha', 'Orange')
+    view.receive(incoming, [])
+    view.stack.setCurrentIndex(int(side == 'incoming'))
+    view.activateWindow()
+    QTest.qWait(1)
+    assert len(view.diff_view.changes) == (2 if remaining else 1)
+    button = next(button for button in view.diff_view.cards[0].findChildren(QPushButton)
+                  if button.text() == decision)
+    player = view.playback.player
+    before = set_playback_state(player, state)
+    expected = QMediaPlayer.PausedState if state == 'playing' else QMediaPlayer.PlayingState
+    player.setPosition(1000)
+    button.setFocus()
+    QTest.mouseClick(button, Qt.LeftButton)
+    assert view.document.busy
+    if remaining:
+        assert abs(player.position() - 11940) < 100
+        player.setPosition(15000)
+    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    assert player.playbackState() == expected
+    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    assert player.playbackState() == before
+    for _ in range(100):
+        if not view.document.busy:
+            break
+        QTest.qWait(10)
+    assert not view.document.busy
+    assert len(view.diff_view.changes) == int(remaining)
+    assert player.playbackState() == before
+
+    # Finishing the update must not rewind audio after the initial jump.
+    assert abs(player.position() - (15000 if remaining else 11940)) < 100
+    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    assert player.playbackState() == expected
+    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    assert player.playbackState() == before
+
+
+def test_space_types_in_editable_transcript(audio_view):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    view = audio_view
+    view.activateWindow()
+    view.original_page.setFocus()
+    view.editor.setFocus()
+    QTest.qWait(1)
+    cursor = view.editor.textCursor()
+    cursor.setPosition(2)
+    view.editor.setTextCursor(cursor)
+    QTest.keyClick(view.editor, Qt.Key_Space)
+    assert view.document.original == 'Al pha beta gamma.'
+    assert not view.playback.player.isPlaying()
+
+
 @pytest.mark.parametrize('state', ['stopped', 'paused', 'playing'])
 @pytest.mark.parametrize('side', ['original', 'incoming'])
 def test_transcript_mouse_click_seeks_source_passage_without_changing_play_state(audio_view, state, side):

@@ -130,7 +130,6 @@ class DocumentView(QWidget):
     def setup_playback(self, layout):
         from app.src.casecat.timing import AudioMap
         from app.src.playback import PlaybackBar
-        from PySide6.QtCore import Qt
         import wave
         doc = self.document
         try:
@@ -139,17 +138,12 @@ class DocumentView(QWidget):
             timing = None
         self.playback = PlaybackBar(doc.wav_path, timing, self._playback_context, self)
         layout.addWidget(self.playback)
-        if not hasattr(self, '_space_shortcuts'):
-            self._space_shortcuts = []
-            for owner in (self, self.editor, self.incoming_editor):
-                shortcut = QShortcut(QKeySequence(Qt.Key_Space), owner)
-                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-                shortcut.setAutoRepeat(False)
-                shortcut.setEnabled(False)
-                shortcut.activated.connect(lambda: self.playback.toggle())
-                self._space_shortcuts.append(shortcut)
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
+            shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(lambda: self.playback.toggle())
             self.stack.currentChanged.connect(lambda _: self.playback.stop())
             for editor in (self.editor, self.incoming_editor):
                 editor.transcript_clicked.connect(lambda: self.playback.seek_from_cursor())
@@ -325,17 +319,20 @@ class DocumentView(QWidget):
             self.inline_editor.focus_edit(index)
         self.highlight_suggestions()
         if change.ranges:
-            side = 'incoming' if self.stack.currentIndex() else 'original'
-            editor = self.incoming_editor if self.stack.currentIndex() else self.editor
-            start = change.ranges[0][2 if side == 'incoming' else 0]
-            cursor = editor.textCursor()
-            cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
-            editor.setTextCursor(cursor)
-            editor.ensureCursorVisible()
-            lines = editor.page_lines()
-            line = next((i for i in range(len(lines)-1, -1, -1)
-                         if lines[i].position <= cursor.position()), 0)
-            editor.scroll_to_center_line(line)
+            self._focus_passage(change.ranges[0])
+
+    def _focus_passage(self, span):
+        side = 'incoming' if self.stack.currentIndex() else 'original'
+        editor = self.incoming_editor if self.stack.currentIndex() else self.editor
+        start = span[2 if side == 'incoming' else 0]
+        cursor = editor.textCursor()
+        cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
+        lines = editor.page_lines()
+        line = next((i for i in range(len(lines)-1, -1, -1)
+                     if lines[i].position <= cursor.position()), 0)
+        editor.scroll_to_center_line(line)
 
     def select_at_cursor(self, editor, side):
         if self._review_worker is not None:
@@ -372,8 +369,13 @@ class DocumentView(QWidget):
             self._review_worker = worker = ReviewPreviewWorker(
                 state.bundle, state.job, before, change, accept, index, self)
             worker.finished.connect(self._finish_review)
+            if self.playback and self.isActiveWindow():
+                self.setFocus(Qt.OtherFocusReason)
             self.set_busy(True)
             self.diff_view.show_next_pending(index)
+            pending = self.diff_view.current
+            if self.playback and pending >= 0 and self.diff_view.changes[pending].ranges:
+                self.playback.seek_from_cursor()
             self.changed.emit()
             worker.start()
             return
@@ -415,7 +417,15 @@ class DocumentView(QWidget):
             if next_ranges:
                 target = next((i for i in visible if tuple(
                     span[side] for span in self.diff_view.changes[i].ranges) == next_ranges), target)
+            ranges = self.diff_view.changes[target].ranges
             self.diff_view.select(target)
+            # The preview already moved playback to this edit while the worker ran.
+            if self.playback and ranges and tuple(span[side] for span in ranges) != next_ranges:
+                self.playback.seek_from_cursor()
+        elif not self.diff_view.changes and change.ranges:
+            self._focus_passage(change.ranges[0])
+            if self.playback:
+                self.playback.seek_from_cursor()
         self.edited()
 
     def change_speaker_mapping(self, speaker, name):
@@ -542,10 +552,6 @@ class DocumentView(QWidget):
         pending = self.document.native.original != self.document.native.incoming
         self.editor.setReadOnly(busy or pending)
         self.incoming_editor.setReadOnly(True)
-        for shortcut, editor in zip(getattr(self, '_space_shortcuts', ()),
-                                    (None, self.editor, self.incoming_editor)):
-            shortcut.setEnabled(not self.diff_view.isHidden() and
-                                (editor is None or editor.isReadOnly()))
         self.diff_view.setEnabled(not busy)
 
     def active_editor(self):
