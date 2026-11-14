@@ -71,6 +71,7 @@ class ReviewCard(QWidget):
 
 class ReviewView(QWidget):
     requested = Signal(int, bool)
+    bulk_requested = Signal(bool)
     selected = Signal(int)
     mapping_requested = Signal(str, object)
 
@@ -97,6 +98,16 @@ class ReviewView(QWidget):
         self.all_button.clicked.connect(lambda: self.filter_speaker(None))
         self.layout.addWidget(self.all_button)
         self.layout.addWidget(self.count)
+        bulk_actions = QHBoxLayout()
+        self.bulk_buttons = []
+        for caption, accept in (('Accept All', True), ('Reject All', False)):
+            button = QPushButton(caption)
+            button.setEnabled(False)
+            button.setToolTip(f'{caption} remaining suggestions in this transcript.')
+            button.clicked.connect(lambda _, accepted=accept: self.bulk_requested.emit(accepted))
+            bulk_actions.addWidget(button)
+            self.bulk_buttons.append(button)
+        self.layout.addLayout(bulk_actions)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.layout.addWidget(self.scroll, 1)
@@ -121,6 +132,8 @@ class ReviewView(QWidget):
     def set_model(self, model, *, review=None, page_lines=()):
         self.model = model
         self.changes = model.edits
+        for button in self.bulk_buttons:
+            button.setEnabled(self.has_changes)
         self.review = review
         original, incoming = model.original, model.incoming
         self.original, self.incoming = original, incoming

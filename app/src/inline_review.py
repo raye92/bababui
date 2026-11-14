@@ -159,9 +159,10 @@ def _native_rows(editor, side):
                 if not font.family():
                     font = editor.font()
                 text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
+                x = layout.position().x() + line.cursorToX(line.textStart())[0]
                 rows.append(ReviewRow(side, positions[start], positions[end], text,
                                       page, number, page, number, y,
-                                      layout.position().x() + line.x(), pitch,
+                                      x, pitch,
                                       line.y() - index*pitch, font, glyph_height=line.height()))
         block = block.next()
     return rows
@@ -579,6 +580,19 @@ class InlineReviewEditor(QTextEdit):
         lines = self.page_lines()
         middle = self.verticalScrollBar().value()+self.viewport().height()/2
         return min(range(len(lines)), key=lambda i: abs(lines[i].y-middle)) if lines else 0
+
+    def center_source_position(self):
+        if not self.rows:
+            return 'original', 0
+        center = self.verticalScrollBar().value() + self.viewport().height() / 2
+        row = min(self.rows, key=lambda row: abs(row.y - center))
+        return ('incoming' if row.kind == 'incoming' else 'original'), row.source_start
+
+    def scroll_to_source_position(self, side, position):
+        display = self.display_position(side, position)
+        row = self._row_at(display) if display is not None else None
+        if row:
+            self.verticalScrollBar().setValue(round(row.y - self.viewport().height() / 2))
 
     def scroll_to_center_line(self, line):
         lines = self.page_lines()

@@ -2,6 +2,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from html import unescape
 import re
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
@@ -167,6 +168,104 @@ def test_old_card_cannot_select_or_resolve_a_new_model_index():
     next(button for button in view.cards[0].findChildren(QPushButton)
          if button.text() == 'Accept').click()
     assert requests == [(0, True)]
+    view.close()
+
+
+@pytest.mark.parametrize(('caption', 'expected', 'speaker'), [
+    ('Accept All', 'The blue car is small and new.', 'MS. SIEMENS'),
+    ('Reject All', 'The blue car is large and old.', 'MR. LEISER'),
+])
+def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
+        tmp_path, monkeypatch, caption, expected, speaker):
+    from copy import deepcopy
+    from app.src.document_view import DocumentView
+    from app.tests.test_native_projects import native_doc
+
+    app = QApplication.instance() or QApplication([])
+    doc, _ = native_doc(tmp_path, monkeypatch)
+    original = speakers(['MS. SIEMENS'] * 8 + ['MR. LEISER'] * 2)
+    original = original.replace(0, 0, 'The red car is large and old.\n')
+    doc.set_text('original', original.text, revision=original)
+    doc.set_text('incoming', original.text, revision=original)
+    view = DocumentView(doc)
+    proposal = original.text.replace('red car is large and old', 'blue car is small and new')
+    view.receive(proposal.replace('MS. SIEMENS:', 'SPEAKER 3:').replace('MR. LEISER:', 'SPEAKER 3:'), [])
+    view.review(0, True)
+    before = doc.native.original, doc.native.incoming, deepcopy(doc.native.review)
+    doc.dirty = False
+    assert len(view.review_model.edits) == 4
+    view.diff_view.filter_speaker('SPEAKER 3')
+    assert len(view.diff_view.visible_indices) == 2
+
+    buttons = {button.text(): button for button in view.diff_view.findChildren(QPushButton)}
+    assert caption in buttons
+    assert buttons[caption].isEnabled()
+    buttons[caption].click()
+    if view._review_worker is not None:
+        assert view._review_worker.wait(5000)
+        app.processEvents()
+
+    assert doc.original == doc.incoming
+    assert doc.original.splitlines()[0] == expected
+    locations = doc.native.review['locations']
+    assert sum(location['resolved'] for location in locations) == 2
+    assert all(doc.incoming[location['start']:location['end']] == speaker for location in locations[-2:])
+    assert not view.review_model.edits
+    assert all(not buttons[label].isEnabled() for label in ('Accept All', 'Reject All'))
+    assert doc.dirty
+    view.undo_review()
+    assert (doc.native.original, doc.native.incoming, doc.native.review) == before
+    assert len(view.review_model.edits) == 4
+    view.redo_review()
+    assert doc.original == doc.incoming
+    assert doc.original.splitlines()[0] == expected
+    view.close()
+
+
+@pytest.mark.parametrize('risk', ['zero matches', 'shared default'])
+def test_accept_all_confirms_questionable_automatic_speaker_names(tmp_path, monkeypatch, risk):
+    from PySide6.QtWidgets import QMessageBox
+    from app.src.document_view import DocumentView
+    from app.src.suggestion_filter import begin_review, override_speaker
+    from app.tests.test_native_projects import native_doc
+
+    app = QApplication.instance() or QApplication([])
+    doc, _ = native_doc(tmp_path, monkeypatch)
+    original = speakers(['MS. SIEMENS'] * 4 + ['MR. LEISER'] * 2)
+    state = doc.native
+    state.original = original
+    lines = original.text.splitlines(keepends=True)
+    proposal = ''.join(line.replace('MS. SIEMENS:', f'SPEAKER {1 if i < 2 else 2}:')
+                       for i, line in enumerate(lines))
+    # Give one tag a pending attribution while retaining frozen evidence from
+    # the aligned passages. Saved reviews can carry both of these defaults.
+    begin_review(state, proposal)
+    override_speaker(state, 'SPEAKER 1', 'MR. LEISER')
+    state.review['evidence']['speakers']['SPEAKER 1']['mapped'] = state.review['overrides'].pop('SPEAKER 1')
+    if risk == 'shared default':
+        summary = state.review['evidence']['speakers']['SPEAKER 1']
+        summary['counts']['MR. LEISER'] = 3
+        override_speaker(state, 'SPEAKER 2', 'MR. LEISER')
+        state.review['evidence']['speakers']['SPEAKER 2']['mapped'] = state.review['overrides'].pop('SPEAKER 2')
+    view = DocumentView(doc)
+    before = state.original
+    prompts = []
+
+    def cancel(*args, **kwargs):
+        prompts.append(args[2])
+        return QMessageBox.Cancel
+
+    monkeypatch.setattr(QMessageBox, 'question', cancel)
+    view.diff_view.bulk_buttons[0].click()
+    assert len(prompts) == 1 and 'SPEAKER 1' in prompts[0]
+    assert not doc.busy and state.original == before and view.review_model.edits
+    monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.Yes)
+    view.diff_view.bulk_buttons[0].click()
+    assert view._review_worker.wait(5000)
+    app.processEvents()
+    assert state.original.text == state.incoming.text and not view.review_model.edits
+    view.undo_review()
+    assert state.original == before and view.review_model.edits
     view.close()
 
 

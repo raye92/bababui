@@ -366,9 +366,13 @@ def validate_review(review, text):
 
 
 def track_decision(review, change, before_text, after_text):
+    track_decisions(review, change.ranges, incoming_changed=before_text != after_text)
+
+
+def track_decisions(review, ranges, *, incoming_changed):
     if review is None:
         return
-    edits = sorted((c, d, b-a) for a,b,c,d in change.ranges) if before_text != after_text else []
+    edits = sorted((c, d, b-a) for a,b,c,d in ranges) if incoming_changed else []
 
     def mapped(position, end=False):
         delta = 0
@@ -382,9 +386,26 @@ def track_decision(review, change, before_text, after_text):
 
     for location in review['locations']:
         a, b = location['start'], location['end']
-        if any(c < b and d > a for _, _, c, d in change.ranges):
+        if any(c < b and d > a for _, _, c, d in ranges):
             location['resolved'] = True
-        location.update(start=mapped(a), end=mapped(b, end=True))
+        start = mapped(a)
+        location.update(start=start, end=max(start, mapped(b, end=True)))
+
+
+def questionable_speaker_defaults(review, ranges):
+    """Find unsupported or shared automatic names affected by this review."""
+    if not review:
+        return []
+    summaries = review['evidence']['speakers']
+    overrides = review['overrides']
+    names = {speaker: overrides.get(speaker, summary['mapped'])
+             for speaker, summary in summaries.items()}
+    uses = Counter(name.casefold() for name in names.values() if name)
+    pending = {location['speaker'] for location in review['locations'] if not location['resolved']
+               and any(c < location['end'] and d > location['start'] for _, _, c, d in ranges)}
+    return [(speaker, name) for speaker, name in names.items()
+            if name and speaker in pending and speaker not in overrides
+            and (not summaries[speaker]['counts'].get(name) or uses[name.casefold()] > 1)]
 
 
 def override_speaker(state, speaker, name):

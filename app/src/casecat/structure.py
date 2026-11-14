@@ -158,21 +158,44 @@ def encode_text(text, *, paragraph_start=False, atoms=None):
     return bytes(result)
 
 
+def group_matches(before, after):
+    """Keep matching text inside one native stroke, including long front matter."""
+    if before == after:
+        return [(0, 0, len(before))]
+    if len(before) * len(after) <= 2_000_000:
+        return SequenceMatcher(None, before, after, autojunk=False).get_matching_blocks()[:-1]
+
+    from app.src.advanced_diff import text_edits
+
+    # Anchor exact edges before the line-based diff can move a boundary in
+    # repeated text. A local edit must not move the surrounding controls.
+    shared = min(len(before), len(after))
+    prefix = next((i for i, (a, b) in enumerate(zip(before, after)) if a != b), shared)
+    suffix = next((i for i, (a, b) in enumerate(zip(reversed(before[prefix:]), reversed(after[prefix:])))
+                   if a != b), shared - prefix)
+    edits = text_edits(before[prefix:len(before) - suffix], after[prefix:len(after) - suffix])
+    matches = [(0, 0, prefix)] if prefix else []
+    end_a, end_b = len(before) - prefix, len(after) - prefix
+    previous_a = previous_b = 0
+    for a, b, c, d in (*edits, (end_a, end_a, end_b, end_b)):
+        if a > previous_a:
+            matches.append((prefix + previous_a, prefix + previous_b, a - previous_a))
+        previous_a, previous_b = b, d
+    return matches
+
+
 def rewrite_group(tokens, target, *, paragraph_start=False, atoms=None):
     old = ''.join(token.text for token in tokens)
     if old == target:
         return [(token, token.raw) for token in tokens]
     keep = [False] * len(old)
     insertions = {}
-    if len(old) * len(target) > 2_000_000:
-        operations = [('replace', 0, len(old), 0, len(target))]
-    else:
-        operations = SequenceMatcher(None, old, target, autojunk=False).get_opcodes()
-    for tag, a, b, c, d in operations:
-        if tag == 'equal':
-            keep[a:b] = [True] * (b - a)
-        elif tag in ('insert', 'replace'):
-            insertions[a] = target[c:d]
+    previous_a = previous_b = 0
+    for a, b, size in (*group_matches(old, target), (len(old), len(target), 0)):
+        if b > previous_b:
+            insertions[previous_a] = target[previous_b:b]
+        keep[a:a + size] = [True] * size
+        previous_a, previous_b = a + size, b + size
     result, position = [], 0
     for token in tokens:
         if not token.text:

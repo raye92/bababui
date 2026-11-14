@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 
 from PySide6.QtGui import (QKeySequence, QTextCursor,
                           QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
-                          QTextBlockFormat, QTextOption, QPainter)
+                          QTextBlockFormat, QTextFormat, QTextOption, QPainter)
 from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
@@ -428,6 +428,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         self._native_source = None
         self._native_layout = None
         self._paragraph_styles = {}
+        self._page_breaks = frozenset()
         self.setAcceptRichText(False)
         paper_font = QFont(font)
         paper_font.setPixelSize(18)
@@ -541,16 +542,18 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
     def _presentation_text(self, text, prepared=None):
         self._paragraph_styles = {}
+        self._page_breaks = frozenset()
         if self._native_source:
             bundle, job = self._native_source
             if job.text == text:
                 from app.src.casecat.presentation import presentation
                 try:
-                    display, styles = prepared if prepared is not None else presentation(job, bundle)
+                    display, styles, page_breaks = prepared if prepared is not None else presentation(job, bundle)
                 except ValueError:
-                    return text
-                if display.replace('\u00a0', ' ') == text:
+                    display = None
+                if display is not None and display.replace('\u00a0', ' ') == text:
                     self._paragraph_styles = styles
+                    self._page_breaks = page_breaks
                     return display.replace('-', '\u2011')
         return text.replace('-', '\u2011')
 
@@ -630,6 +633,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             style = self._paragraph_styles.get(position)
             cursor.setPosition(qt_position)
             paragraph = cursor.blockFormat()
+            paragraph.setPageBreakPolicy(QTextFormat.PageBreak_AlwaysBefore if position in self._page_breaks
+                                         else QTextFormat.PageBreak_Auto)
             if isinstance(style, ParagraphStyle) and self._native_layout:
                 scale = self._twip_scale
                 paragraph.setLeftMargin(style.left * scale - self._left)

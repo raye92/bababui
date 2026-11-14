@@ -1,5 +1,5 @@
 """Review decisions over exact structured revision ranges, independent of Qt."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from app.src import advanced_diff
 
@@ -178,3 +178,17 @@ def resolve(original, incoming, change, accept):
     if original.text == incoming.text and original.elements == incoming.elements and original.definitions == incoming.definitions:
         incoming = original
     return original, incoming
+
+
+def resolve_all(original, incoming, ranges, accept):
+    if not accept:
+        return original, original
+    if not ranges:
+        return incoming, incoming
+    target = original
+    # Keep native audio at the destination. Apply ranges right to left and
+    # defer linked field updates so they cannot shift other pending ranges.
+    for a, b, c, d in sorted(ranges, reverse=True):
+        target = target.adopt(a, b, incoming, c, d, at_destination=True, update_fields=False)
+    chosen = replace(incoming, spans=target.spans) if target.text == incoming.text else incoming
+    return chosen, chosen

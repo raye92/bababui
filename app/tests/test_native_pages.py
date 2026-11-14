@@ -1,6 +1,8 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import QApplication
 
@@ -30,6 +32,121 @@ def test_native_page_numbers_are_decoration_and_wrapping_does_not_change_content
     assert view.toPlainText() == text
     assert view.document().pageCount() == 3
     assert not view.document().isUndoAvailable()
+    view.close()
+
+
+def review_layout_bundle(words):
+    import struct
+    from app.tests.test_native_casecat import job_files, zip_bytes
+    from app.tests.test_native_layout import layout_bytes
+
+    files = job_files(words, audio=False)
+    native = bytearray(files['jobs/example.sgngl'])
+    layout = bytearray(layout_bytes())
+    paragraph = layout[1024:1536]
+    question = bytearray(paragraph)
+    struct.pack_into('<H', question, 174, 3599)
+    colloquy = bytearray(paragraph)
+    struct.pack_into('<H', colloquy, 174, 2879)
+    centered = bytearray(paragraph)
+    struct.pack_into('<H', centered, 178, 2)
+    layout[1536:1536] = question * 2 + colloquy + paragraph * 2 + centered
+    struct.pack_into('<I', layout, 4, 7)
+    struct.pack_into('<II', native, 540, len(native), len(layout))
+    struct.pack_into('<I', native, 624, 1)
+    files['jobs/example.sgngl'] = bytes(native + layout)
+    return inspect_archive(zip_bytes(files))
+
+
+def test_accept_all_preserves_index_page_break_and_centering():
+    from app.src.documents import import_casecat
+    from app.src.document_view import DocumentView
+
+    app = QApplication.instance() or QApplication([])
+    bundle = review_layout_bundle(('Cover sheet.\n\x0c\x16\x07\x00', 'INDEX\nFirst entry.\nSecond entry.'))
+    doc = import_casecat(bundle)
+    view = DocumentView(doc)
+    view.receive(doc.original.replace('Cover sheet', 'Cover information'), [])
+
+    view.diff_view.bulk_buttons[0].click()
+    assert view._review_worker.wait(5000)
+    app.processEvents()
+
+    assert not view.review_model.edits
+    assert [(line.page, line.number) for line in view.editor.page_lines()] == [(1, 1), (1, 2), (2, 1), (2, 2), (2, 3)]
+    assert view.editor.document().findBlockByNumber(2).blockFormat().alignment() == Qt.AlignHCenter
+    view.undo_review()
+    assert [(line.page, line.number) for line in view.editor.page_lines()][2] == (2, 1)
+    inline_heading = next(row for row in view.inline_editor.rows if row.text == 'INDEX')
+    native_heading = view.editor.document().findBlockByNumber(2).layout()
+    native_x = native_heading.position().x() + native_heading.lineAt(0).cursorToX(0)[0]
+    assert inline_heading.x == native_x
+    assert view.review_model.edits
+    view.close()
+
+
+def test_accept_all_formats_inserted_turns_in_a_saved_proposal():
+    from PySide6.QtGui import QFontMetricsF
+    from app.src.documents import import_casecat
+    from app.src.document_view import DocumentView
+
+    app = QApplication.instance() or QApplication([])
+    bundle = review_layout_bundle(('\x16\x04\x00THE WITNESS:  Okay.', '\x16\x02\x00What happened next?'))
+    doc = import_casecat(bundle)
+    proposal = doc.original.replace('\n', '\n     MS. COUNSEL:  Please continue.\nQ    Where were you?\n')
+    doc.set_text('incoming', proposal)
+    view = DocumentView(doc)
+
+    view.diff_view.bulk_buttons[0].click()
+    assert view._review_worker.wait(5000)
+    app.processEvents()
+
+    assert doc.original == proposal
+    assert not view.review_model.edits
+    native = view.editor.document()
+    indent = lambda i: native.findBlockByNumber(i).blockFormat().textIndent()
+    assert indent(0) == indent(1)
+    assert indent(2) - indent(3) == pytest.approx(QFontMetricsF(view.editor.font()).horizontalAdvance(' ' * 5))
+    view.close()
+
+
+@pytest.mark.parametrize('accept', [True, False], ids=['accept-in-original', 'reject-in-incoming'])
+def test_bulk_review_keeps_the_visible_passage_after_reflow(tmp_path, monkeypatch, accept):
+    from app.src.document_view import DocumentView
+    from app.tests.test_native_projects import native_doc
+
+    app = QApplication.instance() or QApplication([])
+    doc, _ = native_doc(tmp_path, monkeypatch)
+    doc.wav_path = None
+    transcript = '\n'.join(f'Original transcript paragraph {i}.' for i in range(110))
+    doc.set_text('original', transcript)
+    doc.set_text('incoming', doc.original, revision=doc.native.original)
+    view = DocumentView(doc)
+    view.resize(1200, 800)
+    view.show()
+    inserted = '\n'.join(f'Additional testimony {i}.' for i in range(32))
+    view.receive(inserted + '\n' + transcript, [])
+    if not accept:
+        view.toggle_view()
+    app.processEvents()
+    anchor = 'Original transcript paragraph 55.'
+    editor = view.active_view()
+    line = next(i for i, row in enumerate(editor.page_lines()) if row.text == anchor)
+    editor.scroll_to_center_line(line)
+
+    view.diff_view.bulk_buttons[0 if accept else 1].click()
+    assert view._review_worker.wait(5000)
+    app.processEvents()
+    app.processEvents()
+    assert not view.review_model.edits
+    editor = view.active_view()
+    assert editor.page_lines()[editor.center_line()].text == anchor
+
+    view.undo_review()
+    app.processEvents()
+    editor = view.active_view()
+    assert editor.page_lines()[editor.center_line()].text == anchor
+    assert view.review_model.edits
     view.close()
 
 
@@ -200,8 +317,12 @@ def test_native_view_uses_embedded_layout_and_paragraph_indent():
     app.processEvents()
     assert view.lines_per_page == 28
     assert view.font().family() == 'Courier New'
-    assert view.document().firstBlock().blockFormat().textIndent() > 50
+    assert view.document().firstBlock().blockFormat().textIndent() == 54
     assert view.toPlainText() == 'First line.'
+    revised = job.with_revision(job.revision.replace(0, 1, 'L'))
+    view.set_native_source(bundle, revised)
+    view.setPlainText(revised.text)
+    assert view.document().firstBlock().blockFormat().textIndent() == 54
     view.close()
 
 
@@ -239,6 +360,85 @@ def test_live_paragraph_indent_and_undo_match_reopened_native_revision(tmp_path,
     view.incoming_editor.setPlainText('First \nnew line.')
     assert view.incoming_editor.document().firstBlock().next().blockFormat().textIndent() == 54
     assert not view.incoming_editor.document().isUndoAvailable()
+    view.close()
+
+
+@pytest.mark.parametrize('action', ['type', 'paste', 'accept suggestion', 'type with preview fallback'])
+def test_wording_edit_preserves_native_layout_in_large_stroke_group(tmp_path, action):
+    import struct
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+    from app.src.casecat.codec import u32
+    from app.src.documents import import_casecat, open_document, save_document
+    from app.src.document_view import DocumentView
+    from app.tests.test_native_casecat import zip_bytes
+    from app.tests.test_native_structure import container_files
+
+    app = QApplication.instance() or QApplication([])
+    # A source stroke can hold the entire front matter, including breaks and
+    # per-paragraph formatting. One character edit must keep those controls.
+    contents = '\x16\x01\x00' + 'Cover wording. ' * 110 + '\x0c\x16\x01\x00Index heading.\nIndex entry.'
+    files = container_files((contents,))
+    native = bytearray(files['jobs/example.sgngl'])
+    struct.pack_into('<H', native, u32(native, 540) + 1024 + 174, 2880)
+    files['jobs/example.sgngl'] = bytes(native)
+    del files['jobs/example.wav']
+    doc = import_casecat(inspect_archive(zip_bytes(files)))
+    view = DocumentView(doc)
+    source = doc.native.original
+
+    def layout(view):
+        editor = view.editor
+        heading = editor.document().findBlockByNumber(1)
+        line = next(line for line in editor.page_lines() if line.text == 'Index heading.')
+        return heading.blockFormat().textIndent(), line.page, line.number
+
+    expected = layout(view)
+    assert expected[0] == 54 and expected[1] > 1 and expected[2] == 1
+    replacement = 'Ω' if action == 'type with preview fallback' else 'B'
+    edited_text = replacement + source.text[1:]
+    if action == 'accept suggestion':
+        view.receive(edited_text, [])
+        button = next(button for button in view.diff_view.cards[0].findChildren(QPushButton)
+                      if button.text() == 'Accept')
+        button.click()
+        assert view._review_worker.wait(5000)
+        app.processEvents()
+        undo, redo = view.undo_review, view.redo_review
+    else:
+        cursor = view.editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(1, QTextCursor.KeepAnchor)
+        view.editor.setTextCursor(cursor)
+        if action == 'paste':
+            # A multi-part edit can span the entire stroke group.
+            edited_text = edited_text[:-1] + '!'
+            mime = QMimeData()
+            mime.setText(edited_text)
+            view.editor.selectAll()
+            view.editor.insertFromMimeData(mime)
+        elif action == 'type with preview fallback':
+            cursor.insertText(replacement)  # Native export uses Windows-1252.
+        else:
+            QTest.keyClicks(view.editor, 'B')
+        undo, redo = view.editor.undo, view.editor.redo
+    revised = doc.native.original
+    assert revised.text == edited_text
+    assert layout(view) == expected
+
+    undo()
+    assert doc.native.original == source
+    assert layout(view) == expected
+    redo()
+    assert doc.native.original == revised
+    assert layout(view) == expected
+
+    project = tmp_path / 'edited.bababui'
+    save_document(doc, project)
+    reopened = DocumentView(open_document(project))
+    assert layout(reopened) == expected
+    reopened.close()
     view.close()
 
 

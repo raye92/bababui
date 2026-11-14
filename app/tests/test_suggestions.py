@@ -59,6 +59,21 @@ def test_linked_fields_are_one_decision():
     assert accepted.text.count('Joan') == 2
 
 
+def test_accept_all_keeps_inserted_wording_at_its_destination_stroke():
+    from app.src.suggestions import resolve_all
+
+    old = Revision((AnchoredSpan('first', (0,), (), 'Alpha '),
+                    AnchoredSpan('second', (1,), (), 'beta gamma.')))
+    incoming = propose(old, 'Alpha inserted beta delta.')
+    ranges = tuple(span for change in suggestions(old, incoming) for span in change.ranges)
+
+    accepted, pending = resolve_all(old, incoming, ranges, True)
+
+    assert accepted == pending
+    assert accepted.text == 'Alpha inserted beta delta.'
+    assert next(span.stroke_refs for span in accepted.spans if 'inserted' in span.content) == (1,)
+
+
 def test_stale_decision_is_rejected():
     import pytest
     old = revision('red and large')

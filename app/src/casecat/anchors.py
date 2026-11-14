@@ -149,7 +149,8 @@ class Revision:
                 start, end = min(start, element.start), max(end, element.end)
         return start, end
 
-    def adopt(self, start, end, source, source_start, source_end, *, at_destination=False):
+    def adopt(self, start, end, source, source_start, source_end, *, at_destination=False,
+              update_fields=True):
         """Accept or reject a passage using the selected revision's associations."""
         if not 0 <= source_start <= source_end <= len(source.text):
             raise ValueError('Invalid source revision range.')
@@ -180,6 +181,8 @@ class Revision:
         elements.extend(replace(e, start=start + e.start - source_start, end=start + e.end - source_start)
                         for e in source.elements if source_start <= e.start and e.end <= source_end)
         result = replace(result, elements=tuple(sorted(elements, key=lambda e: (e.start, e.end))))
+        if not update_fields:
+            return result
         definitions = {e.name: e.value if e.value is not None else source.text[e.start:e.end] for e in source.elements
                        if e.kind == 'field'
                        and source_start <= e.start and e.end <= source_end}
