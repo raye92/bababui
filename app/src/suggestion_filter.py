@@ -190,6 +190,8 @@ def _field_names(original):
 
 
 def _restore_trailing(original, text):
+    from app.src.suggestions import text_edits
+
     old, new, pairs = aligned_paragraphs(original.text, text)
     edits = []
     for i, j in pairs:
@@ -200,6 +202,14 @@ def _restore_trailing(original, text):
             edits.append((new[j][0]+len(b)-len(after), new[j][0]+len(b), before))
     for a, b, value in reversed(edits):
         text = text[:a] + value + text[b:]
+    # A split or join can leave a shared paragraph ending without a
+    # one-to-one paragraph match. Restore deletions at those endings too.
+    source = original.text
+    for a, b, c, d in reversed(text_edits(source, text)):
+        if (c == d and not source[a:b].strip(' \t')
+                and source[b:b+1] == text[c:c+1] and text[c:c+1] in ('', '\n')
+                and text[text.rfind('\n', 0, c)+1:c].strip()):
+            text = text[:c] + source[a:b] + text[c:]
     return text
 
 

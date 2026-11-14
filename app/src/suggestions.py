@@ -13,6 +13,19 @@ class Suggestion:
     field: str | None = None
 
 
+def preview_context(text, start, end):
+    """Return the edit card's unescaped text on either side of a change."""
+    left = text.rfind('\n', 0, start) + 1
+    right = text.find('\n', end)
+    if right < 0:
+        right = len(text)
+    before = list(re.finditer(r'\S+', text[left:start]))
+    after = list(re.finditer(r'\S+', text[end:right]))
+    prefix = '… ' + text[left + before[-8].start():start] if len(before) > 8 else text[left:start]
+    suffix = text[end:end + after[7].end()] + ' …' if len(after) > 8 else text[end:right]
+    return prefix, suffix
+
+
 def _layout(line):
     match = re.match(r'^(\s*)([QA])([ \t]+)(.*)$', line)
     if match:

@@ -4,11 +4,14 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline
+from app.src.ai_review import AssistedReview, review_edits
 from app.src.processing import ProcessingClient, APP_DIR
+from app.src.suggestion_filter import auto_accept, begin_review
 from shared.storage import atomic_bytes
 
 
@@ -65,10 +68,14 @@ class Request:
     transcription_model: str
     prompt: str
     config: dict
+    original: object = None
+    review_model: str | None = None
+    disabled_rules: frozenset[str] = frozenset()
 
 
 class ProcessingWorker(QThread):
     succeeded = Signal(str, str, list)
+    reviewed = Signal(str, object, list)
     failed = Signal(str, str)
     progress = Signal(str, str)
 
@@ -94,7 +101,11 @@ class ProcessingWorker(QThread):
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
             report('Applying transcript standards...')
-            self.succeeded.emit(request.document_id, result, list(warnings))
+            if request.review_model is None:
+                self.succeeded.emit(request.document_id, result, list(warnings))
+            else:
+                reviewed = self._review(result, report)
+                self.reviewed.emit(request.document_id, reviewed, list(warnings))
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'
             for key in ('api_key', 'gemini_api_key'):
@@ -102,9 +113,32 @@ class ProcessingWorker(QThread):
                     message = message.replace(request.config[key], '[REDACTED]')
             self.failed.emit(request.document_id, message)
 
+    def _review(self, text, report):
+        request = self.request
+        state = SimpleNamespace(original=request.original)
+        off_record_undo = begin_review(state, text, exclude_off_record='off_record' not in request.disabled_rules)
+        before_rules = state.original, state.incoming, state.review
+        auto_accept(state, disabled_rules=request.disabled_rules)
+        after_rules = state.original, state.incoming, state.review
+        report('Reviewing short-word edits...')
+
+        def complete(payload, prompt):
+            client = self.processor_factory(request.config, request.review_model)
+            return client.complete(payload, prompt)
+
+        try:
+            original, incoming, review, summary = review_edits(
+                *after_rules, request.review_model, complete, request.document_id)
+            after_ai = original, incoming, review
+        except (OSError, ValueError):
+            after_ai = after_rules
+            summary = 'AI-assisted review could not be applied and recorded. Edits remain pending.'
+        return AssistedReview(request.original, off_record_undo, before_rules, after_rules, after_ai, summary)
+
 
 class JobManager(QObject):
     succeeded = Signal(str, str, list)
+    reviewed = Signal(str, object, list)
     failed = Signal(str, str)
     progress = Signal(str, str)
     completed = Signal(str)
@@ -121,6 +155,7 @@ class JobManager(QObject):
         worker = self.worker_factory(request, self.coordinator)
         self.workers[request.document_id] = worker
         worker.succeeded.connect(self.succeeded)
+        worker.reviewed.connect(self.reviewed)
         worker.failed.connect(self.failed)
         worker.progress.connect(self.progress)
         worker.finished.connect(self._finished)

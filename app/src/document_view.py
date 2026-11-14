@@ -49,7 +49,8 @@ class DocumentView(QWidget):
         from app.src.suggestion_filter import LABEL, GENERIC
         if (document.native.review is None and document.native.original != document.native.incoming
                 and any((m := LABEL.match(p)) and GENERIC.fullmatch(m['name']) for p in document.incoming.split('\n'))):
-            automatic_before = begin_review(document.native, document.native.incoming.text)
+            automatic_before = begin_review(document.native, document.native.incoming.text,
+                                            exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
         self._updating = False
         self._position_pending = True
         self._native_history = {'original': {}, 'incoming': {}}
@@ -404,33 +405,59 @@ class DocumentView(QWidget):
     def receive(self, text, warnings):
         self.capture_position()
         try:
-            automatic_before = begin_review(self.document.native, text)
+            automatic_before = begin_review(self.document.native, text,
+                                            exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
         except ValueError as exc:
             self.document.status = str(exc)
             self.changed.emit()
             return
         self._review_undo.clear()
         self._review_redo.clear()
-        self.document.update_warnings(warnings)
         self.document.status = 'Incoming updated. Review the suggested revisions.'
         self._automatic_review(automatic_before)
+        self._finish_receive(warnings)
+
+    def receive_reviewed(self, result, warnings):
+        state = self.document.native
+        if state.original != result.source:
+            self.document.status = 'Original changed while processing. The AI review was not applied.'
+            self.changed.emit()
+            return
+        self.capture_position()
+        self._review_undo.clear()
+        self._review_redo.clear()
+        state.original, state.incoming, state.review = result.after_rules
+        before_original, before_incoming, _ = result.before_rules
+        self._record_automatic_review(result.off_record_undo, before_original, before_incoming,
+                                      state.review['automatic_changes'])
+        state.original, state.incoming, state.review = result.after_ai
+        if result.after_ai[:2] != result.after_rules[:2]:
+            self._review_undo.append(result.after_rules)
+        self.document.status = f'AI-assisted review. {result.summary}'
+        self._finish_receive(warnings)
+
+    def _finish_receive(self, warnings):
+        self.document.update_warnings(warnings)
         self.refresh()
         self.edited()
         self.schedule_restore()
 
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
-        before = state.original, state.incoming, deepcopy(state.review)
+        original, incoming = state.original, state.incoming
         records = auto_accept(state, disabled_rules=self.disabled_auto_accept_rules)
+        self._record_automatic_review(automatic_before, original, incoming, records)
+
+    def _record_automatic_review(self, automatic_before, original, incoming, records):
         if records:
             # Keep the version marker on undo so reopening does not silently
             # reapply a batch that the user explicitly undid.
             if automatic_before:
                 self._review_undo.append(automatic_before)
             else:
-                undo_review = deepcopy(state.review)
+                undo_review = deepcopy(self.document.native.review)
                 undo_review['automatic_changes'] = []
-                self._review_undo.append((before[0], before[1], undo_review))
+                self._review_undo.append((original, incoming, undo_review))
             self.document.status = f'{len(records)} changes automatically accepted or filtered. Review the remaining suggestions. Undo restores the batch.'
             self.document.dirty = True
 

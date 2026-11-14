@@ -45,6 +45,14 @@ def test_trailing_whitespace_is_restored_but_newlines_and_internal_spaces_remain
     assert len(changes) == 2
     assert any(c.kind == 'structure' for c in changes)
 
+def test_trailing_whitespace_is_restored_after_paragraph_split():
+    from app.src.suggestion_filter import prepare
+    old = Revision((AnchoredSpan('root', (), (),
+                                'Q First sentence.  Would that be correct?  \nA Yes.'),))
+    incoming, _ = prepare(old, 'Q First sentence.\nQ Would that be correct?\nA Yes.')
+    assert incoming.text == 'Q First sentence.\nQ Would that be correct?  \nA Yes.'
+
+
 def test_override_keeps_completed_decisions_and_frozen_evidence():
     from copy import deepcopy
     from types import SimpleNamespace

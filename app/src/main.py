@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
     QFileDialog, QSizePolicy, QLabel, QInputDialog)
 from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
+from app.src.ai_review import DEFAULT_REVIEW_MODEL
 from app.src.audio_pipeline import AUDIO_MODEL
 from app.src.documents import (Document, canonical, save_document, open_document,
     suggested_path, save_session, load_session, import_casecat)
@@ -42,6 +43,7 @@ class TranscriptEditor(QMainWindow):
         self._recovery_timer.timeout.connect(self.persist_session)
         self.jobs = jobs if jobs is not None else JobManager(self)
         self.jobs.succeeded.connect(self._succeeded)
+        self.jobs.reviewed.connect(self._reviewed)
         self.jobs.failed.connect(self._failed)
         self.jobs.progress.connect(self._progress)
         self.jobs.completed.connect(self._completed)
@@ -126,20 +128,39 @@ class TranscriptEditor(QMainWindow):
         edit.addAction('Fill In Field...', lambda: self.native_edit_action('edit_native_field'))
         edit.addAction('Change Format Symbol...', lambda: self.native_edit_action('change_native_symbol'))
         self.settings_btn, settings = self._menu_button('Settings', row)
-        auto_accept = settings.addMenu('Auto-accept edits')
+        automated_edits = settings.addMenu('Automated edits')
         for rule, label in (
-            ('punctuation', 'Punctuation'),
-            ('capitalization', 'Capitalization'),
-            ('contractions', 'Contractions'),
-            ('short_common_words', 'Short/common words'),
+            ('punctuation', 'Accept punctuation'),
+            ('capitalization', 'Accept capitalization'),
+            ('contractions', 'Accept contractions'),
+            ('short_common_words', 'Accept short/common words'),
+            ('off_record', 'Filter off-record discussion'),
         ):
-            action = auto_accept.addAction(label)
+            action = automated_edits.addAction(label)
             action.setCheckable(True)
             enabled = self.preferences.value(f'auto_accept/{rule}', True, type=bool)
             action.setChecked(enabled)
             if not enabled:
                 self.disabled_auto_accept_rules.add(rule)
             action.toggled.connect(lambda checked, key=rule: self.set_auto_accept_rule(key, checked))
+        ai_review = automated_edits.addMenu('AI-assisted review')
+        self.ai_review_enabled = ai_review.addAction('Enabled')
+        self.ai_review_enabled.setCheckable(True)
+        self.ai_review_enabled.setChecked(self.preferences.value('ai_review/enabled', True, type=bool))
+        self.ai_review_enabled.toggled.connect(
+            lambda checked: self.preferences.setValue('ai_review/enabled', checked))
+        review_models = ai_review.addMenu('Model')
+        review_group = QActionGroup(self)
+        review_group.setExclusive(True)
+        self.ai_review_model = self.preferences.value('ai_review/model', DEFAULT_REVIEW_MODEL, type=str)
+        if self.ai_review_model not in MODELS:
+            self.ai_review_model = DEFAULT_REVIEW_MODEL
+        for model, label in MODELS.items():
+            action = review_models.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(model == self.ai_review_model)
+            review_group.addAction(action)
+            action.triggered.connect(lambda checked, key=model: self.set_ai_review_model(key))
         processing = settings.addMenu('LLM processing model')
         group = QActionGroup(self)
         group.setExclusive(True)
@@ -302,6 +323,10 @@ class TranscriptEditor(QMainWindow):
             self.disabled_auto_accept_rules.add(rule)
         self.preferences.setValue(f'auto_accept/{rule}', enabled)
         self.preferences.sync()
+
+    def set_ai_review_model(self, model):
+        self.ai_review_model = model
+        self.preferences.setValue('ai_review/model', model)
 
     def set_processing_model(self, model):
         if self.current and not self.current.document.busy and model in MODELS:
@@ -499,7 +524,10 @@ class TranscriptEditor(QMainWindow):
             return
         try:
             request = Request(doc.id, doc.wav_path, doc.model, doc.transcription_model,
-                              PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()))
+                              PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()),
+                              original=doc.native.original,
+                              review_model=self.ai_review_model if self.ai_review_enabled.isChecked() else None,
+                              disabled_rules=frozenset(self.disabled_auto_accept_rules))
             view.set_busy(True)
             doc.status = 'Starting...'
             doc.update_warnings()
@@ -520,6 +548,11 @@ class TranscriptEditor(QMainWindow):
         view = self.find_view(identifier)
         if view:
             view.receive(text, warnings)
+
+    def _reviewed(self, identifier, result, warnings):
+        view = self.find_view(identifier)
+        if view:
+            view.receive_reviewed(result, warnings)
 
     def _failed(self, identifier, message):
         view = self.find_view(identifier)

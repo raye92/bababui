@@ -1,10 +1,10 @@
 """One exact review decision with fixed navigation and speaker evidence."""
 from html import escape
-import re
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QToolButton, QComboBox, QProgressBar)
 from app.src.casecat.fields import field_values
+from app.src.suggestions import preview_context
 
 
 def visible_text(text, empty):
@@ -38,25 +38,14 @@ def change_diff(change):
     for group in spans:
         if not group:
             continue
-        left = original.rfind('\n', 0, group[0][0]) + 1
-        right = original.find('\n', group[-1][1])
-        right = len(original) if right < 0 else right
-        prefix = suffix = ''
-        before = list(re.finditer(r'\S+', original[left:group[0][0]]))
-        after = list(re.finditer(r'\S+', original[group[-1][1]:right]))
-        if len(before) > 8:
-            left += before[-8].start()
-            prefix = '… '
-        if len(after) > 8:
-            right = group[-1][1]+after[7].end()
-            suffix = ' …'
+        position = group[0][0]
+        prefix, suffix = preview_context(original, position, group[-1][1])
         parts = [escape(prefix)]
-        position = left
         for a, b, c, d in group:
             parts.extend((escape(original[position:a]), _highlight(original[a:b], False),
                           _highlight(incoming[c:d], True)))
             position = b
-        parts.append(escape(original[position:right]+suffix))
+        parts.append(escape(suffix))
         rows.append(('change', ''.join(parts)))
     return rows
 

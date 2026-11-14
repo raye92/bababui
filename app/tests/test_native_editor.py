@@ -441,20 +441,22 @@ def test_native_speaker_override_undo_and_project_reopen(native_window,tmp_path)
 
 def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_path):
     def actions(window):
-        menu = next(action.menu() for action in window.settings_btn.menu().actions()
-                    if action.text() == 'Auto-accept edits')
-        return {action.text(): action for action in menu.actions()}
+        automated = next(action.menu() for action in window.settings_btn.menu().actions()
+                         if action.text() == 'Automated edits')
+        return {action.text(): action for action in automated.actions() if action.isCheckable()}
 
     toggles = actions(native_window)
-    assert list(toggles) == ['Punctuation', 'Capitalization', 'Contractions', 'Short/common words']
-    assert all(action.isCheckable() and action.isChecked() for action in toggles.values())
+    assert list(toggles) == ['Accept punctuation', 'Accept capitalization',
+                             'Accept contractions', 'Accept short/common words',
+                             'Filter off-record discussion']
+    assert all(action.isChecked() for action in toggles.values())
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     before = view.document.original
     incoming = before.replace('Hello', 'HELLO').replace('.', '?')
     assert incoming != before.replace('Hello', 'HELLO') != before
 
-    toggles['Punctuation'].trigger()
+    toggles['Accept punctuation'].trigger()
     view.receive(incoming, [])
     assert view.document.original == before.replace('Hello', 'HELLO')
     assert view.document.incoming == incoming
@@ -462,9 +464,82 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
 
     reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
     try:
-        assert {label for label, action in actions(reopened).items() if not action.isChecked()} == {'Punctuation'}
+        assert {label for label, action in actions(reopened).items()
+                if not action.isChecked()} == {'Accept punctuation'}
     finally:
         reopened.close()
+
+
+def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp_path, monkeypatch):
+    import json
+    import time
+    from app.src import jobs
+
+    calls = []
+
+    class Pipeline:
+        def __init__(self, *_):
+            pass
+
+        def run(self, path, progress):
+            return 'Raw transcript', []
+
+    class Processor:
+        def __init__(self, config, model):
+            self.model = model
+
+        def check_ready(self):
+            pass
+
+        def complete(self, payload, prompt):
+            calls.append((self.model, payload))
+            if len(calls) == 1:
+                return 'I saw a blue car?\nI saw a dog.'
+            return '{"1":"accept","2":"reject"}'
+
+    def review(*args):
+        from app.src.ai_review import review_edits
+        return review_edits(*args, directory=tmp_path)
+
+    monkeypatch.setattr(jobs, 'review_edits', review)
+    native_window.jobs.worker_factory = lambda request, coordinator: jobs.ProcessingWorker(
+        request, coordinator, Pipeline, Processor)
+    wav = tmp_path/'test.wav'
+    wav.write_bytes(b'audio')
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.document.wav_path = str(wav)
+    state = view.document.native
+    state.original = state.incoming = state.original.revise('I saw a red car.\nI saw a big dog.')
+    view.refresh()
+
+    settings = native_window.settings_btn.menu()
+    automated = next(action.menu() for action in settings.actions() if action.text() == 'Automated edits')
+    assisted = next(action.menu() for action in automated.actions() if action.text() == 'AI-assisted review')
+    enabled, model = assisted.actions()
+    assert enabled.isChecked()
+    assert [action.text() for action in model.menu().actions() if action.isChecked()] == ['Gemini 3.8 Flash']
+    next(action for action in model.menu().actions() if action.text() == 'DeepSeek V4 Pro').trigger()
+    native_window.run_bababui()
+    deadline = time.monotonic() + 5
+    while view.document.busy and time.monotonic() < deadline:
+        QApplication.processEvents()
+        QTest.qWait(5)
+
+    assert not view.document.busy
+    assert len(calls) == 2
+    assert calls[1][0] == 'deepseek-v4-pro'
+    assert [(edit['original_word'], edit['proposed_word']) for edit in json.loads(calls[1][1])] == [
+        ('red', 'blue'), ('big', ''),
+    ]
+    assert state.original.text == 'I saw a blue car?\nI saw a big dog.'
+    assert state.incoming == state.original
+    assert 'accepted: 1, rejected: 1, abstained: 0' in view.document.status
+    view.undo_review()
+    assert state.original.text == 'I saw a red car?\nI saw a big dog.'
+    assert len(view.diff_view.changes) == 2
+    view.undo_review()
+    assert state.original.text == 'I saw a red car.\nI saw a big dog.'
 
 
 def test_automatic_review_batch_is_native_undoable_and_persisted(native_window, tmp_path):
@@ -521,6 +596,14 @@ def test_off_record_batch_undo_reopen_and_native_export(native_window, tmp_path)
         original = original.insert_field(start, 'EZ SPEAKER 01', 'MS. SIEMENS')
     state.original = state.incoming = original
     view.refresh()
+    automated = next(action.menu() for action in native_window.settings_btn.menu().actions()
+                     if action.text() == 'Automated edits')
+    off_record = next(action for action in automated.actions() if action.text() == 'Filter off-record discussion')
+    off_record.trigger()
+    view.receive(INCOMING, [])
+    assert 'review the transcripts' in state.incoming.text
+    assert not state.review.get('off_record_changes')
+    off_record.trigger()
     view.receive(INCOMING, [])
     assert 'review the transcripts' not in state.incoming.text
     assert NOTE in state.incoming.text
