@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import pytest
 from app.src.jobs import TranscriptionCoordinator
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 
 
 @pytest.mark.parametrize('fails', [False, True])

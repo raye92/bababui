@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 import re
 
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 
 
 @dataclass

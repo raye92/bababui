@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import uuid
 
-from evaluation.storage import atomic_bytes, file_lock
+from shared.storage import atomic_bytes, file_lock
 from app.src.casecat import archive, project
 
 SAVE_LOCK_DIR = Path(__file__).resolve().parents[1] / 'data' / 'save-locks'

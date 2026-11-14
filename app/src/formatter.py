@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 
 
 class Formatter(TranscriptFormatter):

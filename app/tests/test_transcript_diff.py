@@ -1,5 +1,5 @@
 from app.src.transcript_diff import parse_transcript, align_blocks, word_spans, render_blocks
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 
 
 def formatted(text):

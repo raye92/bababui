@@ -1,11 +1,11 @@
 """Saved evaluation choices and transcript transformations."""
 import re
 
-from transcript_formatting import TranscriptFormatter
+from shared.client import DEFAULT_MODEL
+from shared.transcript_formatting import TranscriptFormatter
 
 
 MODELS = {"deepseek-v4-pro": "DeepSeek V4 Pro", "deepseek-flash": "DeepSeek Flash"}
-DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_FILTERS = {"strip_formatting": True, "remove_hash_marker": True, "remove_slash_marker": False,
                    "remove_heading": True}
 LEGACY_FILTERS = dict.fromkeys(DEFAULT_FILTERS, False)

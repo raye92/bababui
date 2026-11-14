@@ -283,7 +283,7 @@ def test_marker_filters_only_change_the_request(tmp_path, narrow, broad, expecte
 
 @pytest.mark.parametrize("strip", [True, False])
 def test_grading_precedes_numbering_and_covers_multiple_pages(tmp_path, strip):
-    from transcript_formatting import TranscriptFormatter
+    from shared.transcript_formatting import TranscriptFormatter
 
     formatter = TranscriptFormatter()
     plain = "\n".join(f"    Q    Line {i}." for i in range(1, 28))
@@ -354,7 +354,7 @@ def test_plain_numeric_answers_and_addresses_survive_grading_and_export():
 
 @pytest.mark.parametrize("length", [25, 26, 50])
 def test_numbered_export_only_breaks_between_pages(length):
-    from transcript_formatting import TranscriptFormatter
+    from shared.transcript_formatting import TranscriptFormatter
 
     formatter = TranscriptFormatter()
     plain = "\n".join(f"    Q    Line {n}." for n in range(length))

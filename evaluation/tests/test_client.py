@@ -4,7 +4,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from evaluation.client import DeepSeekClient, load_config
+from shared.client import DeepSeekClient, load_config
 
 
 def test_config_uses_own_env_file(tmp_path, monkeypatch):

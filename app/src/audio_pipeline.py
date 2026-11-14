@@ -11,9 +11,9 @@ import tempfile
 import time
 import uuid
 
-from evaluation import media
-from evaluation.transcription import GeminiTranscriber
-from evaluation.storage import file_lock
+from shared import media
+from shared.transcription import GeminiTranscriber
+from shared.storage import file_lock
 
 
 AUDIO_MODEL = 'gemini-3.5-transcribe'

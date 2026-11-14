@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
-from evaluation.setups import DEFAULT_MODEL
+DEFAULT_MODEL = "deepseek-v4-pro"
 
 
 def load_config(root):
@@ -43,7 +43,7 @@ class DeepSeekClient:
         self.last_response = None
         self.finish_reason = None
         if not self.ready:
-            raise ValueError("Set DEEPSEEK_API_KEY in evaluation/.env.")
+            raise ValueError("Set DEEPSEEK_API_KEY in the environment or the app .env file.")
         endpoint = self.settings["base_url"].rstrip("/") + "/chat/completions"
         url = urlparse(endpoint)
         if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:

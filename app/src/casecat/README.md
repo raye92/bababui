@@ -155,7 +155,7 @@ displayed text is derived, and projects/recovery version 2 omit duplicate text.
 Version 1 CaseCAT projects remain readable. Plaintext files remain untouched but
 are no longer opened as editable documents. Legacy recovery is backed up.
 
-The Manual menu is retired. `transcript_formatting.py` and the formatter wrapper
+The Manual menu is retired. `shared/transcript_formatting.py` and the formatter wrapper
 remain reference material and evaluation support, not an editor processing path.
 AI proposals retain paragraph indentation and Q/A spacing from matched source
 paragraphs. Review decisions operate on exact word/phrase ranges, with linked

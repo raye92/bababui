@@ -140,7 +140,7 @@ def test_cached_text_survives_pending_cleanup_failure(tmp_path, monkeypatch):
 
 def test_concurrent_cache_use_is_rejected(tmp_path, monkeypatch):
     import hashlib
-    from evaluation.storage import file_lock
+    from shared.storage import file_lock
     from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media
     wav = tmp_path/'input.wav'
     wav.write_bytes(b'wav')

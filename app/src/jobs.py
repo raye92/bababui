@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline
 from app.src.processing import ProcessingClient, APP_DIR
-from evaluation.storage import atomic_bytes
+from shared.storage import atomic_bytes
 
 
 _raw_export_lock = Lock()

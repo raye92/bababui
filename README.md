@@ -1,6 +1,7 @@
 # BABABUI
 
-Two separate apps for editing and evaluating court transcripts.
+Two separate apps for editing and evaluating court transcripts. Both use
+`shared/` for provider clients, media, file utilities, and formatting.
 
 | Folder | Purpose | Entry point |
 | --- | --- | --- |

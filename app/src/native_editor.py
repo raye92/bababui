@@ -10,7 +10,7 @@ from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
 from app.src.casecat.layout import read_layouts, ParagraphStyle
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 
 
 def _paper_font(family, pixels):
