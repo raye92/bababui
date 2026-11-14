@@ -9,8 +9,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline
 from app.src.processing import ProcessingClient, APP_DIR
-from transcript_formatting import TranscriptFormatter
-from evaluation.storage import atomic_bytes
+from shared.storage import atomic_bytes
 
 
 _raw_export_lock = Lock()
@@ -95,7 +94,6 @@ class ProcessingWorker(QThread):
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
             report('Applying transcript standards...')
-            result, _ = TranscriptFormatter().apply_formatting(result)
             self.succeeded.emit(request.document_id, result, list(warnings))
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'

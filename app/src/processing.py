@@ -1,8 +1,8 @@
 """Provider-neutral formatting, with one editable prompt."""
 from pathlib import Path
 
-from evaluation.client import DeepSeekClient, load_config as read_config
-from evaluation.transcription import has_key
+from shared.client import DeepSeekClient, load_config as read_config
+from shared.transcription import has_key
 
 MODELS = {
     'deepseek-flash': 'DeepSeek V4',

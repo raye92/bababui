@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
 
-from evaluation.client import DeepSeekClient, load_config
+from shared.client import DeepSeekClient, load_config
 from evaluation.core import (Store, SEPARATOR, parse_jsonl, create_run,
                              execute_run, summary, compare_runs, comparison_key,
                              comparison_csv, visible_diff, validate_cases, valid_text)
@@ -20,8 +20,8 @@ from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, M
 
 from evaluation.imports import import_files, folder_files
 from evaluation.storage import resolve
-from evaluation.transcription import (AUDIO_MODELS, DEFAULT_AUDIO_MODEL, GeminiTranscriber,
-                                      workload, retry_workload, preflight, has_key)
+from shared.transcription import AUDIO_MODELS, DEFAULT_AUDIO_MODEL, GeminiTranscriber, has_key
+from evaluation.transcription import workload, retry_workload, preflight
 
 
 def label(record):

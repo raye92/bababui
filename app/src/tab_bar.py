@@ -1,4 +1,4 @@
-"""Tab headers double as WAV inputs only until audio is attached."""
+"""Tab headers accept native CaseCAT archives."""
 from pathlib import Path
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QPainter, QPen
@@ -44,6 +44,7 @@ class NewTabButton(QToolButton):
 class AudioTabBar(QTabBar):
     attach_requested = Signal(int)
     wav_dropped = Signal(int, str)
+    zip_dropped = Signal(int, str)
     duplicate_requested = Signal(int)
     replace_requested = Signal(int)
     close_requested = Signal(int)
@@ -60,7 +61,7 @@ class AudioTabBar(QTabBar):
 
     def is_empty(self, index):
         info = self.tabData(index) or {}
-        return index >= 0 and not info.get('wav_path')
+        return index >= 0 and not info.get('native') and not info.get('wav_path')
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -90,7 +91,7 @@ class AudioTabBar(QTabBar):
             return
         menu = QMenu(self)
         menu.addAction('Duplicate Tab', lambda: self.duplicate_requested.emit(index))
-        replace = menu.addAction('Replace WAV', lambda: self.replace_requested.emit(index))
+        replace = menu.addAction('Import CaseCAT ZIP', lambda: self.replace_requested.emit(index))
         close = menu.addAction('Close', lambda: self.close_requested.emit(index))
         busy = (self.tabData(index) or {}).get('busy', False)
         replace.setEnabled(not busy)
@@ -100,9 +101,9 @@ class AudioTabBar(QTabBar):
     def _drop(self, event):
         index = self.tabAt(event.position().toPoint())
         urls = event.mimeData().urls()
-        if self.is_empty(index) and not (self.tabData(index) or {}).get('busy') and len(urls) == 1 and urls[0].isLocalFile():
+        if index >= 0 and not (self.tabData(index) or {}).get('busy') and len(urls) == 1 and urls[0].isLocalFile():
             path = Path(urls[0].toLocalFile())
-            if path.is_file() and path.suffix.lower() == '.wav':
+            if path.is_file() and path.suffix.lower() == '.zip':
                 return index, str(path)
         return None
 
@@ -117,7 +118,7 @@ class AudioTabBar(QTabBar):
     def dropEvent(self, event):
         result = self._drop(event)
         if result:
-            self.wav_dropped.emit(*result)
+            self.zip_dropped.emit(*result)
             event.acceptProposedAction()
         else:
             event.ignore()

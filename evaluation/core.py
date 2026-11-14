@@ -19,7 +19,8 @@ from rapidfuzz.distance import Levenshtein
 
 from evaluation.setups import (DEFAULT_FILTERS, DEFAULT_MODEL, LEGACY_FILTERS, MODELS,
                                expected_for_grading, formatted_transcript, grading_text, model_input)
-from evaluation.storage import file_lock, artifact, resolve
+from shared.storage import file_lock
+from evaluation.storage import artifact, resolve
 
 SCORING_VERSION = "character-levenshtein-lf-v1"
 SEPARATOR = "\n\n---\n\n# COURT REPORTING RULES DOCUMENT\n\n"
@@ -204,7 +205,7 @@ class Store:
 
     def save_prompt(self, name, instructions, rules, *, model=DEFAULT_MODEL, filters=None,
                     transcription_model="gemini-3.5-transcribe"):
-        from evaluation.transcription import AUDIO_MODELS
+        from shared.transcription import AUDIO_MODELS
         if transcription_model not in AUDIO_MODELS:
             raise ValueError("Choose a supported transcription model.")
         if model not in MODELS:
@@ -227,7 +228,7 @@ class Store:
 
 
 def create_run(store, dataset, prompt, split, settings):
-    from evaluation.transcription import DEFAULT_AUDIO_MODEL
+    from shared.transcription import DEFAULT_AUDIO_MODEL
     store.check_audio(dataset["cases"])
     selected = [c for c in dataset["cases"] if c["split"] == split]
     if not selected:

@@ -5,7 +5,7 @@ import wave
 import pytest
 
 from evaluation.imports import import_files
-from evaluation.media import plan_segments, join_segments
+from shared.media import plan_segments, join_segments
 from evaluation.core import Store
 
 
@@ -79,7 +79,7 @@ def test_cache_retry_counts_and_references(tmp_path, monkeypatch):
 
 def test_gemini_deletes_remote_on_failure(tmp_path):
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber
+    from shared.transcription import GeminiTranscriber
     events = []
     class Files:
         def upload(self, **kwargs):
@@ -131,7 +131,8 @@ def test_cached_preflight_needs_no_gemini_key():
 
 def test_partial_segments_retry_and_cleanup_pending(tmp_path, monkeypatch):
     from evaluation.transcription import Transcriptions, workload
-    from evaluation.storage import write_json, read_json, resolve
+    from shared.storage import write_json, read_json
+    from evaluation.storage import resolve
     from evaluation.tests.audio_helpers import AUDIO, seed
     store = Store(tmp_path)
     seed(store)
@@ -172,7 +173,7 @@ def test_partial_segments_retry_and_cleanup_pending(tmp_path, monkeypatch):
                                                 ("completed", "", False)])
 def test_gemini_contract_and_cleanup(tmp_path, status, text, success):
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber, AUDIO_MODELS
+    from shared.transcription import GeminiTranscriber, AUDIO_MODELS
     for model in AUDIO_MODELS:
         events, payloads = [], []
         class Files:
@@ -200,9 +201,10 @@ def test_gemini_contract_and_cleanup(tmp_path, status, text, success):
 
 def test_unlabeled_cache_is_preserved_but_not_reused(tmp_path):
     from evaluation.core import Store
-    from evaluation.transcription import Transcriptions, DEFAULT_AUDIO_MODEL
+    from shared.transcription import DEFAULT_AUDIO_MODEL
+    from evaluation.transcription import Transcriptions
     from evaluation.tests.audio_helpers import AUDIO
-    from evaluation.storage import write_json
+    from shared.storage import write_json
     old = tmp_path / "transcriptions" / DEFAULT_AUDIO_MODEL / AUDIO["sha256"] / "complete.json"
     write_json(old, {"text": "Old unlabeled speech"})
     assert Transcriptions(Store(tmp_path)).cached(AUDIO, DEFAULT_AUDIO_MODEL) is None
@@ -214,12 +216,15 @@ def test_advisory_lock_released_when_worker_is_killed(tmp_path):
     import subprocess
     import sys
     import time
-    from evaluation.storage import file_lock
+    from shared.storage import file_lock
     lock = tmp_path / "cache.lock"
     marker = tmp_path / "ready"
-    script = ("from evaluation.storage import file_lock; from pathlib import Path; import sys,time; "
+    script = ("from shared.storage import file_lock; from pathlib import Path; import sys,time; "
               "\nwith file_lock(sys.argv[1]):\n Path(sys.argv[2]).touch()\n time.sleep(60)\n")
-    worker = subprocess.Popen([sys.executable, "-c", script, str(lock), str(marker)],
+    # Windows venv python.exe can be a launcher for a second process. Kill the
+    # interpreter that owns the lock, rather than only its launcher process.
+    interpreter = sys._base_executable if os.name == "nt" else sys.executable
+    worker = subprocess.Popen([interpreter, "-c", script, str(lock), str(marker)],
                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     try:
         deadline = time.monotonic() + 10
@@ -260,7 +265,7 @@ def test_store_rejects_cases_without_audio(tmp_path):
 
 def test_upload_timeout_has_persisted_remote_identity(tmp_path):
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber
+    from shared.transcription import GeminiTranscriber
     pending, deleted = [], []
     class Files:
         def upload(self, **kwargs):
@@ -277,7 +282,7 @@ def test_upload_timeout_has_persisted_remote_identity(tmp_path):
 
 def test_saved_segments_cleanup_without_new_upload(tmp_path):
     from evaluation.transcription import Transcriptions
-    from evaluation.storage import write_json, read_json
+    from shared.storage import write_json, read_json
     from evaluation.tests.audio_helpers import AUDIO, seed
     store = Store(tmp_path)
     seed(store)
@@ -334,7 +339,7 @@ def test_retry_checks_pinned_references_before_credentials(tmp_path):
             raise ValueError("edit failed")
     run = execute_run(store, create_run(store, data, setup, "development", {})["id"], Fail())
     assert retry_workload(store, run)["requests"] == 0
-    from evaluation.storage import write_json
+    from shared.storage import write_json
     state = (tmp_path / run["results"][0]["transcription"]["path"]).with_name("state.json")
     write_json(state, {"remote": "files/pending", "warnings": []})
     deleted = []
@@ -354,7 +359,7 @@ def test_real_google_sdk_serializes_transcription_with_fake_http(tmp_path):
     import httpx
     from google import genai
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber, AUDIO_MODELS
+    from shared.transcription import GeminiTranscriber, AUDIO_MODELS
     requests = []
     def transport(request):
         requests.append(json.loads(request.content))
@@ -378,7 +383,7 @@ def test_speaker_annotations_survive_sdk(tmp_path):
     import httpx
     from google import genai
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber
+    from shared.transcription import GeminiTranscriber
     # Offsets are UTF-8 bytes, not Python character indices. Preserve punctuation.
     text = "Café? Yes, indeed. Again?"
     annotations = [
@@ -404,9 +409,9 @@ def test_speaker_annotations_survive_sdk(tmp_path):
 
 def test_gemini_response_time_excludes_upload_and_cleanup(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from evaluation.transcription import GeminiTranscriber
+    from shared.transcription import GeminiTranscriber
     clock = [0.0]
-    monkeypatch.setattr('evaluation.transcription.time.perf_counter', lambda: clock[0])
+    monkeypatch.setattr('shared.transcription.time.perf_counter', lambda: clock[0])
     class Files:
         def upload(self, **kwargs):
             clock[0] += 30

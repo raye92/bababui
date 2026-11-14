@@ -3,8 +3,9 @@ import hashlib
 import io
 import wave
 
-from evaluation.storage import write_json
-from evaluation.transcription import AUDIO_MODELS, Transcriptions
+from shared.storage import write_json
+from shared.transcription import AUDIO_MODELS
+from evaluation.transcription import Transcriptions
 
 stream = io.BytesIO()
 with wave.open(stream, "wb") as handle:

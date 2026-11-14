@@ -12,16 +12,15 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
-    QFileDialog, QSizePolicy, QLabel)
-from app.src.formatter import Formatter
+    QFileDialog, QSizePolicy, QLabel, QInputDialog)
 from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
 from app.src.audio_pipeline import AUDIO_MODEL
 from app.src.documents import (Document, canonical, save_document, open_document,
-    suggested_path, save_session, load_session)
-from app.src.document_view import DocumentView
+    suggested_path, save_session, load_session, import_casecat)
+from app.src.casecat.archive import inspect_archive
+from app.src.document_view import DocumentView, ImportView
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
-from app.src.sample_text import SAMPLE
 
 
 class TranscriptEditor(QMainWindow):
@@ -30,7 +29,6 @@ class TranscriptEditor(QMainWindow):
         self.setWindowTitle('BABABUI')
         self.resize(1100, 800)
         self.setMinimumWidth(720)
-        self.formatter = Formatter()
         self.session_path = Path(session_path) if session_path is not None else APP_DIR/'data'/'session.json'
         self.legacy_dir = Path(legacy_dir) if legacy_dir is not None else Path(__file__).parent
         self._restoring = True
@@ -52,10 +50,10 @@ class TranscriptEditor(QMainWindow):
         self.tabs.currentChanged.connect(self._tab_changed)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         bar = self.tabs.tabBar()
-        bar.attach_requested.connect(self.choose_wav)
-        bar.wav_dropped.connect(self.attach_wav)
+        bar.attach_requested.connect(self.choose_zip)
+        bar.zip_dropped.connect(self.import_zip)
         bar.duplicate_requested.connect(self.duplicate_tab)
-        bar.replace_requested.connect(self.choose_wav)
+        bar.replace_requested.connect(self.choose_zip)
         bar.close_requested.connect(self.close_tab)
         bar.tabMoved.connect(lambda *_: self.schedule_recovery())
         self.plus_btn = NewTabButton(self.tabs)
@@ -103,6 +101,8 @@ class TranscriptEditor(QMainWindow):
         for label, shortcut, callback in (
             ('New Tab', 'Ctrl+T', lambda: self.new_tab()),
             ('Open', 'Ctrl+O', lambda: self.open_file()),
+            ('Import CaseCAT ZIP', '', lambda: self.choose_zip(self.tabs.currentIndex())),
+            ('Export CaseCAT ZIP', '', self.export_casecat),
             ('Save', 'Ctrl+S', lambda: self.save_current()),
             ('Save As', 'Ctrl+Shift+S', lambda: self.save_current(save_as=True)),
             ('Duplicate Tab', '', lambda: self.duplicate_tab()),
@@ -114,12 +114,15 @@ class TranscriptEditor(QMainWindow):
             self.addAction(action)
             menu.addAction(action)
             self.file_actions[label] = action
-        self.manual_btn, manual = self._menu_button('Manual', row)
-        for label, callback in (('Strip Formatting', self.strip_formatting),
-                                ('Apply Standards', self.apply_formatting),
-                                ('Insert Sample', self.insert_sample_text),
-                                ('Batch Strip', self.batch_strip_formatting)):
-            manual.addAction(label, callback)
+        self.edit_btn, edit = self._menu_button('Edit', row)
+        edit.addAction('Attach WAV...', lambda: self.choose_wav(self.tabs.currentIndex()))
+        edit.addAction('Undo review', lambda: self.current.undo_review())
+        edit.addAction('Redo review', lambda: self.current.redo_review())
+        insert = edit.addMenu('Insert')
+        insert.addAction('Field...', lambda: self.native_edit_action('insert_native_field'))
+        insert.addAction('Insert Format Symbols...', lambda: self.native_edit_action('choose_native_symbol'))
+        edit.addAction('Fill In Field...', lambda: self.native_edit_action('edit_native_field'))
+        edit.addAction('Change Format Symbol...', lambda: self.native_edit_action('change_native_symbol'))
         self.settings_btn, settings = self._menu_button('Settings', row)
         processing = settings.addMenu('LLM processing model')
         group = QActionGroup(self)
@@ -151,10 +154,15 @@ class TranscriptEditor(QMainWindow):
         self.toggle_view_btn.clicked.connect(self.toggle_view)
         row.addWidget(self.toggle_view_btn)
         header_height = self.bababui_btn.sizeHint().height()
-        for control in (self.file_btn, self.manual_btn, self.settings_btn,
+        for control in (self.file_btn, self.edit_btn, self.settings_btn,
                         self.bababui_btn, self.toggle_view_btn, self.progress):
             control.setFixedHeight(header_height)
         self.toolbar.addWidget(container)
+
+    def native_edit_action(self, method):
+        editor = self.current.active_editor() if self.current else None
+        if editor and self.current.document.native and not editor.isReadOnly():
+            getattr(editor, method)()
 
     def _restore(self):
         documents, active = [], None
@@ -169,16 +177,6 @@ class TranscriptEditor(QMainWindow):
                 except OSError:
                     self._recovery_enabled = False
                 notice = str(exc)
-        else:
-            original, incoming = self.legacy_dir/'original.txt', self.legacy_dir/'incoming.txt'
-            if original.exists() or incoming.exists():
-                try:
-                    text = original.read_text(encoding='utf-8') if original.exists() else ''
-                    proposed = incoming.read_text(encoding='utf-8') if incoming.exists() else text
-                    documents = [Document(original=text, incoming=proposed or text,
-                                          status='Imported the previous working transcript. Save it as a named file.')]
-                except (OSError, UnicodeError) as exc:
-                    notice = f'Could not import the previous transcript: {exc}'
         for document in documents:
             self.add_document(document)
         if not documents:
@@ -192,7 +190,9 @@ class TranscriptEditor(QMainWindow):
             document.model, document.transcription_model = DEFAULT_MODEL, AUDIO_MODEL
             document.dirty = True
             document.warnings.append('Unsupported saved model selection was reset to the defaults.')
-        view = DocumentView(document)
+        view = DocumentView(document) if document.native else ImportView(document)
+        if isinstance(view, ImportView):
+            view.import_requested.connect(lambda v=view: self.choose_zip(self.tabs.indexOf(v)))
         view.changed.connect(lambda v=view: self.document_changed(v))
         index = self.tabs.addTab(view, document.title)
         self.tabs.setCurrentIndex(index)
@@ -215,13 +215,17 @@ class TranscriptEditor(QMainWindow):
         doc = view.document
         label = doc.title + (' ●' if doc.dirty else '') + (' [Working]' if doc.busy else '')
         self.tabs.setTabText(index, label)
-        tooltip = f'Text: {doc.save_path or "Unsaved"}\nWAV: {doc.wav_path or "Click or drop a WAV"}'
+        tooltip = f'Project: {doc.save_path or "Unsaved"}\nWAV: {doc.wav_path or "No audio"}'
+        if doc.native:
+            tooltip += f'\nCaseCAT job: {doc.native.job.key}'
+        else:
+            tooltip += '\nClick or drop a CaseCAT ZIP to import.'
         if doc.status:
             tooltip += '\n' + doc.status
         if doc.warnings:
             tooltip += '\n' + '\n'.join(doc.warnings)
         self.tabs.setTabToolTip(index, tooltip)
-        self.tabs.tabBar().setTabData(index, {'wav_path': doc.wav_path, 'busy': doc.busy})
+        self.tabs.tabBar().setTabData(index, {'wav_path': doc.wav_path, 'native': bool(doc.native), 'busy': doc.busy})
         for side in (AudioTabBar.LeftSide, AudioTabBar.RightSide):
             button = self.tabs.tabBar().tabButton(index, side)
             if button:
@@ -246,20 +250,28 @@ class TranscriptEditor(QMainWindow):
         if not view:
             return
         doc = view.document
-        self.manual_btn.setEnabled(not doc.busy)
+        self.edit_btn.setEnabled(bool(doc.native) and not doc.busy)
         self.settings_btn.setEnabled(not doc.busy)
         self.bababui_btn.setVisible(not doc.busy)
-        self.bababui_btn.setEnabled(not doc.busy)
+        self.bababui_btn.setEnabled(not doc.busy and bool(doc.wav_path))
         self.progress.setVisible(doc.busy)
         self.progress.setToolTip(doc.status)
         self.progress.setAccessibleDescription(doc.status)
         self.toggle_view_btn.setText('Back to Original' if doc.view else 'Show Incoming')
         self.model_actions[doc.model].setChecked(True)
+        for name in ('Save', 'Save As', 'Export CaseCAT ZIP'):
+            self.file_actions[name].setEnabled(bool(doc.native) and not doc.busy)
+        self.toggle_view_btn.setEnabled(bool(doc.native))
         self.file_actions['Close Tab'].setEnabled(not doc.busy)
+        self.file_actions['Import CaseCAT ZIP'].setEnabled(not doc.busy)
+        self.file_actions['Export CaseCAT ZIP'].setEnabled(not doc.busy and bool(doc.native))
         message = doc.status
-        if doc.warnings:
-            message += ' ' + ' '.join(doc.warnings)
+        visible_warnings = [warning for warning in doc.warnings
+                            if not doc.native or warning != doc.native.job.warnings[0]]
+        if visible_warnings:
+            message += ' ' + ' '.join(visible_warnings)
         self.show_status(message)
+        self.status_label.setToolTip('\n'.join([doc.status, *doc.warnings]))
         self.setWindowTitle(f'{doc.title}{" *" if doc.dirty else ""} - BABABUI')
 
     def show_status(self, message):
@@ -281,21 +293,108 @@ class TranscriptEditor(QMainWindow):
         if path:
             self.attach_wav(index, path)
 
-    def attach_wav(self, index, path):
+    def choose_zip(self, index):
         view = self.tabs.widget(index)
         if not view or view.document.busy:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Import CaseCAT ZIP', '', 'CaseCAT archives (*.zip *.ZIP)')
+        if path:
+            self.import_zip(index, path)
+
+    def confirm_native_replace(self, view):
+        box = QMessageBox(self)
+        box.setWindowTitle('Replace transcript')
+        box.setText('Importing this job replaces Original, Incoming and the attached audio. Save the current work first?')
+        save = box.addButton('Save', QMessageBox.AcceptRole)
+        replace = box.addButton('Replace', QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(save)
+        box.exec()
+        return 'save' if box.clickedButton() is save else 'replace' if box.clickedButton() is replace else 'cancel'
+
+    def import_zip(self, index, path):
+        view = self.tabs.widget(index)
+        if not view or view.document.busy:
+            return False
+        try:
+            bundle = inspect_archive(path)
+            key = bundle.jobs[0]
+            if len(bundle.jobs) > 1:
+                key, chosen = QInputDialog.getItem(self, 'Choose CaseCAT job', 'Job to edit:', bundle.jobs, 0, False)
+                if not chosen:
+                    return False
+            # Parsing and managed extraction finish before replacement is offered.
+            candidate = import_casecat(bundle, key)
+            if view.document.original or view.document.incoming or view.document.native:
+                answer = self.confirm_native_replace(view)
+                if answer == 'cancel' or (answer == 'save' and not self.save_view(view)):
+                    return False
+            candidate.model = view.document.model
+            candidate.transcription_model = view.document.transcription_model
+            replacement = DocumentView(candidate)
+            replacement.changed.connect(lambda v=replacement: self.document_changed(v))
+            self._last_view = None
+            self.tabs.removeTab(index)
+            self.tabs.insertTab(index, replacement, candidate.title)
+            self.tabs.setCurrentIndex(index)
+            view.deleteLater()
+            self.document_changed(replacement)
+            self.persist_session()
+            return True
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not import CaseCAT ZIP', str(exc))
+            return False
+
+    def export_casecat(self):
+        view = self.current
+        if not view or not view.document.native or view.document.busy:
+            return False
+        doc = view.document
+        suggestion = Path(doc.save_path).parent if doc.save_path else Path.home()/'Documents'
+        target, _ = QFileDialog.getSaveFileName(self, 'Export reviewed Original to CaseCAT ZIP',
+            str(suggestion / doc.native.bundle.export_name), 'CaseCAT archives (*.zip)',
+            options=QFileDialog.DontConfirmOverwrite)
+        if not target:
+            return False
+        if not Path(target).suffix:
+            target += '.zip'
+        try:
+            overwrite = Path(target).exists()
+            if overwrite:
+                answer = QMessageBox.question(self, 'Replace exported ZIP', 'Replace the existing destination ZIP?',
+                                               QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+                if answer != QMessageBox.Yes:
+                    return False
+            doc.export_casecat(target, overwrite=overwrite)
+            doc.status = 'CaseCAT ZIP exported. Working project save status is unchanged.'
+            self.document_changed(view)
+            return True
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not export CaseCAT ZIP', str(exc))
+            return False
+
+    def attach_wav(self, index, path):
+        view = self.tabs.widget(index)
+        if not view or not view.document.native or view.document.busy:
             return
         path = Path(path).resolve()
         if not path.is_file() or path.suffix.lower() != '.wav':
             return
-        view.document.wav_path = str(path)
+        view.document.audio_override = view.document.wav_path = str(path)
+        if view.playback:
+            view.playback.stop()
+            view.layout().removeWidget(view.playback)
+            view.playback.deleteLater()
+            view.playback = None
+        view.setup_playback(view.layout())
         view.document.status = 'WAV attached. Click BABABUI to process.'
         view.edited()
         self.tabs.setCurrentWidget(view)
 
     def open_file(self, path=None):
         if path is None:
-            path, _ = QFileDialog.getOpenFileName(self, 'Open transcript', '', 'Text files (*.txt)')
+            path, _ = QFileDialog.getOpenFileName(self, 'Open CaseCAT working project', '',
+                                                 'BABABUI projects (*.bababui)')
         if not path:
             return
         existing = next((v for v in self.views() if v.document.save_path
@@ -320,11 +419,12 @@ class TranscriptEditor(QMainWindow):
             directory = Path(doc.save_path).parent if doc.save_path else Path.home()/'Documents'
             suggestion = suggested_path(doc, directory)
             target, _ = QFileDialog.getSaveFileName(self, 'Save transcript version', str(suggestion),
-                'Text files (*.txt)', options=QFileDialog.DontConfirmOverwrite)
+                'BABABUI projects (*.bababui)',
+                options=QFileDialog.DontConfirmOverwrite)
             if not target:
                 return False
             if not Path(target).suffix:
-                target += '.txt'
+                target += '.bababui'
         try:
             if any(v is not view and v.document.save_path and canonical(v.document.save_path) == canonical(target)
                    for v in self.views()):
@@ -367,8 +467,8 @@ class TranscriptEditor(QMainWindow):
         if not view or view.document.busy:
             return
         doc = view.document
-        if not doc.wav_path:
-            doc.status = 'Attach a WAV to this tab first.'
+        if not doc.native or not doc.wav_path:
+            doc.status = 'Import a CaseCAT ZIP containing a WAV to process audio.'
             self.document_changed(view)
             return
         try:
@@ -376,7 +476,7 @@ class TranscriptEditor(QMainWindow):
                               PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()))
             view.set_busy(True)
             doc.status = 'Starting...'
-            doc.warnings = []
+            doc.warnings = list(doc.native.job.warnings) if doc.native else []
             self.document_changed(view)
             self.persist_session()
             self.jobs.start(request)
@@ -407,50 +507,6 @@ class TranscriptEditor(QMainWindow):
             view.set_busy(False)
             self.document_changed(view)
             self.persist_session()
-
-    def _manual_editor(self):
-        view = self.current
-        if not view or view.document.busy:
-            return None
-        editor = view.active_editor()
-        if editor is None:
-            view.document.status = 'Resolve the incoming changes first.'
-            self.document_changed(view)
-        return editor
-
-    def insert_sample_text(self):
-        editor = self._manual_editor()
-        if editor is not None:
-            editor.setPlainText(SAMPLE)
-
-    def strip_formatting(self):
-        editor = self._manual_editor()
-        if editor is not None:
-            editor.setPlainText(self.formatter.strip_formatting(editor.toPlainText()))
-
-    def apply_formatting(self):
-        editor = self._manual_editor()
-        if editor is not None:
-            text, pages = self.formatter.apply_formatting(editor.toPlainText())
-            editor.setPlainText(text)
-            self.current.document.status = f'Applied standards: {pages} pages generated.'
-            self.document_changed(self.current)
-
-    def batch_strip_formatting(self):
-        view = self.current
-        if not view or view.document.busy:
-            return
-        start = str(Path(view.document.save_path).parent) if view.document.save_path else ''
-        folder = QFileDialog.getExistingDirectory(self, 'Choose folder of text files to strip', start)
-        if not folder:
-            return
-        try:
-            results = self.formatter.batch_strip_formatting(folder, str(Path(folder)/'stripped'))
-            view.document.status = f'Batch strip: {len(results["processed"])} processed, {len(results["failed"])} failed.'
-            self.document_changed(view)
-        except (OSError, ValueError) as exc:
-            view.document.status = str(exc)
-            self.document_changed(view)
 
     def schedule_recovery(self):
         if not self._restoring:

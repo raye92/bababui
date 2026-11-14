@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from transcript_formatting import TranscriptFormatter
+from shared.transcript_formatting import TranscriptFormatter
 from evaluation.setups import formatted_transcript, grading_text
 
 

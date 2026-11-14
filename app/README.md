@@ -63,7 +63,7 @@ rules, examples, and explanations from `MWW SUMMARY - smileys fixed.pdf`. Edit t
 convert speaker labels into examination headings, Q/A, and speaker-tagged colloquy,
 preserving speaker numbers, order, and testimony. The model returns one logical
 line per paragraph, with labels and paragraph indentation. Before sending the
-response to Incoming, the shared `transcript_formatting.py` formatter wraps at
+response to Incoming, the shared transcript formatter wraps at
 56 characters, including indentation and labels but excluding the line-number
 gutter. Continuation lines start flush left. Words and hyphenated terms are never
 split; a single longer token may exceed the width. It then adds numbered,

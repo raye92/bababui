@@ -115,7 +115,7 @@ def test_saved_runs_display_and_compare_without_requests(tmp_path, monkeypatch):
 
 
 def test_start_and_rerender_do_not_duplicate_calls(tmp_path, monkeypatch):
-    from evaluation.client import DeepSeekClient
+    from shared.client import DeepSeekClient
     store = Store(tmp_path)
     save_dataset(store, "Synthetic", [{"id": "x", "input": "hi", "output": "Hi."}])
     store.save_prompt("v1", "Correct", "Rules", model="deepseek-flash")
@@ -210,7 +210,7 @@ def test_dataset_update_and_save_as_new(tmp_path, monkeypatch):
 
 
 def test_retry_uses_saved_model_filters_and_dataset(tmp_path, monkeypatch):
-    from evaluation.client import DeepSeekClient
+    from shared.client import DeepSeekClient
 
     store = Store(tmp_path)
     case = {"id": "x", "input": "          1    /#*old say /xyz", "output": "          1    Say."}

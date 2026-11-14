@@ -5,8 +5,8 @@ from pathlib import Path
 import re
 import tempfile
 
-from evaluation.media import probe
-from evaluation.storage import atomic_copy
+from shared.media import probe
+from shared.storage import atomic_copy
 
 
 def folder_files(folder):
