@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 
 from shared.storage import atomic_bytes, file_lock
-from app.src.casecat import archive, project
+from app.src.casecat import archive, codec, project
 
 SAVE_LOCK_DIR = Path(__file__).resolve().parents[1] / 'data' / 'save-locks'
 NATIVE_ASSET_DIR = Path(__file__).resolve().parents[1] / 'data' / 'casecat'
@@ -46,6 +46,12 @@ class Document:
                         model=self.model, transcription_model=self.transcription_model,
                         view=self.view, center_line=self.center_line, warnings=list(self.warnings),
                         native=self.native.duplicate() if self.native else None)
+
+    def update_warnings(self, warnings=()):
+        native_warnings = self.native.job.warnings if self.native else ()
+        self.warnings = list(dict.fromkeys(
+            warning for warning in (*native_warnings, *warnings)
+            if warning != codec.NO_WAV_NOTICE or not self.wav_path))
 
     def set_text(self, side, text, *, revision=None):
         if side not in ('original', 'incoming') or not isinstance(text, str):
@@ -148,7 +154,7 @@ def open_document(path):
         wav = archive.materialize_audio(native.bundle, native.job, NATIVE_ASSET_DIR)
         doc.wav_path = doc.audio_override or (str(wav) if wav else None)
         # Capability warnings are not trusted to the project file's metadata.
-        doc.warnings = list(dict.fromkeys([*native.job.warnings, *doc.warnings]))
+        doc.update_warnings(doc.warnings)
         return doc
     raise ValueError('Plain-text documents are no longer supported. Import a CaseCAT ZIP.')
 
@@ -184,7 +190,7 @@ def load_session(path):
             if native:
                 wav = archive.materialize_audio(native.bundle, native.job, NATIVE_ASSET_DIR)
                 doc.wav_path = doc.audio_override or (str(wav) if wav else None)
-                doc.warnings = list(dict.fromkeys([*native.job.warnings, *doc.warnings]))
+                doc.update_warnings(doc.warnings)
             if (not isinstance(doc.id, str) or doc.id in ids
                     or not all(isinstance(v, str) for v in (doc.original, doc.incoming, doc.model, doc.status))
                     or doc.view not in (0, 1) or not isinstance(doc.center_line, int)

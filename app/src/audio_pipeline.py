@@ -9,7 +9,6 @@ from pathlib import Path
 import re
 import tempfile
 import time
-import uuid
 
 from shared import media
 from shared.transcription import GeminiTranscriber
@@ -151,49 +150,38 @@ class AudioPipeline:
         self.client = GeminiTranscriber(key, sdk)
         self.cache = Path(cache)
 
-    def transcribe_segment(self, path, state_path, warnings):
+    def transcribe_segment(self, path):
         sdk = self.client.client()
-        name = 'files/' + uuid.uuid4().hex
-        save_json(state_path, {'remote': name})
-        try:
-            uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav', 'name': name})
-            name = uploaded.name
-            save_json(state_path, {'remote': name})
-            deadline = time.monotonic()+300
-            while str(getattr(uploaded.state, 'value', uploaded.state)).upper() == 'PROCESSING':
-                if time.monotonic() > deadline:
-                    raise ValueError('Audio upload processing timed out.')
-                time.sleep(1)
-                uploaded = sdk.files.get(name=name)
-            if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
-                raise ValueError('Audio upload processing failed.')
-            response = sdk.interactions.create(model=AUDIO_MODEL,
-                input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
-                generation_config={'transcription_config': {'mode': {'type': 'verbatim',
-                    'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}}},
-                automatic_continuation=False, timeout=1800)
-            # Preserve the response before validation, including malformed timestamps.
-            debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            debug_path = debug_dir / f'response-{time.time_ns()}.json'
-            payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
-            debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
-                                  encoding='utf-8')
-            debug_path.with_suffix('.txt').write_text('\n'.join(
-                block.text
-                for step in getattr(response, 'steps', None) or []
-                if getattr(step, 'type', None) == 'model_output'
-                for block in getattr(step, 'content', None) or []
-                if getattr(block, 'type', None) == 'text'), encoding='utf-8')
-            if getattr(response.status, 'value', response.status) != 'completed':
-                raise ValueError('Transcription did not complete; existing text was preserved.')
-            return parse_words(response)
-        finally:
-            try:
-                self.client.delete(name)
-                save_json(state_path, {'remote': None})
-            except Exception:
-                warnings.append('Remote audio cleanup is pending; retry BABABUI to attempt cleanup again.')
+        uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav'})
+        deadline = time.monotonic()+300
+        while str(getattr(uploaded.state, 'value', uploaded.state)).upper() == 'PROCESSING':
+            if time.monotonic() > deadline:
+                raise ValueError('Audio upload processing timed out.')
+            time.sleep(1)
+            uploaded = sdk.files.get(name=uploaded.name)
+        if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
+            raise ValueError('Audio upload processing failed.')
+        response = sdk.interactions.create(model=AUDIO_MODEL,
+            input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
+            generation_config={'transcription_config': {'mode': {'type': 'verbatim',
+                'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}}},
+            automatic_continuation=False, timeout=1800)
+        # Preserve the response before validation, including malformed timestamps.
+        debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_dir / f'response-{time.time_ns()}.json'
+        payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
+        debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
+                              encoding='utf-8')
+        debug_path.with_suffix('.txt').write_text('\n'.join(
+            block.text
+            for step in getattr(response, 'steps', None) or []
+            if getattr(step, 'type', None) == 'model_output'
+            for block in getattr(step, 'content', None) or []
+            if getattr(block, 'type', None) == 'text'), encoding='utf-8')
+        if getattr(response.status, 'value', response.status) != 'completed':
+            raise ValueError('Transcription did not complete; existing text was preserved.')
+        return parse_words(response)
 
     def run(self, path, progress=lambda message: None):
         path = Path(path)
@@ -209,36 +197,21 @@ class AudioPipeline:
             return self._run_locked(path, plan, directory, progress)
 
     def _run_locked(self, path, plan, directory, progress):
-        state_path = directory / 'state.json'
-        warnings, chunks = [], []
-        if state_path.exists():
-            remote = json.loads(state_path.read_text(encoding='utf-8')).get('remote')
-            if remote:
-                try:
-                    self.client.delete(remote)
-                    save_json(state_path, {'remote': None})
-                except Exception:
-                    warnings.append('Remote audio cleanup remains pending. Cached transcription can still be used.')
+        chunks = []
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing chunk {i+1} of {len(plan)}...')
             cached = directory / f'chunk-{i}.json'
             if cached.exists():
                 words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
             else:
-                # Do not replace the pending-upload record with another upload.
-                if state_path.exists():
-                    remote = json.loads(state_path.read_text(encoding='utf-8')).get('remote')
-                    if remote:
-                        self.client.delete(remote)
-                        save_json(state_path, {'remote': None})
                 with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
                     prepared = Path(temporary) / 'segment.wav'
                     media.prepare(path, {'start': start, 'end': end}, prepared)
-                    words = self.transcribe_segment(prepared, state_path, warnings)
+                    words = self.transcribe_segment(prepared)
                 save_json(cached, [asdict(w) for w in words])
             chunks.append(words)
         progress('Matching speakers and joining transcript...')
         text, stitch_warnings = stitch(chunks)
         if not text.strip():
             raise ValueError('Transcription returned no usable text.')
-        return text, warnings + stitch_warnings
+        return text, stitch_warnings

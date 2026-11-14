@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace as NS
 
 import pytest
@@ -97,11 +98,11 @@ def test_reversed_edge_word_requires_both_neighbors(position):
         parse_words(NS(steps=[NS(type='model_output', content=[block])]))
 
 
-def test_real_sdk_contract_cleanup_and_cache(tmp_path, monkeypatch):
+def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
     import httpx
     from google import genai
-    from app.src.audio_pipeline import AudioPipeline, media
-    requests, deleted = [], []
+    from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media, save_json
+    requests = []
     text = 'Hello there.'
     def transport(request):
         import json
@@ -112,10 +113,11 @@ def test_real_sdk_contract_cleanup_and_cache(tmp_path, monkeypatch):
                  'start_offset': '0s', 'end_offset': '0.5s'},
                 {'type': 'word_info', 'speaker': 's1', 'start_index': 6, 'end_index': 12,
                  'start_offset': '0.5s', 'end_offset': '1s'}]}]}]})
-    files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'),
-               delete=lambda **kw: deleted.append(kw['name']))
+    files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'))
     wav = tmp_path / 'source.wav'
     wav.write_bytes(b'wav')
+    directory = tmp_path/'cache'/AUDIO_MODEL/'overlap-v1'/hashlib.sha256(b'wav').hexdigest()
+    save_json(directory/'state.json', {'remote': 'files/old'})
     monkeypatch.setattr(media, 'probe', lambda _: 1)
     monkeypatch.setattr(media, 'prepare', lambda *a: None)
     with genai.Client(api_key='fake', http_options={'client_args': {
@@ -124,20 +126,10 @@ def test_real_sdk_contract_cleanup_and_cache(tmp_path, monkeypatch):
         result, warnings = pipeline.run(wav)
         assert result == 'Speaker 1: Hello there.' and not warnings
         assert pipeline.run(wav) == (result, [])
-    assert len(requests) == 1 and deleted == ['files/test']
+    assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
+    assert len(requests) == 1
     assert requests[0]['generation_config']['transcription_config']['mode'] == {
         'type': 'verbatim', 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}
-
-
-def test_transcription_failure_still_cleans_remote(tmp_path):
-    from app.src.audio_pipeline import AudioPipeline
-    deleted = []
-    files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'),
-               delete=lambda **kw: deleted.append(kw['name']))
-    sdk = NS(files=files, interactions=NS(create=lambda **kw: NS(status='incomplete')))
-    with pytest.raises(ValueError, match='complete'):
-        AudioPipeline('fake', tmp_path, sdk).transcribe_segment(tmp_path/'x.wav', tmp_path/'state.json', [])
-    assert deleted == ['files/test']
 
 
 def test_missing_annotations_and_bad_timestamps_are_rejected():
@@ -152,26 +144,7 @@ def test_ambiguous_speakers_are_not_merged():
     assert 'Speaker 3:' in text and warnings
 
 
-def test_cached_text_survives_pending_cleanup_failure(tmp_path, monkeypatch):
-    import hashlib
-    from dataclasses import asdict
-    from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media, save_json
-    wav = tmp_path/'input.wav'
-    wav.write_bytes(b'wav')
-    directory = tmp_path/'cache'/AUDIO_MODEL/'overlap-v1'/hashlib.sha256(b'wav').hexdigest()
-    save_json(directory/'chunk-0.json', [asdict(Word('Hello', 'a', 0, 1))])
-    save_json(directory/'state.json', {'remote': 'files/pending'})
-    monkeypatch.setattr(media, 'probe', lambda _: 1)
-    pipeline = AudioPipeline('fake', tmp_path/'cache')
-    def fail(name):
-        raise ValueError('cleanup unavailable')
-    monkeypatch.setattr(pipeline.client, 'delete', fail)
-    text, warnings = pipeline.run(wav)
-    assert text == 'Speaker 1: Hello' and warnings
-
-
 def test_concurrent_cache_use_is_rejected(tmp_path, monkeypatch):
-    import hashlib
     from shared.storage import file_lock
     from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media
     wav = tmp_path/'input.wav'
@@ -192,7 +165,7 @@ def test_partial_run_reuses_first_chunk(tmp_path, monkeypatch):
     monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(segment))
     pipeline = AudioPipeline('fake', tmp_path/'cache')
     attempts = []
-    def transcribe(path, state, warnings):
+    def transcribe(path):
         attempts.append(path)
         if len(attempts) == 2:
             raise ValueError('temporary failure')

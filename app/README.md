@@ -114,9 +114,9 @@ create a pending change.
 - `data/session.json`: local recovery for all open tabs, including unsaved text.
 - `data/save-locks/`: locks protecting document saves across app instances.
 - `data/transcriptions/`: cached word annotations, keyed by WAV content and model.
-  Retrying formatting reuses completed transcription chunks. Remote uploads are
-  deleted after transcription; failed cleanup is retried on the next run for that
-  recording. Local caches contain transcript data and can be deleted when unused.
+  Retrying formatting reuses completed transcription chunks. Gemini automatically
+  deletes uploaded audio after 48 hours. Local caches contain transcript data
+  and can be deleted when unused.
 
 Secrets, working transcripts, and caches are excluded from Git. Test with:
 

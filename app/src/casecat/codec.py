@@ -10,6 +10,7 @@ from .elements import NativeElement, field_name
 
 RENDERING_NOTICE = ('CaseCAT native editing. New wording inherits source passage timing; '
                     'unsupported native structures are rejected during export.')
+NO_WAV_NOTICE = 'This job has no WAV. Transcript editing is available; audio processing is disabled.'
 
 
 def u32(data, offset):
@@ -208,7 +209,7 @@ def load_job(bundle, key):
     audio_member = bundle.member(key + '.wav')
     warnings = [RENDERING_NOTICE]
     if audio_member is None:
-        warnings.append('This job has no WAV. Transcript editing is available; audio processing is disabled.')
+        warnings.append(NO_WAV_NOTICE)
     return NativeJob(key, bundle.digest, native, notes, audio_member, revision, revision,
                      tuple(warnings), tuple(stroke_clocks))
 

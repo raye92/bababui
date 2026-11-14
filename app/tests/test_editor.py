@@ -98,11 +98,14 @@ def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, 
     wav = tmp_path/'test.wav'
     wav.write_bytes(b'wav')
     first = window.current
+    assert 'This job has no WAV' in window.status_label.text()
     window.attach_wav(0, str(wav))
+    assert 'This job has no WAV' not in window.status_label.text()
     first.editor.setPlainText('First original')
     requests = []
     monkeypatch.setattr(window.jobs, 'start', requests.append)
     window.run_bababui()
+    assert 'This job has no WAV' not in window.status_label.text()
     assert first.document.busy and first.editor.isReadOnly()
     assert window.progress.isVisible() and not window.bababui_btn.isVisible()
     window.new_tab()
@@ -121,6 +124,7 @@ def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, 
     assert second.document.original == 'Second original' and second.document.incoming == 'Second result'
     assert window.current is second and len(requests) == 2
     assert 'Review speakers' in first.document.warnings
+    assert 'This job has no WAV' not in window.tabs.tabToolTip(0)
 
 
 def test_session_restore_and_legacy_migration(window, tmp_path):

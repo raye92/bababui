@@ -411,7 +411,7 @@ class DocumentView(QWidget):
             return
         self._review_undo.clear()
         self._review_redo.clear()
-        self.document.warnings = list(dict.fromkeys([*self.document.native.job.warnings, *warnings]))
+        self.document.update_warnings(warnings)
         self.document.status = 'Incoming updated. Review the suggested revisions.'
         self._automatic_review(automatic_before)
         self.refresh()

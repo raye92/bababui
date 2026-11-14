@@ -406,6 +406,7 @@ class TranscriptEditor(QMainWindow):
         if not path.is_file() or path.suffix.lower() != '.wav':
             return
         view.document.audio_override = view.document.wav_path = str(path)
+        view.document.update_warnings(view.document.warnings)
         if view.playback:
             view.playback.stop()
             view.layout().removeWidget(view.playback)
@@ -493,7 +494,7 @@ class TranscriptEditor(QMainWindow):
             return
         doc = view.document
         if not doc.native or not doc.wav_path:
-            doc.status = 'Import a CaseCAT ZIP containing a WAV to process audio.'
+            doc.status = 'Import a CaseCAT ZIP with audio or attach a WAV to an imported job.'
             self.document_changed(view)
             return
         try:
@@ -501,7 +502,7 @@ class TranscriptEditor(QMainWindow):
                               PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()))
             view.set_busy(True)
             doc.status = 'Starting...'
-            doc.warnings = list(doc.native.job.warnings) if doc.native else []
+            doc.update_warnings()
             self.document_changed(view)
             self.persist_session()
             self.jobs.start(request)
