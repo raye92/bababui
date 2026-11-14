@@ -31,10 +31,10 @@ class _NativeTransactions:
     history_action = None
     whole_text_update = False
 
-    def setPlainText(self, text):
+    def setPlainText(self, text, *, prepared=None):
         self.whole_text_update = True
         try:
-            super().setPlainText(self._presentation_text(text))
+            super().setPlainText(self._presentation_text(text, prepared))
             self._after_set_plaintext()
         finally:
             self.whole_text_update = False
@@ -42,9 +42,6 @@ class _NativeTransactions:
 
     def _after_set_plaintext(self):
         pass
-
-    def _presentation_text(self, text):
-        return text
 
     def undo(self):
         self.history_action = 'undo'
@@ -542,14 +539,14 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         height = self.document().pageCount() * self._page_height
         self.verticalScrollBar().setMaximum(max(0, math.ceil(height - self.viewport().height())))
 
-    def _presentation_text(self, text):
+    def _presentation_text(self, text, prepared=None):
         self._paragraph_styles = {}
         if self._native_source:
             bundle, job = self._native_source
             if job.text == text:
                 from app.src.casecat.presentation import presentation
                 try:
-                    display, styles = presentation(job, bundle)
+                    display, styles = prepared if prepared is not None else presentation(job, bundle)
                 except ValueError:
                     return text
                 if display.replace('\u00a0', ' ') == text:

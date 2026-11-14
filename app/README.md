@@ -1,7 +1,7 @@
 # Transcript editor
 
 The desktop editor compares the current transcript with an Incoming version.
-Accept or deny revisions in the inline diff.
+Accept or reject revisions in the inline diff.
 
 ## Run
 
@@ -87,7 +87,7 @@ prompt. Evaluation keeps its own saved prompts.
 The inline diff compares transcript content, without printed line numbers,
 page layout, or wrapping. Headings, examiner labels, questions, answers, and
 speaker turns are matched in order. Changed words are highlighted inside
-paired passages. Accept and Deny apply to those passages; numbered documents
+paired passages. Accept and Reject apply to those passages. Numbered documents
 are wrapped and numbered again after each decision. Formatting alone does not
 create a pending change.
 

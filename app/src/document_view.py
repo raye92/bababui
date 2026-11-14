@@ -1,6 +1,6 @@
 """One structured document and its review transactions."""
 from copy import deepcopy
-from PySide6.QtCore import Signal, QTimer, Qt
+from PySide6.QtCore import Signal, Slot, QThread, QTimer, Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit
 from app.src.native_editor import NativeTranscriptEditor
@@ -9,6 +9,7 @@ from app.src.review_model import build_review
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
+from app.src.casecat.presentation import presentation
 from app.src.suggestions import propose, resolve
 from app.src.suggestion_filter import begin_review, override_speaker, track_decision, auto_accept
 
@@ -36,6 +37,28 @@ class ImportView(QWidget):
     def edited(self): self.changed.emit()
 
 
+class ReviewPreviewWorker(QThread):
+    def __init__(self, bundle, job, before, change, accept, index, parent):
+        super().__init__(parent)
+        self.bundle, self.job = bundle, job
+        self.before, self.change, self.accept, self.index = before, change, accept, index
+        self.previews = {}
+        self.error = None
+
+    def run(self):
+        try:
+            self.revisions = resolve(*self.before[:2], self.change, self.accept)
+            for side, old, revision in zip(('original', 'incoming'), self.before, self.revisions):
+                if old.text != revision.text:
+                    try:
+                        self.previews[side] = presentation(self.job.with_revision(revision), self.bundle)
+                    except ValueError:
+                        self.previews[side] = (revision.text, {})
+            self.model = build_review(*self.revisions)
+        except Exception as exc:
+            self.error = exc
+
+
 class DocumentView(QWidget):
     changed = Signal()
 
@@ -55,6 +78,7 @@ class DocumentView(QWidget):
         self._position_pending = True
         self._native_history = {'original': {}, 'incoming': {}}
         self._review_undo, self._review_redo = [], []
+        self._review_worker = None
         if document.native.original != document.native.incoming or automatic_before:
             self._automatic_review(automatic_before)
         self.stack = QStackedWidget()
@@ -68,7 +92,7 @@ class DocumentView(QWidget):
         self.inline_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.inline_editor.source_activated.connect(self._seek_review_passage)
         self.diff_view = ReviewView()
-        self.diff_view.requested.connect(self.review)
+        self.diff_view.requested.connect(self._start_review)
         self.diff_view.selected.connect(self.select_suggestion)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
@@ -162,14 +186,14 @@ class DocumentView(QWidget):
         self.active_view().scroll_to_center_line(self.document.center_line)
         self._position_pending = False
 
-    def _set_text(self, editor, text):
+    def _set_text(self, editor, text, prepared=None):
         changed = editor.toPlainText() != text
         side = 'original' if editor is self.editor else 'incoming'
         state = self.document.native
         revision = getattr(state, side)
         editor.set_native_source(state.bundle, state.job.with_revision(revision))
         if changed:
-            editor.setPlainText(text)
+            editor.setPlainText(text, prepared=prepared)
         steps = editor.document().availableUndoSteps()
         if changed or not self._native_history[side]:
             self._native_history[side] = {steps: revision}
@@ -236,12 +260,13 @@ class DocumentView(QWidget):
             doc.set_text('incoming', revision.text, revision=revision)
         self.edited()
 
-    def refresh(self):
+    def refresh(self, *, previews=None, model=None):
         self._updating = True
         doc = self.document
-        self._set_text(self.editor, doc.original)
-        self._set_text(self.incoming_editor, doc.incoming)
-        self.review_model = build_review(doc.native.original, doc.native.incoming)
+        previews = previews or {}
+        self._set_text(self.editor, doc.original, previews.get('original'))
+        self._set_text(self.incoming_editor, doc.incoming, previews.get('incoming'))
+        self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
         self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
         self.inline_editor.set_model(self.review_model)
         self.original_stack.setCurrentWidget(self.inline_page if self.review_model.edits else self.original_page)
@@ -284,6 +309,8 @@ class DocumentView(QWidget):
             editor.set_review_marks(marks, insertions)
 
     def select_inline(self, index):
+        if self._review_worker is not None:
+            return
         self._inline_selection = True
         try:
             self.diff_view.select(index)
@@ -311,6 +338,8 @@ class DocumentView(QWidget):
             editor.scroll_to_center_line(line)
 
     def select_at_cursor(self, editor, side):
+        if self._review_worker is not None:
+            return
         position = utf16_index(getattr(self.document, side), editor.textCursor().position())
         for index, change in enumerate(self.diff_view.changes):
             for a, b, c, d in change.ranges:
@@ -323,29 +352,75 @@ class DocumentView(QWidget):
         self.document.dirty = True
         self.changed.emit()
 
-    def review(self, index, accept):
+    def _start_review(self, index, accept):
+        self.review(index, accept, background=True)
+
+    def review(self, index, accept, *, background=False):
         if self.document.busy:
             return
         state = self.document.native
         before = state.original, state.incoming, deepcopy(state.review)
         try:
             change = self.diff_view.changes[index]
-            result = resolve(state.original, state.incoming, change, accept)
+            if not background:
+                result = resolve(state.original, state.incoming, change, accept)
         except (ValueError, IndexError) as exc:
             self.document.status = str(exc)
             self.refresh()
             return
+        if background:
+            self._review_worker = worker = ReviewPreviewWorker(
+                state.bundle, state.job, before, change, accept, index, self)
+            worker.finished.connect(self._finish_review)
+            self.set_busy(True)
+            self.diff_view.show_next_pending(index)
+            self.changed.emit()
+            worker.start()
+            return
+        self._apply_review(index, before, result)
+
+    @Slot()
+    def _finish_review(self):
+        worker = self._review_worker
+        self._review_worker = None
+        worker.deleteLater()
+        self.set_busy(False)
+        if worker.error is not None:
+            self.document.status = str(worker.error)
+            self.diff_view.filter_speaker(self.diff_view.speaker_filter, select=False)
+            self.diff_view.select(worker.index)
+            self.changed.emit()
+            return
+        self._apply_review(worker.index, worker.before, worker.revisions,
+                           previews=worker.previews, model=worker.model)
+
+    def _apply_review(self, index, before, result, *, previews=None, model=None):
+        state = self.document.native
+        change = self.diff_view.changes[index]
+        # Use offsets from the revision the decision leaves intact. The new
+        # diff can shift indices or regroup edits around the resolved change.
+        side = slice(0, 2) if result[0] is before[0] else slice(2, 4)
+        pending = self.diff_view.current
+        next_ranges = ()
+        if model is not None and pending >= 0 and pending != index:
+            next_ranges = tuple(span[side] for span in self.diff_view.changes[pending].ranges)
         self._review_undo.append(before)
         self._review_redo.clear()
         state.original, state.incoming = result
         track_decision(state.review, change, before[1].text, state.incoming.text)
-        self.refresh()
+        self.refresh(previews=previews, model=model)
         visible = self.diff_view.visible_indices
         if visible:
-            self.diff_view.select(next((i for i in visible if i >= index), visible[-1]))
+            target = next((i for i in visible if i >= index), visible[-1])
+            if next_ranges:
+                target = next((i for i in visible if tuple(
+                    span[side] for span in self.diff_view.changes[i].ranges) == next_ranges), target)
+            self.diff_view.select(target)
         self.edited()
 
     def change_speaker_mapping(self, speaker, name):
+        if self._review_worker is not None:
+            return
         state = self.document.native
         before = state.original, state.incoming, deepcopy(state.review)
         try:
@@ -396,7 +471,8 @@ class DocumentView(QWidget):
 
     def toggle_view(self):
         self.capture_position()
-        self.refresh()
+        if self._review_worker is None:
+            self.refresh()
         self.stack.setCurrentIndex(1-self.stack.currentIndex())
         self.document.view = self.stack.currentIndex()
         self.schedule_restore()

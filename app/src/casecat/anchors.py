@@ -1,5 +1,6 @@
 """Immutable editorial associations, independent of Qt and the native writer."""
 from dataclasses import asdict, dataclass, replace
+from functools import cached_property
 import uuid
 
 from .elements import NativeElement, edited_elements, paragraph_symbols
@@ -52,7 +53,7 @@ class Revision:
     all_caps: bool = False
     definitions: tuple[tuple[str, str], ...] = ()
 
-    @property
+    @cached_property
     def text(self):
         return ''.join(span.content for span in self.spans)
 
@@ -149,7 +150,7 @@ class Revision:
         return start, end
 
     def adopt(self, start, end, source, source_start, source_end, *, at_destination=False):
-        """Accept/deny a passage using the selected revision's associations."""
+        """Accept or reject a passage using the selected revision's associations."""
         if not 0 <= source_start <= source_end <= len(source.text):
             raise ValueError('Invalid source revision range.')
         if at_destination and start == end:

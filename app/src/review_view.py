@@ -165,12 +165,12 @@ class ReviewView(QWidget):
                 label.setStyleSheet('padding:4px;')
                 rows.addWidget(label)
             buttons = QHBoxLayout()
-            for caption, keep in (('Keep', True), ('Undo', False)):
+            for caption, accept in (('Accept', True), ('Reject', False)):
                 button = QPushButton(caption)
-                button.clicked.connect(lambda _, i=index, accepted=keep, snapshot=model:
+                button.clicked.connect(lambda _, i=index, accepted=accept, snapshot=model:
                                        self.requested.emit(i, accepted) if self.model is snapshot else None)
-                button.setToolTip('Keep the proposed change.' if keep else 'Restore the original wording for this change.')
-                color = '#1f883d' if keep else '#cf222e'
+                button.setToolTip('Apply the proposed change.' if accept else 'Keep the original for this change.')
+                color = '#1f883d' if accept else '#cf222e'
                 button.setStyleSheet(f'background:{color}; color:white; padding:4px; border-radius:3px;')
                 buttons.addWidget(button)
             rows.addLayout(buttons)
@@ -181,7 +181,7 @@ class ReviewView(QWidget):
         if old:
             old.deleteLater()
         self.scroll.setWidget(root)
-        self.current = min(self.current, max(0, len(self.changes)-1))
+        self.current = max(0, min(self.current, len(self.changes)-1))
         self.filter_speaker(self.speaker_filter, select=False)
         self._mark_selected()
 
@@ -274,6 +274,15 @@ class ReviewView(QWidget):
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
+
+    def show_next_pending(self, index):
+        self.count.setText('Updating preview…')
+        remaining = [i for i in self.visible_indices if i != index]
+        if remaining:
+            self.select(next((i for i in remaining if i > index), remaining[-1]))
+        else:
+            self.current = -1
+            self._mark_selected()
 
     def select(self, index):
         if 0 <= index < len(self.changes):

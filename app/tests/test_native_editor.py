@@ -1,4 +1,5 @@
 import os
+from time import monotonic
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import Qt, QMimeData, QUrl
@@ -155,10 +156,14 @@ def test_native_review_preserves_blank_paragraphs_and_accepts_associations(nativ
     view.receive('Hello\n\nworld.\n', [])
     proposal = view.document.native.incoming
     assert view.diff_view.has_changes
-    buttons = [b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep']
+    buttons = [b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Accept']
     assert buttons
     while view.diff_view.has_changes:
-        next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep').click()
+        next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Accept').click()
+        deadline = monotonic() + 5
+        while view.document.busy and monotonic() < deadline:
+            QTest.qWait(5)
+        assert not view.document.busy
     assert view.document.original == 'Hello\n\nworld.\n'
     assert view.document.native.original == view.document.native.incoming
     assert view.document.native.original.text == proposal.text

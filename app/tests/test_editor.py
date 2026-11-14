@@ -1,9 +1,10 @@
 import os
 from pathlib import Path
 import sys
+from time import monotonic
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPlainTextEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QPlainTextEdit, QPushButton
 from PySide6.QtCore import Qt, QMimeData, QUrl
 from PySide6.QtGui import QDropEvent, QFontDatabase, QFont
 from PySide6.QtTest import QTest
@@ -171,10 +172,58 @@ def test_diff_review_and_busy_scroll(window):
     assert all(e.isReadOnly() for e in view.diff_view.findChildren(QPlainTextEdit))
     assert all(not b.isEnabled() for b in view.diff_view.findChildren(QPushButton))
     view.set_busy(False)
-    button = next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep')
+    button = next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Accept')
     button.click()
+    try:
+        assert view.document.busy
+        assert view.diff_view.cards[0].isHidden()
+        assert 'Updating preview' in view.diff_view.count.text()
+    finally:
+        wait_for_review(view)
+    assert not view.document.busy
     assert view.document.original == view.document.incoming == 'Shared\nIncoming'
     assert view.original_stack.currentWidget().editor is view.editor
+
+
+def wait_for_review(view):
+    deadline = monotonic() + 5
+    while view.document.busy and monotonic() < deadline:
+        QTest.qWait(5)
+    assert not view.document.busy
+
+
+@pytest.mark.parametrize('action', ['Accept', 'Reject'])
+def test_next_suggestion_is_shown_and_focused_before_preview_is_ready(window, action):
+    view = window.current
+    middle = '\n'.join(f'Shared paragraph {i}.' for i in range(55))
+    original = f'The witness saw a truck.\n{middle}\nThe report mentions a dog.'
+    incoming = f'The witness saw a bicycle.\n{middle}\nThe report mentions a horse.'
+    view.editor.setPlainText(original)
+    view.receive(incoming, [])
+    panel = view.diff_view
+    first, second = panel.cards
+    start, *_ = panel.changes[1].ranges[0]
+    panel.select(0)
+    button = next(b for b in first.findChildren(QPushButton) if b.text() == action)
+
+    button.click()
+    try:
+        assert view.document.busy
+        assert view.document.original == original and view.document.incoming == incoming
+        assert first.isHidden() and not second.isHidden()
+        assert panel.current == 1
+        assert 'horse' in second.findChild(QLabel, 'comparison').text()
+        assert all(not b.isEnabled() for b in second.findChildren(QPushButton))
+        assert view.inline_editor.source_position() == ('original', start)
+        assert view.inline_editor.verticalScrollBar().value() > 0
+    finally:
+        wait_for_review(view)
+
+    assert len(panel.changes) == 1
+    assert 'horse' in panel.cards[0].findChild(QLabel, 'comparison').text()
+    start, *_ = panel.changes[0].ranges[0]
+    assert view.inline_editor.source_position() == ('original', start)
+    assert all(b.isEnabled() for b in panel.cards[0].findChildren(QPushButton))
 
 
 def test_recovered_scroll_position_is_not_overwritten(tmp_path, monkeypatch):

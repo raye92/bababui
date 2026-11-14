@@ -4,10 +4,10 @@ The serializer retains stroke and audio records and relocates the container.
 Unsupported structures fail before publication. Playback verification remains
 separate from byte preservation and structural validation.
 """
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
-from copy import copy
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import PureWindowsPath
 import re
 import struct
@@ -56,23 +56,31 @@ def projected_groups(job, bundle):
         groups.append(group)
     compounds = {e.source: len(bytes.fromhex(e.raw)) for e in job.baseline.elements
                  if e.name == 'By-line'}
-    for index, group in enumerate(groups):
-        compact, cursor = [], 0
-        while cursor < len(group):
-            token = group[cursor]
-            stop = token.offset + compounds.get(token.offset, len(token.raw))
-            items = [token]
-            cursor += 1
-            while cursor < len(group) and group[cursor].offset < stop:
-                items.append(group[cursor])
+    if compounds:
+        for index, group in enumerate(groups):
+            compact, cursor = [], 0
+            while cursor < len(group):
+                token = group[cursor]
                 cursor += 1
-            compact.append(Token(token.offset, b''.join(t.raw for t in items), ''.join(t.text for t in items)))
-        groups[index] = compact
+                if token.offset not in compounds:
+                    compact.append(token)
+                    continue
+                stop = token.offset + compounds[token.offset]
+                items = [token]
+                while cursor < len(group) and group[cursor].offset < stop:
+                    items.append(group[cursor])
+                    cursor += 1
+                compact.append(Token(token.offset, b''.join(t.raw for t in items), ''.join(t.text for t in items)))
+            groups[index] = compact
     if len(groups) != len(job.baseline.spans) or any(
             ''.join(t.text for t in group) != span.content
             for group, span in zip(groups, job.baseline.spans)):
         raise ValueError('Native source projection does not match its anchors.')
-    return groups
+    return tuple(tuple(group) for group in groups)
+
+
+# The source stream is immutable and every edited revision rewrites from it.
+source_groups = lru_cache(maxsize=2)(projected_groups)
 
 
 def group_targets(job):
@@ -337,7 +345,7 @@ def serialize_candidate(job, bundle):
     if job.revision == job.baseline:
         return job.native_bytes
     text = job.text
-    groups = projected_groups(job, bundle)
+    groups = source_groups(job.with_revision(job.baseline), bundle)
     targets = group_targets(job)
     # A surviving symbol owns its paragraph break, even if range deletion left
     # that break anchored to the preceding source group.
@@ -365,11 +373,15 @@ def serialize_candidate(job, bundle):
             markers[key] = chr(0xf0000 + len(markers))
         atoms[markers[key]] = bytes.fromhex(element.raw)
     cursor = 0
+    elements = job.revision.elements
+    element_starts = [element.start for element in elements]
     renderer, visible = TextRenderer(all_caps=all_caps), 0
     for group, target in zip(groups, targets):
         stop = cursor + len(target)
-        for element in reversed(job.revision.elements):
-            if cursor <= element.start and element.end <= stop and (element.start < stop or element.start == element.end == cursor):
+        first = bisect_left(element_starts, cursor)
+        last = bisect_left(element_starts, stop) if stop > cursor else bisect_right(element_starts, cursor)
+        for element in reversed(elements[first:last]):
+            if element.end <= stop:
                 key = element.source if element.source is not None else element
                 target = target[:element.start-cursor] + markers[key] + target[element.end-cursor:]
         masked = []
@@ -388,8 +400,7 @@ def serialize_candidate(job, bundle):
                         and not renderer.has_content and text.startswith('\n', visible)):
                     encoded += b'\x16\xff\x00'
                     renderer.paragraph(255)
-                trial = copy(renderer)
-                rendered = render_record(trial, raw, speakers)
+                rendered = render_record(renderer, raw, speakers)
                 if rendered and not text.startswith(rendered, visible) and raw[0] >= 32:
                     literal = raw.decode('cp1252')
                     marker = None
@@ -400,13 +411,13 @@ def serialize_candidate(job, bundle):
                             marker = b'\x12\x0e'
                     if marker:
                         encoded += marker
+                        # The marker resets case and punctuation. Rendering the
+                        # literal again reproduces the final character state.
                         renderer.control(marker)
-                        trial = copy(renderer)
-                        rendered = render_record(trial, raw, speakers)
+                        rendered = render_record(renderer, raw, speakers)
                 if not text.startswith(rendered, visible):
                     raise ValueError(f'Native rendering cannot preserve the edit at character {visible}.')
                 visible += len(rendered)
-                renderer = trial
                 encoded += raw
             positions.append((token.offset - start, len(stream), len(token.raw), len(encoded)))
             stream += encoded

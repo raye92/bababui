@@ -114,7 +114,7 @@ def test_metadata_preview_shows_each_definition_name_once():
     view.close()
 
 
-def test_one_card_keeps_or_undoes_the_selected_edit():
+def test_one_card_accepts_or_rejects_the_selected_edit():
     from app.src.review_model import build_review
     app = QApplication.instance() or QApplication([])
     original = revision('The red car is large.')
@@ -124,7 +124,7 @@ def test_one_card_keeps_or_undoes_the_selected_edit():
     view.show()
     app.processEvents()
     requests, selected = [], []
-    view.requested.connect(lambda index, keep: requests.append((index, keep)))
+    view.requested.connect(lambda index, accept: requests.append((index, accept)))
     view.selected.connect(selected.append)
     view.navigate(1)
     assert view.current == 1
@@ -136,9 +136,9 @@ def test_one_card_keeps_or_undoes_the_selected_edit():
     QTest.mouseClick(card.findChild(QLabel), Qt.LeftButton)
     assert selected[-1] == 1
     buttons = {button.text(): button for button in card.findChildren(QPushButton)}
-    assert set(buttons) == {'Keep', 'Undo'}
-    buttons['Keep'].click()
-    buttons['Undo'].click()
+    assert set(buttons) == {'Accept', 'Reject'}
+    buttons['Accept'].click()
+    buttons['Reject'].click()
     assert requests == [(1, True), (1, False)]
     assert original.text == 'The red car is large.'
     view.close()
@@ -153,19 +153,19 @@ def test_old_card_cannot_select_or_resolve_a_new_model_index():
     view = ReviewView()
     view.set_model(model)
     old_card = view.cards[0]
-    old_keep = next(button for button in old_card.findChildren(QPushButton)
-                    if button.text() == 'Keep')
+    old_accept = next(button for button in old_card.findChildren(QPushButton)
+                      if button.text() == 'Accept')
     requests, selected = [], []
-    view.requested.connect(lambda index, keep: requests.append((index, keep)))
+    view.requested.connect(lambda index, accept: requests.append((index, accept)))
     view.selected.connect(selected.append)
     original, incoming = resolve(model.original, model.incoming, model.edits[0], True)
     view.set_model(build_review(original, incoming))
-    old_keep.click()
+    old_accept.click()
     old_card.clicked.emit()
     assert not requests
     assert not selected
     next(button for button in view.cards[0].findChildren(QPushButton)
-         if button.text() == 'Keep').click()
+         if button.text() == 'Accept').click()
     assert requests == [(0, True)]
     view.close()
 

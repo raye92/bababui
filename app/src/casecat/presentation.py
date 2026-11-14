@@ -5,7 +5,7 @@ import struct
 import re
 from functools import lru_cache
 
-from .structure import projected_groups, group_targets
+from .structure import projected_groups, source_groups, group_targets
 from .layout import read_layouts, read_deltas, ParagraphStyle
 
 
@@ -22,7 +22,7 @@ def presentation(job, bundle):
         except ValueError:
             # An unsupported container remains editable and visibly styled;
             # export still reports its validation error before publishing.
-            return _presentation(job, bundle)
+            return _presentation(job, source_groups(job.with_revision(job.baseline), bundle))
         metadata = serialize_metadata(job, bundle)
 
         class Overlay:
@@ -38,13 +38,14 @@ def presentation(job, bundle):
                     return metadata
                 return bundle.read(name)
 
-        return _presentation(load_job(Overlay(), job.key), bundle)
-    return _presentation(job, bundle)
+        candidate = load_job(Overlay(), job.key)
+        return _presentation(candidate, projected_groups(candidate, bundle))
+    return _presentation(job, source_groups(job, bundle))
 
 
-def _presentation(job, bundle):
-    groups = projected_groups(job, bundle)
-    targets = group_targets(job)
+def _presentation(job, groups):
+    targets = ([span.content for span in job.baseline.spans] if job.revision == job.baseline
+               else group_targets(job))
     layouts = read_layouts(job.native_bytes)
     definitions = layouts[0].paragraphs if layouts else ()
     result, styles, cursor = [], {}, 0
@@ -76,14 +77,16 @@ def _presentation(job, bundle):
                     destination[position] = value
             offset += len(token.text)
         display = list(target)
-        if len(source) * len(target) < 2_000_000:
-            for match in SequenceMatcher(None, source, target, autojunk=False).get_matching_blocks():
+        if (hard or paragraphs) and len(source) * len(target) < 2_000_000:
+            matches = ((0, 0, len(source)),) if source == target else SequenceMatcher(
+                None, source, target, autojunk=False).get_matching_blocks()
+            for a, b, size in matches:
                 for position in hard:
-                    if match.a <= position < match.a + match.size:
-                        display[match.b + position - match.a] = '\u00a0'
+                    if a <= position < a + size:
+                        display[b + position - a] = '\u00a0'
                 for position, style in paragraphs.items():
-                    if match.a <= position < match.a + match.size:
-                        styles[cursor + match.b + position - match.a] = style
+                    if a <= position < a + size:
+                        styles[cursor + b + position - a] = style
         result.append(''.join(display))
         cursor += len(target)
     if definitions:
