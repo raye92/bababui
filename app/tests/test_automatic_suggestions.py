@@ -34,6 +34,38 @@ def test_general_rules_accept_complete_authorized_edits(before, after):
     assert all(filters.automatic_reason(c) for c in changes)
 
 
+@pytest.mark.parametrize('before,after,disabled', [
+    ('Yes I saw it.', 'Yes, I saw it.', 'punctuation'),
+    ('It was may.', 'It was May.', 'capitalization'),
+    ("We're ready.", 'We are ready.', 'contractions'),
+    ('I saw the report.', 'I saw report.', 'short_common_words'),
+    ('an injury.  So this', 'a injury; so this', 'punctuation'),
+    ('an injury.  So this', 'a injury; so this', 'capitalization'),
+    ('an injury.  So this', 'a injury; so this', 'short_common_words'),
+])
+def test_disabled_rule_keeps_eligible_card_pending(before, after, disabled):
+    original = revision(before)
+    changes = suggestions(original, original.revise(after))
+    blocked = [change for change in changes
+               if not filters.automatic_reason(change, disabled_rules={disabled})]
+    assert blocked
+    assert all(filters.automatic_reason(change) for change in blocked)
+
+
+@pytest.mark.parametrize('before,after,enabled', [
+    ('Yes I saw it.', 'Yes, I saw it.', 'punctuation'),
+    ('It was may.', 'It was May.', 'capitalization'),
+    ('We\u2019re ready.', 'We are ready.', 'contractions'),
+    ('I saw the report.', 'I saw report.', 'short_common_words'),
+])
+def test_each_rule_can_accept_edits_on_its_own(before, after, enabled):
+    rules = {'punctuation', 'capitalization', 'contractions', 'short_common_words'}
+    original = revision(before)
+    changes = suggestions(original, original.revise(after))
+    assert changes
+    assert all(filters.automatic_reason(change, disabled_rules=rules - {enabled}) for change in changes)
+
+
 @pytest.mark.parametrize('before,after', [
     ('And I have all of them', 'Then I have all of them'),
     ("I'm there which page?", 'And there which page?'),

@@ -8,7 +8,7 @@ import pytest
 from app.src.casecat.anchors import AnchoredSpan
 
 
-def audio_archive(tmp_path):
+def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000):
     from app.src.casecat import archive
     from app.tests.test_native_casecat import job_files, zip_bytes
     clocks = (10600, 13200, 14000)
@@ -17,7 +17,7 @@ def audio_archive(tmp_path):
     spans = (AnchoredSpan('a', (0,), (marker(10500, 158400),), 'Alpha '),
              AnchoredSpan('b', (1,), (marker(13100, 350400),), 'beta '),
              AnchoredSpan('c', (2,), (), 'gamma.'))
-    events = [(10000, 0, 0), (11000, 1000, 1), (13000, 1000, 0), (16000, 4000, 1)]
+    events = [(10000, 0, 0), (11000, 1000, 1), (resume_clock, 1000, 0), (16000, stop_elapsed, 1)]
     xml = '<JobHistory><Read-Settings>'
     for field, index in (('Timestamp', 0), ('ElapsedTime', 1), ('Pause', 2)):
         xml += f'<Read-Audio-{field}>' + ''.join(
@@ -40,9 +40,9 @@ def audio_archive(tmp_path):
     return archive.inspect_archive(zip_bytes(files))
 
 
-def timing_source(tmp_path):
+def timing_source(tmp_path, **recording):
     from app.src.casecat import timing, codec
-    bundle = audio_archive(tmp_path)
+    bundle = audio_archive(tmp_path, **recording)
     job = codec.load_job(bundle, bundle.jobs[0])
     return timing.AudioMap.from_job(bundle, job, tmp_path/'sample.wav'), job.baseline
 
@@ -54,6 +54,22 @@ def test_native_clock_removes_pauses_and_corrects_pcm_drift(tmp_path):
     assert times.elapsed_centiseconds(12000) is None
     assert times.elapsed_centiseconds(13200) == 1200
     assert times.duration_ms == 40000
+
+
+@pytest.mark.parametrize('resume_clock', [10997, 11000])
+def test_overlapping_pause_and_resume_keep_transcript_in_sync(tmp_path, resume_clock):
+    times, revision = timing_source(
+        tmp_path, resume_clock=resume_clock, stop_elapsed=1000 + 16000 - resume_clock)
+    assert times.position_ms(revision, 2) == 5940
+    assert times.position_ms(revision, 8) == 11300
+    assert times.elapsed_centiseconds(resume_clock - 1) == resume_clock - 1 - 10000
+    assert times.elapsed_centiseconds(resume_clock) == 1000
+    assert times.elapsed_centiseconds(resume_clock + 5) == 1005
+
+
+def test_large_pause_overlap_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match='Inconsistent recording events'):
+        timing_source(tmp_path, resume_clock=10996, stop_elapsed=6004)
 
 
 def test_replacement_and_insertions_use_the_exported_passage_anchor(tmp_path):

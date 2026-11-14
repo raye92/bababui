@@ -10,6 +10,9 @@ import wave
 import xml.etree.ElementTree as ET
 
 
+MAX_PAUSE_OVERLAP_CS = 3
+
+
 def recording_events(xml):
     try:
         root = ET.fromstring(xml)
@@ -30,15 +33,24 @@ def recording_events(xml):
         events = tuple(zip(*(tuple(f[i] for i in range(count)) for f in fields)))
         if events[0][1:] != (0, 0):
             raise ValueError('Unsupported recording start.')
-        for i, (clock, elapsed, paused) in enumerate(events):
+        ordered = []
+        for clock, elapsed, paused in events:
             if clock < 0 or elapsed < 0 or paused not in (0, 1):
                 raise ValueError('Invalid recording event.')
-            if i:
-                previous, before, was_paused = events[i-1]
+            if ordered:
+                previous, before, was_paused = ordered[-1]
                 expected = before if was_paused else before + clock - previous
-                if clock <= previous or paused == was_paused or elapsed != expected:
+                if paused == was_paused or elapsed != expected:
                     raise ValueError('Inconsistent recording events.')
-        return events
+                if clock <= previous:
+                    if (not was_paused or previous - clock > MAX_PAUSE_OVERLAP_CS
+                            or clock <= ordered[-2][0]):
+                        raise ValueError('Inconsistent recording events.')
+                    # An overlapping pause has no interval on the clock.
+                    # Keep the resume's clock and elapsed time for the next segment.
+                    ordered.pop()
+            ordered.append((clock, elapsed, paused))
+        return tuple(ordered)
     except (ET.ParseError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(f'Native recording timing is unavailable: {exc}') from exc
 

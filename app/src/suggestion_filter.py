@@ -45,16 +45,27 @@ GENERIC = re.compile(r'SPEAKER\s+(\d+)', re.I)
 PUNCTUATION = frozenset(',;:.?!-\u2013\u2014')
 COMMON_WORDS = frozenset({'and', 'the'})
 WORD = re.compile(r"[A-Za-z]+(?:['\u2019][A-Za-z]+)*|\d+|[^\s]")
-CONTRACTION = re.compile(r"\b(i)'m\b|\b(you|we|they)'re\b|\b(i|you|we|they)'ve\b", re.I)
+CONTRACTION = re.compile(r"\b(i)['\u2019]m\b|\b(you|we|they)['\u2019]re\b|\b(i|you|we|they)['\u2019]ve\b", re.I)
 
 
-def _words(text):
-    text = text.casefold().replace('\u2019', "'")
-    text = CONTRACTION.sub(lambda m: (m[1]+' am') if m[1] else (m[2]+' are') if m[2] else (m[3]+' have'), text)
-    return [m[0] for m in WORD.finditer(text) if m[0] not in PUNCTUATION]
+def _words(text, disabled_rules):
+    if 'capitalization' not in disabled_rules:
+        text = text.casefold()
+    if 'punctuation' not in disabled_rules:
+        text = text.replace('\u2019', "'")
+    if 'contractions' not in disabled_rules:
+        def expand(match):
+            pronoun = match[1] or match[2] or match[3]
+            verb = 'am' if match[1] else 'are' if match[2] else 'have'
+            suffix = match[0][len(pronoun)+1:]
+            return f'{pronoun} {verb.upper() if suffix.isupper() else verb}'
+
+        text = CONTRACTION.sub(expand, text)
+    return [m[0] for m in WORD.finditer(text)
+            if 'punctuation' in disabled_rules or m[0] not in PUNCTUATION]
 
 
-def automatic_reason(change):
+def automatic_reason(change, *, disabled_rules=frozenset()):
     """Classify whole review decisions; never hide an unqualified part of a card."""
     if change.kind != 'text' or change.field or len(change.ranges) != 1:
         return None
@@ -92,7 +103,9 @@ def automatic_reason(change):
     for revision, start, end in ((original, a, b), (incoming, c, d)):
         if any(start < e.end and end > e.start or start == end and e.start < start < e.end for e in revision.elements):
             return None
-    aa, bb = _words(left[a:b]), _words(right[c:d])
+    before_words, after_words = _words(left[a:b], disabled_rules), _words(right[c:d], disabled_rules)
+    aa = [word.casefold() for word in before_words]
+    bb = [word.casefold() for word in after_words]
     # Numeric and unsupported punctuation tokens must match exactly, including
     # their punctuation. Do not turn decimal/date changes into cosmetic edits.
     if any(ch.isdigit() for ch in left[a:b]+right[c:d]) and left[a:b] != right[c:d]:
@@ -101,6 +114,12 @@ def automatic_reason(change):
     common = lambda word: short(word) or word in COMMON_WORDS
     for tag, i, j, k, l in SequenceMatcher(None, aa, bb, autojunk=False).get_opcodes():
         old, new = aa[i:j], bb[k:l]
+        if tag == 'equal':
+            if 'capitalization' in disabled_rules and before_words[i:j] != after_words[k:l]:
+                return None
+            continue
+        if 'short_common_words' in disabled_rules:
+            return None
         if tag == 'replace' and not (len(old) == len(new) and all(short(w) for w in old+new)):
             return None
         if tag in ('insert', 'delete') and not all(common(w) for w in old+new):
@@ -108,7 +127,7 @@ def automatic_reason(change):
     return 'punctuation/case/contraction' if aa == bb else 'short/common words'
 
 
-def auto_accept(state):
+def auto_accept(state, *, disabled_rules=frozenset()):
     """Apply one undoable native batch once per AI result, keeping an audit log."""
     from copy import deepcopy
     from app.src.suggestions import suggestions, resolve
@@ -118,7 +137,7 @@ def auto_accept(state):
         'version': 1, 'evidence': {'speakers': {}, 'occurrences': []}, 'overrides': {}, 'locations': []}
     original, incoming = state.original, state.incoming
     candidates = [(change, reason) for change in suggestions(original, incoming)
-                  if (reason := automatic_reason(change))]
+                  if (reason := automatic_reason(change, disabled_rules=disabled_rules))]
     records = list(reversed(review.get('off_record_changes', [])))
     # Descending positions preserve all earlier offsets. Resolve uses the same
     # anchored operations as an individual Accept, retaining destination audio.

@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
@@ -31,6 +31,8 @@ class TranscriptEditor(QMainWindow):
         self.setMinimumWidth(720)
         self.session_path = Path(session_path) if session_path is not None else APP_DIR/'data'/'session.json'
         self.legacy_dir = Path(legacy_dir) if legacy_dir is not None else Path(__file__).parent
+        self.preferences = QSettings(str(self.session_path.with_name('settings.ini')), QSettings.IniFormat)
+        self.disabled_auto_accept_rules = set()
         self._restoring = True
         self._recovery_enabled = True
         self._last_view = None
@@ -124,6 +126,20 @@ class TranscriptEditor(QMainWindow):
         edit.addAction('Fill In Field...', lambda: self.native_edit_action('edit_native_field'))
         edit.addAction('Change Format Symbol...', lambda: self.native_edit_action('change_native_symbol'))
         self.settings_btn, settings = self._menu_button('Settings', row)
+        auto_accept = settings.addMenu('Auto-accept edits')
+        for rule, label in (
+            ('punctuation', 'Punctuation'),
+            ('capitalization', 'Capitalization'),
+            ('contractions', 'Contractions'),
+            ('short_common_words', 'Short/common words'),
+        ):
+            action = auto_accept.addAction(label)
+            action.setCheckable(True)
+            enabled = self.preferences.value(f'auto_accept/{rule}', True, type=bool)
+            action.setChecked(enabled)
+            if not enabled:
+                self.disabled_auto_accept_rules.add(rule)
+            action.toggled.connect(lambda checked, key=rule: self.set_auto_accept_rule(key, checked))
         processing = settings.addMenu('LLM processing model')
         group = QActionGroup(self)
         group.setExclusive(True)
@@ -190,7 +206,8 @@ class TranscriptEditor(QMainWindow):
             document.model, document.transcription_model = DEFAULT_MODEL, AUDIO_MODEL
             document.dirty = True
             document.warnings.append('Unsupported saved model selection was reset to the defaults.')
-        view = DocumentView(document) if document.native else ImportView(document)
+        view = (DocumentView(document, disabled_auto_accept_rules=self.disabled_auto_accept_rules)
+                if document.native else ImportView(document))
         if isinstance(view, ImportView):
             view.import_requested.connect(lambda v=view: self.choose_zip(self.tabs.indexOf(v)))
         view.changed.connect(lambda v=view: self.document_changed(v))
@@ -278,6 +295,14 @@ class TranscriptEditor(QMainWindow):
         self.status_label.setText(message)
         self.status_label.setToolTip(message)
 
+    def set_auto_accept_rule(self, rule, enabled):
+        if enabled:
+            self.disabled_auto_accept_rules.discard(rule)
+        else:
+            self.disabled_auto_accept_rules.add(rule)
+        self.preferences.setValue(f'auto_accept/{rule}', enabled)
+        self.preferences.sync()
+
     def set_processing_model(self, model):
         if self.current and not self.current.document.busy and model in MODELS:
             if self.current.document.model != model:
@@ -331,7 +356,7 @@ class TranscriptEditor(QMainWindow):
                     return False
             candidate.model = view.document.model
             candidate.transcription_model = view.document.transcription_model
-            replacement = DocumentView(candidate)
+            replacement = DocumentView(candidate, disabled_auto_accept_rules=self.disabled_auto_accept_rules)
             replacement.changed.connect(lambda v=replacement: self.document_changed(v))
             self._last_view = None
             self.tabs.removeTab(index)

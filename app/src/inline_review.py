@@ -89,7 +89,11 @@ def _row_groups(model, old_rows, new_rows, common):
         result = []
         for row in new_rows:
             a, b = max(start, row.source_start), min(end, row.source_end)
-            if a >= b and not (row.source_start == row.source_end and start <= a < end):
+            # Empty native rows belong only to their actual source boundary.
+            # The clipped start can equal this group's start even when the
+            # empty row is far earlier in the transcript.
+            if a >= b and not (row.source_start == row.source_end
+                               and start <= row.source_start < end):
                 continue
             result.append(replace(row, source_start=a, source_end=b,
                                   text=row.text[a-row.source_start:b-row.source_start],
@@ -214,6 +218,7 @@ class InlineReviewEditor(QTextEdit):
         self.rows, self.shared_ranges = [], []
         old_rows, new_rows = _native_rows(original, 'original'), _native_rows(incoming, 'incoming')
         self.shared_ranges = _common_ranges(model)
+        native_geometry = {(row.page, row.number): (row.y, row.pitch) for row in old_rows}
 
         extra = [0.] * max(1, original.document().pageCount())
         old_index, added_height = 0, 0.
@@ -239,12 +244,15 @@ class InlineReviewEditor(QTextEdit):
                 # Use the source's blank line spacing for the paired incoming
                 # row before adding any height to the comparison page.
                 baseline_end = reference.y+reference.pitch+added_height
-                for index, row in enumerate(old_group):
-                    if index == len(old_group)-1:
-                        row = _compact(row)
+                # Pack both sides of a changed passage at the same compact
+                # pitch. Native source positions and line numbers stay intact.
+                y = old_group[0].y
+                for source_row in old_group:
+                    row = replace(_compact(source_row), y=y)
+                    y += row.pitch
                     append_original(row, section_index, edits)
                     old_index += 1
-                y = self.rows[-1].y+self.rows[-1].pitch
+                y += added_height
             else:
                 a = reference.source_start if reference else len(model.original.text)
                 y = reference.y+added_height if reference else self._top+added_height
@@ -278,10 +286,26 @@ class InlineReviewEditor(QTextEdit):
             amount = max(0, y-baseline_end)
             added_height += amount
             extra[page-1] += amount
+        # Lay out each native page independently. Compact sections may span
+        # pages, but cannot pull the next page's numbered rows across a footer.
+        # Include negative spacing adjustments so following text does not keep
+        # the empty space removed by compacting the original rows.
         self.pages = []
         top = 0.
-        for page, amount in enumerate(extra, 1):
-            height = self._page_height + amount
+        for page in range(1, len(extra)+1):
+            shift = 0.
+            cursor_y = top+self._top
+            for row in (row for row in self.rows if row.page == page):
+                if row.kind != 'incoming' and row.number:
+                    source_y, source_pitch = native_geometry[page, row.number]
+                    row.y = top + source_y-(page-1)*self._page_height + shift
+                    shift += row.pitch-source_pitch
+                else:
+                    row.y = cursor_y
+                    shift += row.pitch
+                cursor_y = row.y+row.pitch
+            height = max(self._page_height, self._page_height+shift,
+                         cursor_y-top+self._bottom)
             self.pages.append(ReviewPage(page, top, height))
             top += height
         self._render_document()

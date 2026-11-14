@@ -439,6 +439,34 @@ def test_native_speaker_override_undo_and_project_reopen(native_window,tmp_path)
     project_bytes(view.document.native,{})
 
 
+def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_path):
+    def actions(window):
+        menu = next(action.menu() for action in window.settings_btn.menu().actions()
+                    if action.text() == 'Auto-accept edits')
+        return {action.text(): action for action in menu.actions()}
+
+    toggles = actions(native_window)
+    assert list(toggles) == ['Punctuation', 'Capitalization', 'Contractions', 'Short/common words']
+    assert all(action.isCheckable() and action.isChecked() for action in toggles.values())
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    before = view.document.original
+    incoming = before.replace('Hello', 'HELLO').replace('.', '?')
+    assert incoming != before.replace('Hello', 'HELLO') != before
+
+    toggles['Punctuation'].trigger()
+    view.receive(incoming, [])
+    assert view.document.original == before.replace('Hello', 'HELLO')
+    assert view.document.incoming == incoming
+    assert view.diff_view.changes
+
+    reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
+    try:
+        assert {label for label, action in actions(reopened).items() if not action.isChecked()} == {'Punctuation'}
+    finally:
+        reopened.close()
+
+
 def test_automatic_review_batch_is_native_undoable_and_persisted(native_window, tmp_path):
     from app.src.casecat.project import project_bytes, read_project
     from app.src.casecat import archive, codec
