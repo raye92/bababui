@@ -16,6 +16,8 @@ Install FFmpeg and FFprobe on PATH, or set `FFMPEG_PATH` and `FFPROBE_PATH`.
 Copy `.env.example` to `.env` if needed. Set `GEMINI_API_KEY` for transcription
 and Gemini formatting; set `DEEPSEEK_API_KEY` for DeepSeek formatting.
 Environment variables take precedence over `app/.env`.
+Set `TESTING=TRUE` to save Gemini transcription responses and AI review logs in
+the system temp folder under `bababui-transcriptions`. The default is `FALSE`.
 
 ## Audio workflow
 

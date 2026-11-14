@@ -34,6 +34,14 @@ def test_config_precedence(tmp_path, monkeypatch):
     assert load_config(tmp_path)['gemini_api_key'] == 'env-key'
 
 
+@pytest.mark.parametrize('setting, expected', [('', False), ('TESTING=FALSE\n', False),
+                                               ('TESTING=TRUE\n', True), ('TESTING=1\n', False)])
+def test_testing_requires_true(tmp_path, monkeypatch, setting, expected):
+    monkeypatch.delenv('TESTING', raising=False)
+    (tmp_path / '.env').write_text(setting, encoding='utf-8')
+    assert load_config(tmp_path)['testing'] is expected
+
+
 def test_gemini_real_sdk_formatting_contract():
     import httpx
     import json

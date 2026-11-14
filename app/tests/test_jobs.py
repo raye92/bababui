@@ -49,7 +49,7 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     entered, release = Event(), Event()
     calls = []
     class Pipeline:
-        def __init__(self, *args):
+        def __init__(self, *args, testing=False):
             pass
         def run(self, path, progress):
             calls.append('transcribe')
@@ -112,7 +112,7 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
         + '\n'.join(f'     Q    Question {i}?' for i in range(23)))
 
     class Pipeline:
-        def __init__(self, *args):
+        def __init__(self, *args, testing=False):
             pass
 
         def run(self, path, progress):

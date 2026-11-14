@@ -99,8 +99,8 @@ def _unique_ids(pairs):
     return result
 
 
-def review_edits(original, incoming, review, model, complete, document_id, *, directory=None):
-    """Apply validated decisions as a batch and write the audit before returning."""
+def review_edits(original, incoming, review, model, complete, document_id, *, testing=False, directory=None):
+    """Apply validated decisions as a batch, with an optional diagnostic log."""
     edits = list(candidates(original, incoming))
     payload = [{'id': str(index), **item} for index, (_, item) in enumerate(edits, 1)]
     decisions, failure = {}, ''
@@ -130,10 +130,11 @@ def review_edits(original, incoming, review, model, complete, document_id, *, di
 
     summary = (f"Total edits: {len(edits)}, accepted: {counts['accept']}, "
                f"rejected: {counts['reject']}, abstained: {counts['abstain']}")
-    lines = [summary, f'Model: {model}', f'Document: {document_id}']
-    if failure:
-        lines.append(failure)
-    lines.extend(json.dumps(record, ensure_ascii=False) for record in records)
-    folder = Path(tempfile.gettempdir())/'bababui-transcriptions' if directory is None else directory
-    atomic_bytes(folder/f'ai-review-{uuid4().hex}.txt', ('\n'.join(lines) + '\n').encode('utf-8'))
+    if testing:
+        lines = [summary, f'Model: {model}', f'Document: {document_id}']
+        if failure:
+            lines.append(failure)
+        lines.extend(json.dumps(record, ensure_ascii=False) for record in records)
+        folder = Path(tempfile.gettempdir())/'bababui-transcriptions' if directory is None else directory
+        atomic_bytes(folder/f'ai-review-{uuid4().hex}.txt', ('\n'.join(lines) + '\n').encode('utf-8'))
     return original, incoming, review, summary + (f'. {failure}' if failure else '')

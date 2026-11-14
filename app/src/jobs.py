@@ -92,7 +92,9 @@ class ProcessingWorker(QThread):
             processor.check_ready()
             if not request.prompt.strip():
                 raise ValueError('Fill in app/src/bababui_prompt.md before processing.')
-            pipeline = self.pipeline_factory(request.config.get('gemini_api_key', ''), APP_DIR/'data'/'transcriptions')
+            pipeline = self.pipeline_factory(request.config.get('gemini_api_key', ''),
+                                             APP_DIR/'data'/'transcriptions',
+                                             testing=request.config.get('testing', False))
             report = lambda message: self.progress.emit(request.document_id, message)
             report('Checking WAV...')
             text, warnings = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report)
@@ -128,7 +130,8 @@ class ProcessingWorker(QThread):
 
         try:
             original, incoming, review, summary = review_edits(
-                *after_rules, request.review_model, complete, request.document_id)
+                *after_rules, request.review_model, complete, request.document_id,
+                testing=request.config.get('testing', False))
             after_ai = original, incoming, review
         except (OSError, ValueError):
             after_ai = after_rules

@@ -98,7 +98,8 @@ def test_reversed_edge_word_requires_both_neighbors(position):
         parse_words(NS(steps=[NS(type='model_output', content=[block])]))
 
 
-def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize('testing', [False, True])
+def test_real_sdk_contract_and_cache(tmp_path, monkeypatch, testing):
     import httpx
     from google import genai
     from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media, save_json
@@ -120,12 +121,20 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
     save_json(directory/'state.json', {'remote': 'files/old'})
     monkeypatch.setattr(media, 'probe', lambda _: 1)
     monkeypatch.setattr(media, 'prepare', lambda *a: None)
+    monkeypatch.setattr('app.src.audio_pipeline.tempfile.gettempdir', lambda: str(tmp_path))
     with genai.Client(api_key='fake', http_options={'client_args': {
             'transport': httpx.MockTransport(transport)}}) as sdk:
-        pipeline = AudioPipeline('fake', tmp_path/'cache', NS(files=files, interactions=sdk.interactions))
+        pipeline = AudioPipeline('fake', tmp_path/'cache', NS(files=files, interactions=sdk.interactions),
+                                 testing=testing)
         result, warnings = pipeline.run(wav)
         assert result == 'Speaker 1: Hello there.' and not warnings
         assert pipeline.run(wav) == (result, [])
+    dumps = tmp_path/'bababui-transcriptions'
+    if testing:
+        response, = dumps.glob('response-*.json')
+        assert response.with_suffix('.txt').read_text(encoding='utf-8') == text
+    else:
+        assert not dumps.exists()
     assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
     assert len(requests) == 1
     assert requests[0]['generation_config']['transcription_config']['mode'] == {

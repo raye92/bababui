@@ -46,7 +46,8 @@ def test_candidates_use_same_truncated_excerpt_as_edit_card():
         item['original'].replace('day', 'daydate'))
 
 
-def test_review_resolves_both_sides_and_logs_one_batch(tmp_path):
+@pytest.mark.parametrize('testing', [False, True])
+def test_review_resolves_both_sides_and_optionally_logs_one_batch(tmp_path, testing):
     original = revision('Last day of work.\nI saw a blue car.\nI left that day.')
     incoming = original.revise('Last date of work.\nI saw a red car.\nI left on that day.')
     calls = []
@@ -56,16 +57,21 @@ def test_review_resolves_both_sides_and_logs_one_batch(tmp_path):
         return '{"1":"accept","2":"reject","3":"abstain"}'
 
     left, right, _, summary = review_edits(original, incoming, None, 'gemini-3.8-flash',
-                                          complete, 'test-document', directory=tmp_path)
+                                          complete, 'test-document', testing=testing, directory=tmp_path)
     assert len(calls) == 1
     assert calls[0][0]['original'] == 'Last day of work.'
     assert calls[0][0]['proposed'] == 'Last date of work.'
     assert left.text == 'Last date of work.\nI saw a blue car.\nI left that day.'
     assert right.text == 'Last date of work.\nI saw a blue car.\nI left on that day.'
     assert len(suggestions(left, right)) == 1
-    lines = next(tmp_path.glob('*.txt')).read_text(encoding='utf-8').splitlines()
-    assert lines[0] == summary == 'Total edits: 3, accepted: 1, rejected: 1, abstained: 1'
-    assert [json.loads(line)['decision'] for line in lines[3:]] == ['accept', 'reject', 'abstain']
+    assert summary == 'Total edits: 3, accepted: 1, rejected: 1, abstained: 1'
+    if testing:
+        log, = tmp_path.glob('*.txt')
+        lines = log.read_text(encoding='utf-8').splitlines()
+        assert lines[0] == summary
+        assert [json.loads(line)['decision'] for line in lines[3:]] == ['accept', 'reject', 'abstain']
+    else:
+        assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize('output', [

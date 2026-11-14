@@ -146,9 +146,10 @@ def save_json(path, data):
 
 
 class AudioPipeline:
-    def __init__(self, key, cache, sdk=None):
+    def __init__(self, key, cache, sdk=None, *, testing=False):
         self.client = GeminiTranscriber(key, sdk)
         self.cache = Path(cache)
+        self.testing = testing
 
     def transcribe_segment(self, path):
         sdk = self.client.client()
@@ -166,19 +167,20 @@ class AudioPipeline:
             generation_config={'transcription_config': {'mode': {'type': 'verbatim',
                 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}}},
             automatic_continuation=False, timeout=1800)
-        # Preserve the response before validation, including malformed timestamps.
-        debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        debug_path = debug_dir / f'response-{time.time_ns()}.json'
-        payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
-        debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
-                              encoding='utf-8')
-        debug_path.with_suffix('.txt').write_text('\n'.join(
-            block.text
-            for step in getattr(response, 'steps', None) or []
-            if getattr(step, 'type', None) == 'model_output'
-            for block in getattr(step, 'content', None) or []
-            if getattr(block, 'type', None) == 'text'), encoding='utf-8')
+        if self.testing:
+            # Preserve the response before validation, including malformed timestamps.
+            debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / f'response-{time.time_ns()}.json'
+            payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
+            debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
+                                  encoding='utf-8')
+            debug_path.with_suffix('.txt').write_text('\n'.join(
+                block.text
+                for step in getattr(response, 'steps', None) or []
+                if getattr(step, 'type', None) == 'model_output'
+                for block in getattr(step, 'content', None) or []
+                if getattr(block, 'type', None) == 'text'), encoding='utf-8')
         if getattr(response.status, 'value', response.status) != 'completed':
             raise ValueError('Transcription did not complete; existing text was preserved.')
         return parse_words(response)

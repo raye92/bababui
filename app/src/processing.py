@@ -1,5 +1,8 @@
 """Provider-neutral formatting, with one editable prompt."""
+import os
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 from shared.client import DeepSeekClient, load_config as read_config
 from shared.transcription import has_key
@@ -16,7 +19,12 @@ PROMPT_FILE = Path(__file__).with_name('bababui_prompt.md')
 
 
 def load_config(root=APP_DIR):
-    return read_config(root)
+    config = read_config(root)
+    testing = os.environ.get('TESTING')
+    if testing is None:
+        testing = dotenv_values(Path(root) / '.env').get('TESTING')
+    config['testing'] = (testing or '').strip().casefold() == 'true'
+    return config
 
 
 class ProcessingClient:
