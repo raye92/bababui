@@ -255,7 +255,7 @@ def test_paged_review_selection_and_independent_acceptance(tmp_path, monkeypatch
     view.show()
     view.receive('The blue car is small.', [])
     app.processEvents()
-    assert view.active_view() is view.editor
+    assert view.active_view() is view.inline_editor
     assert view.diff_view.isVisible()
     assert len(view.diff_view.changes) == 2
     view.diff_view.select(1)

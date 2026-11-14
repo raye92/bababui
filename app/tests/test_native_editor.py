@@ -155,10 +155,10 @@ def test_native_review_preserves_blank_paragraphs_and_accepts_associations(nativ
     view.receive('Hello\n\nworld.\n', [])
     proposal = view.document.native.incoming
     assert view.diff_view.has_changes
-    buttons = [b for b in view.diff_view.findChildren(QPushButton) if 'Accept' in b.text()]
+    buttons = [b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep']
     assert buttons
     while view.diff_view.has_changes:
-        next(b for b in view.diff_view.findChildren(QPushButton) if 'Accept' in b.text()).click()
+        next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep').click()
     assert view.document.original == 'Hello\n\nworld.\n'
     assert view.document.native.original == view.document.native.incoming
     assert view.document.native.original.text == proposal.text
@@ -529,3 +529,95 @@ def test_reopening_unfiltered_review_keeps_incoming_native_fields(native_window,
     reopened = DocumentView(document)
     assert document.native.incoming == incoming
     reopened.close()
+
+
+@pytest.mark.parametrize('accept', [True, False])
+def test_related_review_decisions_preserve_undo_fields_and_native_export(native_window, tmp_path, accept):
+    from app.tests.test_native_fields import field_files
+    from app.tests.test_related_suggestions import EXAMPLES
+    from app.src.casecat.project import project_bytes, read_project
+    from app.src.casecat import archive, codec
+    from app.src.suggestions import suggestions
+    files = field_files('MS. SIEMENS')
+    del files['jobs/example.wav']
+    source = tmp_path/'related.zip'
+    source.write_bytes(zip_bytes(files))
+    native_window.import_zip(0, source)
+    view = native_window.current
+    state = view.document.native
+    before, after = EXAMPLES[1]
+    original = state.original.revise('BY MS. SIEMENS:\n' + before)
+    start = original.text.index('MS. SIEMENS')
+    if not any(e.kind == 'field' and e.start == start for e in original.elements):
+        original = original._replace(start, start+len('MS. SIEMENS'), '')
+        original = original.insert_field(start, 'EZ SPEAKER 01', 'MS. SIEMENS')
+    state.original = state.incoming = original
+    view.refresh()
+    view.receive('BY MS. SIEMENS:\n' + after, [])
+    pending = state.original, state.incoming
+    decision_count = len(view.diff_view.changes)
+    assert decision_count > 1
+    while view.diff_view.changes:
+        view.review(0, accept)
+    assert not view.diff_view.changes
+    assert state.original.text == 'BY MS. SIEMENS:\n' + (after if accept else before)
+    field = next(e for e in original.elements if e.kind == 'field')
+    assert field in state.original.elements
+    final = state.original, state.incoming
+    for _ in range(decision_count):
+        view.undo_review()
+    assert (state.original, state.incoming) == pending
+    assert len(view.diff_view.changes) == decision_count
+    for _ in range(decision_count):
+        view.redo_review()
+    assert (state.original, state.incoming) == final
+    restored, _ = read_project(project_bytes(state, {}))
+    assert restored.original == state.original
+    assert not suggestions(restored.original, restored.incoming)
+    view.document.export_casecat(tmp_path/'related-export.zip')
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'related-export.zip'), 'jobs/example_AI')
+    assert loaded.text == state.original.text
+    assert loaded.notes_bytes == state.job.notes_bytes
+
+
+@pytest.mark.parametrize('join_first', [True, False])
+def test_paragraph_join_and_wording_resolve_independently(native_window, tmp_path, join_first):
+    from app.tests.test_related_suggestions import EXAMPLES
+    from app.tests.test_native_structure import container_files
+    from app.src.casecat.project import project_bytes, read_project
+    from app.src.casecat import archive, codec
+    files = container_files()
+    del files['jobs/example.wav']
+    source = tmp_path/'join.zip'
+    source.write_bytes(zip_bytes(files))
+    native_window.import_zip(0, source)
+    view = native_window.current
+    state = view.document.native
+    before, after = EXAMPLES[5]
+    state.original = state.incoming = state.original.revise(before)
+    view.refresh()
+    view.receive(after, [])
+    baseline = state.original, state.incoming
+    for structural in ([True, False] if join_first else [False, True]):
+        index = next(i for i,c in enumerate(view.diff_view.changes) if
+                     (c.kind == 'structure' if structural else any(
+                         state.original.text[a:b] == 'W' and state.incoming.text[x:y] == 'Wolf'
+                         for a,b,x,y in c.ranges)))
+        view.review(index, not structural)  # Keep the answer, accept the name.
+    assert 'A Correct.\nQ ' in state.incoming.text
+    assert 'A Correct.\nQ ' in state.original.text
+    assert 'Dr. Wolf' in state.original.text
+    assert "I'd like" in state.incoming.text
+    after_decisions = state.original, state.incoming
+    view.undo_review()
+    view.undo_review()
+    assert (state.original, state.incoming) == baseline
+    view.redo_review()
+    view.redo_review()
+    assert (state.original, state.incoming) == after_decisions
+    restored, _ = read_project(project_bytes(state, {}))
+    assert (restored.original, restored.incoming) == after_decisions
+    view.document.export_casecat(tmp_path/'join-export.zip')
+    loaded = codec.load_job(archive.inspect_archive(tmp_path/'join-export.zip'), 'jobs/example_AI')
+    assert loaded.text == state.original.text
+    assert loaded.notes_bytes == state.job.notes_bytes

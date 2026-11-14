@@ -114,7 +114,7 @@ class PlaybackBar(QWidget):
         editor, revision = self.context()
         if editor is None or revision is None or self.timing is None:
             return None
-        position = utf16_index(revision.text, editor.textCursor().position())
+        position = editor.source_position()[1] if hasattr(editor, "source_position") else utf16_index(revision.text, editor.textCursor().position())
         return self.timing.position_ms(revision, position)
 
     def seek_from_cursor(self):
@@ -152,7 +152,10 @@ class PlaybackBar(QWidget):
 
     def clear_highlight(self):
         if self._highlight_editor is not None:
-            self._highlight_editor.setExtraSelections([])
+            if hasattr(self._highlight_editor, "clear_source_highlight"):
+                self._highlight_editor.clear_source_highlight()
+            else:
+                self._highlight_editor.setExtraSelections([])
             self._highlight_editor = None
 
     def show_position(self, position):
@@ -168,6 +171,10 @@ class PlaybackBar(QWidget):
         if passage is None:
             return
         start, end = passage
+        if hasattr(editor, "set_source_highlight"):
+            editor.set_source_highlight(editor.source_position()[0], start, end)
+            self._highlight_editor = editor
+            return
         selection = QTextEdit.ExtraSelection()
         selection.cursor = QTextCursor(editor.document())
         selection.cursor.setPosition(len(revision.text[:start].encode('utf-16-le')) // 2)

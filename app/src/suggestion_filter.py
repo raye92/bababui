@@ -140,7 +140,7 @@ def _paragraphs(text, *, byline_context=True):
     parts = text.split('\n')
     for index, line in enumerate(parts):
         label = LABEL.match(line)
-        body = line[label.end():].strip() if label else re.sub(r'^\s*[QA]\s+', '', line).strip()
+        body = line[label.end():].strip() if label else re.sub(r'^[ \t]*[QA](?:[ \t]+|$)', '', line).strip()
         if byline_context and label and not body and 'BY' in label['prefix'].upper():
             body = next((re.sub(r'^\s*[QA]\s+', '', p).strip() for p in parts[index+1:] if p.strip()), '')
         result.append((offset, line, label, body.casefold()))
@@ -151,8 +151,12 @@ def _paragraphs(text, *, byline_context=True):
 def aligned_paragraphs(original, incoming):
     from app.src.suggestions import _paragraph_ops
     old, new = _paragraphs(original), _paragraphs(incoming)
+    # Borrowed byline wording is evidence for speaker attribution only. Using
+    # it as another content anchor duplicates the following question.
+    left = [p[3] for p in _paragraphs(original, byline_context=False)]
+    right = [p[3] for p in _paragraphs(incoming, byline_context=False)]
     pairs = []
-    for _, a, b, c, d in _paragraph_ops([p[3] for p in old], [p[3] for p in new]):
+    for _, a, b, c, d in _paragraph_ops(left, right):
         if b-a == d-c:
             pairs.extend(zip(range(a, b), range(c, d)))
     return old, new, pairs

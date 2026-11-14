@@ -1,10 +1,9 @@
-"""Fixed review navigation and speaker evidence above scrollable change cards."""
-from difflib import SequenceMatcher
+"""One exact review decision with fixed navigation and speaker evidence."""
 from html import escape
+import re
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QToolButton, QComboBox, QProgressBar)
-from app.src.suggestions import suggestions
 from app.src.casecat.fields import field_values
 
 
@@ -16,31 +15,59 @@ def visible_text(text, empty):
     return text.replace('\n', ' ↵\n')
 
 
-
-def context_diff(before, after):
-    """Keep unchanged lines in order around the selected change only."""
-    old, new = before.splitlines(), after.splitlines()
-    rows = []
-    for tag, a, b, c, d in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-        if tag == 'equal':
-            rows.extend(('equal', escape(line)) for line in old[a:b])
-        elif tag == 'replace' and b-a == d-c:
-            deleted, inserted = [], []
-            for left, right in zip(old[a:b], new[c:d]):
-                left_parts, right_parts = [], []
-                for op, i, j, k, l in SequenceMatcher(None, left, right, autojunk=False).get_opcodes():
-                    for parts, value, color in ((left_parts, left[i:j], '#ffaaa5'),
-                                                (right_parts, right[k:l], '#7ee2a8')):
-                        value = escape(value)
-                        parts.append(value if op == 'equal' else
-                                     f'<b style="background:{color}">{value}</b>')
-                deleted.append(('delete', ''.join(left_parts) or '↵'))
-                inserted.append(('insert', ''.join(right_parts) or '↵'))
-            rows.extend(deleted + inserted)
+def change_diff(change):
+    """Flow exact removed/added ranges through one copy of their context."""
+    original, incoming = change.original.text, change.incoming.text
+    if not change.ranges:
+        before, after = dict(change.original.definitions), dict(change.incoming.definitions)
+        names = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+        if names:
+            return [('change', escape(name)+': '+_highlight(before.get(name, '(undefined)'), False)
+                     +_highlight(after.get(name, '(undefined)'), True)) for name in names]
+        return [('change', _highlight('Existing native fields and symbols', False)+' '
+                 +_highlight('Proposed native fields and symbols', True))]
+    # Linked fields can occur far apart. Keep their paragraphs separate, but
+    # apply every linked occurrence within a displayed paragraph together.
+    spans = []
+    for span in change.ranges:
+        if spans and (not change.field or '\n' not in original[spans[-1][-1][1]:span[0]]):
+            spans[-1].append(span)
         else:
-            rows.extend(('delete', escape(line) or '↵') for line in old[a:b])
-            rows.extend(('insert', escape(line) or '↵') for line in new[c:d])
+            spans.append([span])
+    rows = []
+    for group in spans:
+        if not group:
+            continue
+        left = original.rfind('\n', 0, group[0][0]) + 1
+        right = original.find('\n', group[-1][1])
+        right = len(original) if right < 0 else right
+        prefix = suffix = ''
+        before = list(re.finditer(r'\S+', original[left:group[0][0]]))
+        after = list(re.finditer(r'\S+', original[group[-1][1]:right]))
+        if len(before) > 8:
+            left += before[-8].start()
+            prefix = '… '
+        if len(after) > 8:
+            right = group[-1][1]+after[7].end()
+            suffix = ' …'
+        parts = [escape(prefix)]
+        position = left
+        for a, b, c, d in group:
+            parts.extend((escape(original[position:a]), _highlight(original[a:b], False),
+                          _highlight(incoming[c:d], True)))
+            position = b
+        parts.append(escape(original[position:right]+suffix))
+        rows.append(('change', ''.join(parts)))
     return rows
+
+
+def _highlight(text, incoming):
+    if not text:
+        return ''
+    background, foreground = ('#ccffd8', '#116329') if incoming else ('#ffd7d5', '#82071e')
+    value = escape(visible_text(text, ''))
+    return f'<b style="background:{background}; color:{foreground}">{value}</b>'
+
 
 class ReviewCard(QWidget):
     clicked = Signal()
@@ -98,8 +125,15 @@ class ReviewView(QWidget):
         return bool(self.changes)
 
     def set_revisions(self, original, incoming, *, review=None, page_lines=()):
-        self.changes = suggestions(original, incoming)
+        """Compatibility entry point for isolated review previews."""
+        from app.src.review_model import build_review
+        self.set_model(build_review(original, incoming), review=review, page_lines=page_lines)
+
+    def set_model(self, model, *, review=None, page_lines=()):
+        self.model = model
+        self.changes = model.edits
         self.review = review
+        original, incoming = model.original, model.incoming
         self.original, self.incoming = original, incoming
         self._speakers(original)
         root = QWidget()
@@ -108,12 +142,17 @@ class ReviewView(QWidget):
         self.cards = []
         for index, change in enumerate(self.changes):
             card = ReviewCard()
-            card.clicked.connect(lambda i=index: self.select(i))
+            card.clicked.connect(lambda i=index, snapshot=model:
+                                 self.select(i) if self.model is snapshot else None)
             card.setObjectName(f'suggestion{index}')
             rows = QVBoxLayout(card)
+            rows.setContentsMargins(8, 6, 8, 6)
+            rows.setSpacing(6)
             before = '\n'.join(original.text[a:b] for a, b, _, _ in change.ranges)
             after = '\n'.join(incoming.text[c:d] for _, _, c, d in change.ranges)
             title = 'Speaker attribution' if self._speaker_for(change) else 'Linked field' if change.field else 'Wording'
+            if change.kind == 'metadata':
+                title = 'Native fields and symbols'
             if change.kind == 'structure':
                 title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
             if change.ranges:
@@ -122,46 +161,28 @@ class ReviewView(QWidget):
                 line = next((p for p in reversed(page_lines) if p.position <= qt_start), None)
                 if line:
                     title += f' · Page {line.page}, line {line.number}'
-                a = original.text.rfind('\n', 0, start)+1
-                b = original.text.find('\n', change.ranges[-1][1])
-                context = original.text[a:b if b >= 0 else len(original.text)].strip()
-            else:
-                context = ''
-            rows.addWidget(QLabel(title))
-            if change.kind == 'metadata':
-                names = sorted(name for name in dict(original.definitions).keys() | dict(incoming.definitions).keys() if dict(original.definitions).get(name) != dict(incoming.definitions).get(name))
-                before = '\n'.join(f'{name}: {dict(original.definitions).get(name, "(undefined)")}' for name in names) or 'Existing native fields and symbols'
-                after = '\n'.join(f'{name}: {dict(incoming.definitions).get(name, "(undefined)")}' for name in names) or 'Proposed native fields and symbols'
+            heading = QLabel(title)
+            heading.setWordWrap(True)
+            rows.addWidget(heading)
             if change.field:
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
-            diff_rows = []
-            if change.ranges:
-                for a, b, c, d in change.ranges:
-                    left = original.text.rfind('\n', 0, a) + 1
-                    right = original.text.find('\n', b)
-                    right = len(original.text) if right < 0 else right
-                    old = original.text[left:right]
-                    new = original.text[left:a] + incoming.text[c:d] + original.text[b:right]
-                    diff_rows.extend(context_diff(old, new))
-            else:
-                diff_rows = [('delete', escape(before)), ('insert', escape(after))]
-            for kind, text in diff_rows:
-                mark, color = {'equal': (' ', 'transparent'), 'delete': ('−', '#ffd7d5'),
-                               'insert': ('+', '#ccffd8')}[kind]
-                label = QLabel(f'<span style="white-space:pre-wrap">{mark} {text}</span>')
+            for _, text in change_diff(change):
+                text = text.replace('\n', '<br>')
+                label = QLabel(f'<span style="white-space:pre-wrap">{text}</span>')
+                label.setObjectName('comparison')
                 label.setTextFormat(Qt.RichText)
                 label.setWordWrap(True)
-                label.setStyleSheet(f'background:{color}; ' +
-                                   ('color:#24292f; ' if kind != 'equal' else '') +
-                                   'font-family:Consolas; padding:6px;')
+                label.setTextInteractionFlags(Qt.NoTextInteraction)
+                label.setStyleSheet('padding:4px;')
                 rows.addWidget(label)
             buttons = QHBoxLayout()
-            for caption, callback in (('Show', lambda _, i=index: self.select(i)), ('Accept', lambda _, i=index: self.requested.emit(i, True)), ('Reject', lambda _, i=index: self.requested.emit(i, False))):
+            for caption, keep in (('Keep', True), ('Undo', False)):
                 button = QPushButton(caption)
-                button.clicked.connect(callback)
-                if caption != 'Show':
-                    color = '#1f883d' if caption == 'Accept' else '#cf222e'
-                    button.setStyleSheet(f'background:{color}; color:white; padding:4px; border-radius:3px;')
+                button.clicked.connect(lambda _, i=index, accepted=keep, snapshot=model:
+                                       self.requested.emit(i, accepted) if self.model is snapshot else None)
+                button.setToolTip('Keep the proposed change.' if keep else 'Restore the original wording for this change.')
+                color = '#1f883d' if keep else '#cf222e'
+                button.setStyleSheet(f'background:{color}; color:white; padding:4px; border-radius:3px;')
                 buttons.addWidget(button)
             rows.addLayout(buttons)
             layout.addWidget(card)

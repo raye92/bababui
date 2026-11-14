@@ -167,7 +167,7 @@ def test_diff_review_and_busy_scroll(window):
     assert all(e.isReadOnly() for e in view.diff_view.findChildren(QPlainTextEdit))
     assert all(not b.isEnabled() for b in view.diff_view.findChildren(QPushButton))
     view.set_busy(False)
-    button = next(b for b in view.diff_view.findChildren(QPushButton) if 'Accept' in b.text())
+    button = next(b for b in view.diff_view.findChildren(QPushButton) if b.text() == 'Keep')
     button.click()
     assert view.document.original == view.document.incoming == 'Shared\nIncoming'
     assert view.original_stack.currentWidget().editor is view.editor

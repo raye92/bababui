@@ -5,6 +5,8 @@ from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, Q
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
+from app.src.review_model import build_review
+from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
 from app.src.suggestions import propose, resolve
@@ -37,11 +39,12 @@ class ImportView(QWidget):
 class DocumentView(QWidget):
     changed = Signal()
 
-    def __init__(self, document):
+    def __init__(self, document, *, disabled_auto_accept_rules=frozenset()):
         super().__init__()
         if document.native is None:
             raise ValueError('An editor requires an imported CaseCAT job.')
         self.document = document
+        self.disabled_auto_accept_rules = disabled_auto_accept_rules
         automatic_before = None
         from app.src.suggestion_filter import LABEL, GENERIC
         if (document.native.review is None and document.native.original != document.native.incoming
@@ -58,6 +61,11 @@ class DocumentView(QWidget):
         font = QFont('Courier New', 12)
         self.editor = NativeTranscriptEditor(font)
         self.incoming_editor = NativeTranscriptEditor(font)
+        self.inline_editor = InlineReviewEditor(font)
+        self.inline_editor.set_source_editors(self.editor, self.incoming_editor)
+        self.inline_editor.selected.connect(self.select_inline)
+        self.inline_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
+        self.inline_editor.source_activated.connect(self._seek_review_passage)
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self.review)
         self.diff_view.selected.connect(self.select_suggestion)
@@ -69,6 +77,8 @@ class DocumentView(QWidget):
         self.original_page = PageView(self.editor)
         self.incoming_page = PageView(self.incoming_editor)
         self.original_stack.addWidget(self.original_page)
+        self.inline_page = PageView(self.inline_editor)
+        self.original_stack.addWidget(self.inline_page)
         self.stack.addWidget(self.original_stack)
         self.stack.addWidget(self.incoming_page)
         layout = QVBoxLayout(self)
@@ -124,16 +134,19 @@ class DocumentView(QWidget):
                 shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
 
     def active_view(self):
-        return self.incoming_editor if self.stack.currentIndex() else self.editor
+        return self.incoming_editor if self.stack.currentIndex() else (self.inline_editor if self.original_stack.currentWidget() is self.inline_page else self.editor)
 
     def _playback_context(self):
-        editor = self.incoming_editor if self.stack.currentIndex() else self.editor
+        editor = self.active_view()
+        if editor is self.inline_editor:
+            side, _ = editor.source_position()
+            return editor, getattr(self.document.native, side)
         return editor, getattr(self.document.native, 'incoming' if self.stack.currentIndex() else 'original')
 
     def _seek_review_passage(self, side, position):
         if self.playback:
             revision = getattr(self.document.native, side)
-            self.playback.seek_passage(revision, utf16_index(revision.text, position))
+            self.playback.seek_passage(revision, position)
 
     def capture_position(self):
         self.document.view = self.stack.currentIndex()
@@ -227,9 +240,11 @@ class DocumentView(QWidget):
         doc = self.document
         self._set_text(self.editor, doc.original)
         self._set_text(self.incoming_editor, doc.incoming)
-        self.diff_view.set_revisions(doc.native.original, doc.native.incoming,
-                                     review=doc.native.review, page_lines=self.editor.page_lines())
-        self.original_stack.setCurrentWidget(self.original_page)
+        self.review_model = build_review(doc.native.original, doc.native.incoming)
+        self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
+        self.inline_editor.set_model(self.review_model)
+        self.original_stack.setCurrentWidget(self.inline_page if self.review_model.edits else self.original_page)
+        self.inline_page.fit_page()
         self.original_page.fit_page()
         self.incoming_page.fit_page()
         self.diff_view.setVisible(self.diff_view.has_changes or bool((doc.native.review or {}).get('evidence', {}).get('speakers')))
@@ -267,10 +282,19 @@ class DocumentView(QWidget):
             editor._selected_review = self.diff_view.current
             editor.set_review_marks(marks, insertions)
 
+    def select_inline(self, index):
+        self._inline_selection = True
+        try:
+            self.diff_view.select(index)
+        finally:
+            self._inline_selection = False
+
     def select_suggestion(self, index):
         if not 0 <= index < len(self.diff_view.changes):
             return
         change = self.diff_view.changes[index]
+        if not getattr(self, "_inline_selection", False):
+            self.inline_editor.focus_edit(index)
         self.highlight_suggestions()
         if change.ranges:
             side = 'incoming' if self.stack.currentIndex() else 'original'
@@ -397,7 +421,7 @@ class DocumentView(QWidget):
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
         before = state.original, state.incoming, deepcopy(state.review)
-        records = auto_accept(state)
+        records = auto_accept(state, disabled_rules=self.disabled_auto_accept_rules)
         if records:
             # Keep the version marker on undo so reopening does not silently
             # reapply a batch that the user explicitly undid.
