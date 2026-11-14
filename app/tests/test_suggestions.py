@@ -125,16 +125,11 @@ def test_field_removal_can_be_accepted_or_rejected():
     assert len([e for e in rejected.elements if e.kind == 'field']) == 1
 
 
-def test_repetitive_transcript_compares_only_changed_passages(monkeypatch):
-    import app.src.suggestions as module
-    real = module.SequenceMatcher
-    sizes = []
-    def measured(junk, a, b, **kwargs):
-        sizes.append((len(a), len(b)))
-        return real(junk, a, b, **kwargs)
-    monkeypatch.setattr(module, 'SequenceMatcher', measured)
+def test_repetitive_transcript_compares_only_changed_passages():
     text = ('     Q    Did you see the red car on the road that day?\n     A    Yes I did.\n') * 600
     old = revision(text)
     new = propose(old, text.replace('red', 'blue', 1))
-    assert len(suggestions(old, new)) == 1
-    assert max(a*b for a, b in sizes) < 10000
+    change, = suggestions(old, new)
+    a, b, c, d = change.ranges[0]
+    assert (old.text[a:b], new.text[c:d]) == ('red', 'blue')
+    assert a == old.text.index('red') and c == new.text.index('blue')

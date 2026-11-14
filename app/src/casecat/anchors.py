@@ -1,7 +1,5 @@
 """Immutable editorial associations, independent of Qt and the native writer."""
 from dataclasses import asdict, dataclass, replace
-from difflib import SequenceMatcher
-import re
 import uuid
 
 from .elements import NativeElement, edited_elements, paragraph_symbols
@@ -154,6 +152,21 @@ class Revision:
         """Accept/deny a passage using the selected revision's associations."""
         if not 0 <= source_start <= source_end <= len(source.text):
             raise ValueError('Invalid source revision range.')
+        if at_destination and start == end:
+            # The advanced diff may place an insertion before a shared space
+            # (" Extra") rather than after it ("Extra "). Move only equivalent
+            # plain whitespace boundaries so the new words inherit the native
+            # passage at their destination, not the preceding stroke clock.
+            while (start < len(self.text) and source_start < source_end < len(source.text)
+                   and self.text[start] in ' \t'
+                   and source.text[source_start] == source.text[source_end] == self.text[start]
+                   and not any(e.start <= start < e.end for e in self.elements)
+                   and not any(e.start <= p < e.end for e in source.elements
+                               for p in (source_start, source_end))):
+                start += 1
+                end += 1
+                source_start += 1
+                source_end += 1
         copied, cursor = [], 0
         for span in source.spans:
             stop = cursor + len(span.content)
@@ -230,37 +243,14 @@ class Revision:
         text = self.text[:start] + content + self.text[end:]
         return replace(self, spans=tuple(result), elements=paragraph_symbols(text, elements))
 
-    def revise(self, text):
-        """Ordered paragraph/token alignment for proposals and whole-text edits.
-
-        Newlines are explicit content. Repeated words are never treated as a
-        global bag of tokens, and paragraph joins are not silently discarded.
-        """
+    def revise(self, text, *, edits=None):
+        """Apply VS Code inner changes while retaining native field associations."""
         if text == self.text:
             return self
-        old_parts = self.text.splitlines(keepends=True)
-        new_parts = text.splitlines(keepends=True)
-        old_offsets = [0]
-        for part in old_parts:
-            old_offsets.append(old_offsets[-1] + len(part))
-        changes = []
-        for tag, a, b, c, d in SequenceMatcher(None, old_parts, new_parts, autojunk=False).get_opcodes():
-            if tag == 'equal':
-                continue
-            old, new = ''.join(old_parts[a:b]), ''.join(new_parts[c:d])
-            # Bound work for very large pastes. A passage replacement still
-            # retains all associations, without guessing word correspondence.
-            tokens_a = re.findall(r'\n|[^\S\n]+|\w+|[^\w\s]', old)
-            tokens_b = re.findall(r'\n|[^\S\n]+|\w+|[^\w\s]', new)
-            if len(tokens_a) * len(tokens_b) > 1_000_000:
-                changes.append((old_offsets[a], old_offsets[b], new))
-                continue
-            offsets = [0]
-            for token in tokens_a:
-                offsets.append(offsets[-1] + len(token))
-            for subtag, i, j, k, l in SequenceMatcher(None, tokens_a, tokens_b, autojunk=False).get_opcodes():
-                if subtag != 'equal':
-                    changes.append((old_offsets[a] + offsets[i], old_offsets[a] + offsets[j], ''.join(tokens_b[k:l])))
+        if edits is None:
+            from app.src.suggestions import text_edits
+            edits = text_edits(self.text, text)
+        changes = [(a, b, text[c:d]) for a, b, c, d in edits]
         # A proposal can change a field's displayed name too. Gather all edits
         # to each definition before applying ranges, since a linked update can
         # change the length of multiple earlier occurrences.

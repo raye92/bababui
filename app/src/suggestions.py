@@ -1,8 +1,7 @@
 """Review decisions over exact structured revision ranges, independent of Qt."""
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import re
-from app.src.transcript_diff import Block, align_blocks
+from app.src import advanced_diff
 
 
 @dataclass(frozen=True)
@@ -22,15 +21,14 @@ def _layout(line):
 
 
 def _paragraph_ops(left, right):
-    """Trim shared ends, anchor paragraphs, and bound similarity alignment work."""
+    """Align transcript bodies with advanced diff, then place structural-only lines."""
     from app.src.off_record import NOTE
-    aa = [i for i, line in enumerate(left) if NOTE.fullmatch(line)]
-    bb = [i for i, line in enumerate(right) if NOTE.fullmatch(line)]
-    if aa and len(aa) == len(bb):
-        # Confirmed notes separate alignment domains, even if distant repeated
-        # testimony would otherwise win the global paragraph matching.
+    from app.src.suggestion_filter import _paragraphs
+    notes_a = [i for i, line in enumerate(left) if NOTE.fullmatch(line)]
+    notes_b = [i for i, line in enumerate(right) if NOTE.fullmatch(line)]
+    if notes_a and len(notes_a) == len(notes_b):
         result, i, j = [], 0, 0
-        for a, b in zip(aa, bb):
+        for a, b in zip(notes_a, notes_b):
             result.extend((tag, x+i, y+i, z+j, w+j)
                           for tag, x, y, z, w in _paragraph_ops(left[i:a], right[j:b]))
             result.append(('equal' if left[a] == right[b] else 'replace', a, a+1, b, b+1))
@@ -38,27 +36,30 @@ def _paragraph_ops(left, right):
         result.extend((tag, x+i, y+i, z+j, w+j)
                       for tag, x, y, z, w in _paragraph_ops(left[i:], right[j:]))
         return result
-    prefix = 0
-    while prefix < min(len(left), len(right)) and left[prefix] == right[prefix]:
-        prefix += 1
-    a, b = len(left), len(right)
-    while a > prefix and b > prefix and left[a-1] == right[b-1]:
-        a -= 1
-        b -= 1
-    result = [('equal', 0, prefix, 0, prefix)] if prefix else []
-    for tag, i, j, k, l in SequenceMatcher(None, left[prefix:a], right[prefix:b],
-                                          autojunk=(a-prefix)*(b-prefix) > 1_000_000).get_opcodes():
-        i, j, k, l = i+prefix, j+prefix, k+prefix, l+prefix
-        if tag == 'replace' and (j-i)*(l-k) <= 10_000:
-            aa = [Block(text, 'paragraph') for text in left[i:j]]
-            bb = [Block(text, 'paragraph') for text in right[k:l]]
-            result.extend((op, x+i, y+i, z+k, w+k) for op, x, y, z, w in align_blocks(aa, bb))
-        elif tag == 'replace' and j-i == l-k:
-            result.extend(('replace', x, x+1, z, z+1) for x, z in zip(range(i, j), range(k, l)))
-        else:
-            result.append((tag, i, j, k, l))
-    if a < len(left):
-        result.append(('equal', a, len(left), b, len(right)))
+    bodies = {line: _paragraphs(line, byline_context=False)[0][3]
+              for line in set(left) | set(right)}
+    substantive = {line: any(c.isalnum() for c in body) for line, body in bodies.items()}
+    aa = [i for i, line in enumerate(left) if substantive[line]]
+    bb = [i for i, line in enumerate(right) if substantive[line]]
+    result, previous_a, previous_b = [], 0, 0
+
+    def structure(a, b):
+        result.extend((tag, i+previous_a, j+previous_a, k+previous_b, l+previous_b)
+                      for tag, i, j, k, l in advanced_diff.paragraph_ops(
+                          left[previous_a:a], right[previous_b:b]))
+
+    for tag, i, j, k, l in advanced_diff.paragraph_ops(
+            [bodies[left[x]] for x in aa], [bodies[right[x]] for x in bb]):
+        runs = [('equal', x, x+1, y, y+1) for x, y in zip(range(i, j), range(k, l))] if tag == 'equal' else [(tag, i, j, k, l)]
+        for op, x, y, z, w in runs:
+            a = aa[x] if x < len(aa) else len(left)
+            b = bb[z] if z < len(bb) else len(right)
+            structure(a, b)
+            end_a = aa[y-1]+1 if y > x else a
+            end_b = bb[w-1]+1 if w > z else b
+            result.append((op, a, end_a, b, end_b))
+            previous_a, previous_b = end_a, end_b
+    structure(len(left), len(right))
     return result
 
 
@@ -75,46 +76,26 @@ def propose(original, text):
                 indent, label, space, _ = _layout(old[i])
                 _, new_label, new_space, body = _layout(new[j])
                 new[j] = indent + new_label + (space if label and new_label else new_space) + body
-    return original.revise('\n'.join(new))
+    text = '\n'.join(new)
+    return original.revise(text, edits=text_edits(original.text, text))
+
+
+def _token_edits(a, b, start, end, ns, ne):
+    """Compatibility adapter for callers comparing an exact source slice."""
+    return [(i+start, j+start, k+ns, l+ns)
+            for i, j, k, l in advanced_diff.text_edits(a[start:end], b[ns:ne])]
+
+
+def text_edits(a, b):
+    """advanced diff inner changes, without whitespace or proximity regrouping."""
+    return advanced_diff.text_edits(a, b)
 
 
 def suggestions(original, incoming):
     if original == incoming:
         return []
     a, b = original.text, incoming.text
-    tokens = lambda s: list(re.finditer(r'\n|[^\S\n]+|\w+|[^\w\s]', s))
-    lines_a, lines_b = a.splitlines(keepends=True), b.splitlines(keepends=True)
-    def offsets(lines):
-        result = [0]
-        for line in lines:
-            result.append(result[-1] + len(line))
-        return result
-    oa, ob = offsets(lines_a), offsets(lines_b)
-    ops = []
-    # Speaker labels and Q/A prefixes must not steer wording alignment toward
-    # a different repeated turn. Still compare the complete paragraph tokens.
-    from app.src.suggestion_filter import _paragraphs
-    bodies_a = [p[3] for p in _paragraphs(a, byline_context=False)][:len(lines_a)]
-    bodies_b = [p[3] for p in _paragraphs(b, byline_context=False)][:len(lines_b)]
-    for tag, i, j, k, l in _paragraph_ops(bodies_a, bodies_b):
-        if tag == 'equal' and a[oa[i]:oa[j]] == b[ob[k]:ob[l]]:
-            continue
-        aa, bb = tokens(a[oa[i]:oa[j]]), tokens(b[ob[k]:ob[l]])
-        for subtag, x, y, z, w in SequenceMatcher(None, [m.group() for m in aa], [m.group() for m in bb],
-                                                autojunk=len(aa)*len(bb) > 1_000_000).get_opcodes():
-            if subtag == 'equal':
-                continue
-            start = oa[i] + (aa[x].start() if x < len(aa) else oa[j]-oa[i])
-            end = oa[i] + (aa[y-1].end() if y > x else start-oa[i])
-            ns = ob[k] + (bb[z].start() if z < len(bb) else ob[l]-ob[k])
-            ne = ob[k] + (bb[w-1].end() if w > z else ns-ob[k])
-            ops.append((start, end, ns, ne))
-    gaps = []
-    for start, end, ns, ne in ops:
-        if gaps and a[gaps[-1][1]:start].strip() == b[gaps[-1][3]:ns].strip() == '' and '\n' not in a[gaps[-1][1]:start]:
-            gaps[-1][1], gaps[-1][3] = end, ne
-        else:
-            gaps.append([start, end, ns, ne])
+    gaps = text_edits(a, b)
     # Expand both sides together so adopting a field/symbol cannot cut it in half.
     expanded = []
     for start, end, ns, ne in gaps:
