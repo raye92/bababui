@@ -476,9 +476,11 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
 
 
 def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp_path, monkeypatch):
+    from hashlib import sha256
     import json
     import time
     from app.src import jobs
+    from app.src.audio_pipeline import Transcription
 
     calls = []
 
@@ -487,7 +489,7 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
             pass
 
         def run(self, path, progress):
-            return 'Raw transcript', []
+            return Transcription('Raw transcript', (), (), 1000, sha256(path.read_bytes()).hexdigest())
 
     class Processor:
         def __init__(self, config, model):

@@ -8,7 +8,8 @@ import pytest
 from app.src.casecat.anchors import AnchoredSpan
 
 
-def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000):
+def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000, last='gamma.', *, copy_stroke=False,
+                  editable=False):
     from app.src.casecat import archive
     from app.tests.test_native_casecat import job_files, zip_bytes
     clocks = (10600, 13200, 14000)
@@ -16,7 +17,7 @@ def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000):
     marker = lambda clock, size: (b'\x15\x08\x08\0\0\0' + struct.pack('<II', clock, size)).hex()
     spans = (AnchoredSpan('a', (0,), (marker(10500, 158400),), 'Alpha '),
              AnchoredSpan('b', (1,), (marker(13100, 350400),), 'beta '),
-             AnchoredSpan('c', (2,), (), 'gamma.'))
+             AnchoredSpan('c', (2,), (), last))
     events = [(10000, 0, 0), (11000, 1000, 1), (resume_clock, 1000, 0), (16000, stop_elapsed, 1)]
     xml = '<JobHistory><Read-Settings>'
     for field, index in (('Timestamp', 0), ('ElapsedTime', 1), ('Pause', 2)):
@@ -28,13 +29,33 @@ def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000):
     with wave.open(str(wav), 'wb') as out:
         out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
         out.writeframes(bytes(32000 * 40))
-    files = job_files(tuple(span.content for span in spans))
-    stream = b''.join(b'\x13\x01\x01' + struct.pack('<II', 1, clock)
-                      + b''.join(bytes.fromhex(marker) for marker in span.audio)
-                      + span.content.encode('cp1252') for clock, span in zip(clocks, spans))
-    header = bytearray(files['jobs/example.sgngl'][:1024])
-    struct.pack_into('<I', header, 536, len(stream))
-    files.update({'jobs/example.sgngl': bytes(header) + stream,
+    groups = [b'\x13\x01\x01' + struct.pack('<II', 1, clock) +
+              b''.join(bytes.fromhex(value) for value in span.audio) + span.content.encode('cp1252')
+              for clock, span in zip(clocks, spans)]
+    if copy_stroke:
+        groups.insert(2, b'\x13\x01\x01' + struct.pack('<II', 1, clocks[0]) + b'copied ')
+    stream = b''.join(groups)
+    audio = b'example.wav'.ljust(260, b'\0') + struct.pack('<I', len(events))
+    audio += b''.join(struct.pack('<III', paused, clock, elapsed) for clock, elapsed, paused in events)
+    if editable:
+        from app.tests.test_native_structure import container_files
+        from app.src.casecat.structure import relocate
+        files = container_files(tuple(span.content for span in spans))
+        native = files['jobs/example.sgngl']
+        old_end = 1024 + struct.unpack_from('<I', native, 536)[0]
+        candidate = bytearray(relocate(native, stream, [(0, 0, old_end - 1024, len(stream))]))
+        start, size = struct.unpack_from('<II', candidate, 556)
+        assert start + size == len(candidate)
+        candidate[start:] = audio
+        struct.pack_into('<I', candidate, 560, len(audio))
+    else:
+        files = job_files(tuple(span.content for span in spans))
+        candidate = bytearray(files['jobs/example.sgngl'][:1024])
+        struct.pack_into('<I', candidate, 536, len(stream))
+        struct.pack_into('<II', candidate, 556, len(candidate) + len(stream), len(audio))
+        candidate += stream + audio
+    struct.pack_into('<I', candidate, 652, 0x10f0f)
+    files.update({'jobs/example.sgngl': bytes(candidate),
                   'jobs/example.sgstn': files['jobs/example.sgstn'][:640] + notes[640:],
                   'jobs/example.sgxml': xml.encode(), 'jobs/example.wav': wav.read_bytes()})
     return archive.inspect_archive(zip_bytes(files))
@@ -45,6 +66,133 @@ def timing_source(tmp_path, **recording):
     bundle = audio_archive(tmp_path, **recording)
     job = codec.load_job(bundle, bundle.jobs[0])
     return timing.AudioMap.from_job(bundle, job, tmp_path/'sample.wav'), job.baseline
+
+
+def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from app.src import documents
+    from app.src.casecat import archive, codec
+    from app.src.casecat.timing import AudioMap
+    from app.src.speech_alignment import SpeechAlignment
+
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
+    doc = documents.import_casecat(audio_archive(tmp_path))
+    bundle, job = doc.native.bundle, doc.native.job
+    wav = bundle.read(job.audio_member)
+    doc.native.alignment = SpeechAlignment(sha256(wav).hexdigest(), 40000,
+        (4000, 10000, 18000),
+        (('alpha', 4000), ('beta', 10000), ('gamma', 18000)))
+    target = tmp_path / 'retimed.zip'
+    doc.export_casecat(target)
+    restored = archive.inspect_archive(target)
+    exported = codec.load_job(restored, 'jobs/example_AI')
+    assert exported.text == job.text
+    assert restored.read(exported.audio_member) == wav
+    assert exported.notes_bytes[:640] == job.notes_bytes[:640]
+    assert [key for key, _ in struct.iter_unpack('<II', exported.notes_bytes[640:])] == [1, 1, 1]
+    assert exported.stroke_clocks == (10400, 13000, 13800)
+    assert AudioMap.from_job(restored, exported, tmp_path / 'sample.wav').stroke_ms == (4000, 10000, 18000)
+    assert bundle.read(bundle.member(job.key + '.sgstn')) == job.notes_bytes
+    assert bundle.read(bundle.member(job.key + '.sgngl')) == job.native_bytes
+
+
+def test_export_uses_audio_for_accepted_wording_at_its_serialized_stroke(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from app.src import documents
+    from app.src.casecat import archive, codec
+    from app.src.casecat.timing import AudioMap
+    from app.src.speech_alignment import SpeechAlignment
+
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
+    doc = documents.import_casecat(audio_archive(tmp_path, last='gamma delta epsilon.', editable=True))
+    bundle, job = doc.native.bundle, doc.native.job
+    digest = sha256(bundle.read(job.audio_member)).hexdigest()
+    doc.native.alignment = SpeechAlignment(digest, 40000, (4000, 10000, 18000), (
+        ('alpha', 4000), ('signed', 6000), ('beta', 10000),
+        ('gamma', 18000), ('delta', 18500), ('epsilon', 19000)))
+    doc.native.original = job.baseline.replace(6, 6, 'signed ')
+    doc.native.incoming = job.baseline.replace(6, 6, 'pending ')
+    target = tmp_path / 'retimed.zip'
+    doc.export_casecat(target)
+    restored = archive.inspect_archive(target)
+    exported = codec.load_job(restored, 'jobs/example_AI')
+    assert exported.text == 'Alpha signed beta gamma delta epsilon.'
+    assert AudioMap.from_job(restored, exported, tmp_path / 'sample.wav').stroke_ms == (4000, 6000, 18000)
+
+
+@pytest.mark.parametrize('copy_stroke', [False, True])
+def test_casecat_export_requires_explicit_fallback_for_an_unsupported_job(tmp_path, monkeypatch, copy_stroke):
+    from hashlib import sha256
+    from app.src import documents
+    from app.src.casecat import archive, codec
+    from app.src.speech_alignment import SpeechAlignment
+
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
+    doc = documents.import_casecat(audio_archive(tmp_path, copy_stroke=copy_stroke))
+    bundle, job = doc.native.bundle, doc.native.job
+    digest = sha256(bundle.read(job.audio_member)).hexdigest() if copy_stroke else 'f' * 64
+    times = (4000, 10000, 14000, 18000) if copy_stroke else (4000, 10000, 18000)
+    doc.native.alignment = SpeechAlignment(digest, 40000, times, (('alpha', 4000), ('beta', 10000), ('gamma', 18000)))
+    target = tmp_path / 'unchanged.zip'
+    with pytest.raises(ValueError, match='copied strokes' if copy_stroke else 'ZIP contains a different WAV'):
+        doc.export_casecat(target)
+    assert not target.exists()
+    doc.export_casecat(target, corrected_audio=False)
+    copied = archive.inspect_archive(target)
+    assert codec.load_job(copied, 'jobs/example_AI').notes_bytes == doc.native.job.notes_bytes
+
+
+@pytest.mark.parametrize('audio_view', ['gamma delta epsilon.'], indirect=True)
+def test_bababui_timing_follows_review_and_survives_project_and_recovery(audio_view, tmp_path):
+    from hashlib import sha256
+    from pathlib import Path
+    from PySide6.QtWidgets import QApplication
+    from app.src import documents
+    from app.src.audio_pipeline import Word
+    from app.src.speech_alignment import align_speech
+    from app.src.document_view import DocumentView
+
+    view = audio_view
+    doc = view.document
+    digest = sha256(Path(doc.wav_path).read_bytes()).hexdigest()
+    words = tuple(Word(text, 's1', start, start + .1) for text, start in
+                  (('Alpha', 4), ('signed', 6), ('beta', 10), ('gamma', 16),
+                   ('delta', 17), ('epsilon.', 18)))
+    alignment = align_speech(doc.native.job.baseline, view.playback.timing.stroke_ms, words, 40000, digest)
+    view.receive('Alpha signed beta gamma delta epsilon.', [], alignment)
+    assert view.playback.timing.position_ms(doc.native.original, 6) == 10000
+    signed = doc.incoming.index('signed')
+    assert view.playback.timing.position_ms(doc.native.incoming, signed) == 6000
+    view.inline_editor.source_activated.emit('incoming', signed)
+    assert view.playback.player.position() == 6000
+
+    for accept in (True, False):
+        view._start_review(0, accept)
+        if view._review_worker is not None:
+            assert view._review_worker.wait(5000)
+            QApplication.processEvents()
+        side = doc.native.original if accept else doc.native.incoming
+        assert ('signed' in side.text) is accept
+        if accept:
+            assert view.playback.timing.position_ms(side, signed) == 6000
+        view.undo_review()
+        assert view.playback.timing.position_ms(doc.native.incoming, signed) == 6000
+
+    project, session = tmp_path / 'speech.bababui', tmp_path / 'session.json'
+    documents.save_document(doc, project)
+    documents.save_session(session, [doc], doc.id)
+    for restored in (documents.open_document(project), documents.load_session(session)[0][0], doc.duplicate()):
+        restored_view = DocumentView(restored)
+        assert restored_view.playback.timing.position_ms(restored.native.incoming, signed) == 6000
+        restored_view.close()
+
+    different_wav = tmp_path / 'different.wav'
+    different_wav.write_bytes(Path(doc.wav_path).read_bytes() + b'trailer')
+    doc.audio_override = doc.wav_path = str(different_wav)
+    different_view = DocumentView(doc)
+    assert doc.native.alignment is None
+    assert different_view.playback.timing.position_ms(doc.native.original, 6) == 11940
+    different_view.close()
 
 
 def test_native_clock_removes_pauses_and_corrects_pcm_drift(tmp_path):
@@ -148,7 +296,7 @@ def test_audio_slider_keyboard_and_page_steps_seek_the_player(tmp_path):
 
 
 @pytest.fixture
-def audio_view(tmp_path, monkeypatch):
+def audio_view(tmp_path, monkeypatch, request):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -156,7 +304,7 @@ def audio_view(tmp_path, monkeypatch):
     from app.src.document_view import DocumentView
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path/'assets')
-    view = DocumentView(documents.import_casecat(audio_archive(tmp_path)))
+    view = DocumentView(documents.import_casecat(audio_archive(tmp_path, last=getattr(request, 'param', 'gamma.'))))
     view.resize(1050, 650)
     view.show()
     for _ in range(100):

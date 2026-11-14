@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 MAX_PAUSE_OVERLAP_CS = 3
 
 
-def recording_events(xml):
+def raw_recording_events(xml):
     try:
         root = ET.fromstring(xml)
         fields = []
@@ -30,7 +30,14 @@ def recording_events(xml):
         count = len(fields[0])
         if not count or any(set(f) != set(range(count)) for f in fields):
             raise ValueError('Incomplete recording events.')
-        events = tuple(zip(*(tuple(f[i] for i in range(count)) for f in fields)))
+        return tuple(zip(*(tuple(f[i] for i in range(count)) for f in fields)))
+    except (ET.ParseError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'Native recording timing is unavailable: {exc}') from exc
+
+
+def recording_events(xml):
+    events = raw_recording_events(xml)
+    try:
         if events[0][1:] != (0, 0):
             raise ValueError('Unsupported recording start.')
         ordered = []
@@ -51,7 +58,7 @@ def recording_events(xml):
                     ordered.pop()
             ordered.append((clock, elapsed, paused))
         return tuple(ordered)
-    except (ET.ParseError, KeyError, TypeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(f'Native recording timing is unavailable: {exc}') from exc
 
 
@@ -72,15 +79,19 @@ class AudioMap:
 
     @classmethod
     def from_job(cls, bundle, job, wav_path):
+        with wave.open(str(wav_path), 'rb') as source:
+            return cls.from_recording(bundle, job, source)
+
+    @classmethod
+    def from_recording(cls, bundle, job, source):
         metadata = bundle.member(job.key + '.sgxml')
         if not metadata:
             raise ValueError('Native recording metadata is missing.')
         events = recording_events(bundle.read(metadata))
-        with wave.open(str(wav_path), 'rb') as source:
-            if source.getcomptype() != 'NONE':
-                raise ValueError('Native timing currently requires PCM WAV audio.')
-            byte_rate = source.getframerate() * source.getnchannels() * source.getsampwidth()
-            duration = source.getnframes() * 1000 // source.getframerate()
+        if source.getcomptype() != 'NONE':
+            raise ValueError('Native timing currently requires PCM WAV audio.')
+        byte_rate = source.getframerate() * source.getnchannels() * source.getsampwidth()
+        duration = source.getnframes() * 1000 // source.getframerate()
         result = cls(events, (), duration)
         markers = []
         for span in job.baseline.spans:
@@ -100,12 +111,15 @@ class AudioMap:
         for clock in job.stroke_clocks:
             elapsed = result.elapsed_centiseconds(clock)
             marker = bisect_right(clocks, clock) - 1
-            if elapsed is None or marker < 0:
+            if elapsed is None:
                 times.append(None)
                 continue
-            _, reference, audio = markers[marker]
             # The native API truncates centiseconds after its double ratio.
-            corrected = int((audio / reference) * elapsed) if audio else elapsed
+            corrected = elapsed
+            if marker >= 0:
+                _, reference, audio = markers[marker]
+                if audio:
+                    corrected = int((audio / reference) * elapsed)
             milliseconds = corrected * 10
             times.append(milliseconds if 0 <= milliseconds <= duration else None)
         result.stroke_ms = tuple(times)

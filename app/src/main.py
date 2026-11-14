@@ -19,6 +19,7 @@ from app.src.audio_pipeline import AUDIO_MODEL
 from app.src.documents import (Document, canonical, save_document, open_document,
     suggested_path, save_session, load_session, import_casecat)
 from app.src.casecat.archive import inspect_archive
+from app.src.casecat.retiming import AudioExportError
 from app.src.document_view import DocumentView, ImportView
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
@@ -415,8 +416,18 @@ class TranscriptEditor(QMainWindow):
                                                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
                 if answer != QMessageBox.Yes:
                     return False
-            doc.export_casecat(target, overwrite=overwrite)
-            doc.status = 'CaseCAT ZIP exported. Working project save status is unchanged.'
+            try:
+                doc.export_casecat(target, overwrite=overwrite)
+                doc.status = ('CaseCAT ZIP exported with corrected audio timing.' if doc.native.alignment
+                              else 'CaseCAT ZIP exported.')
+            except AudioExportError as exc:
+                answer = QMessageBox.question(self, 'Corrected audio timing unavailable',
+                    f'{exc}\n\nExport with the original CaseCAT audio timing?',
+                    QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+                if answer != QMessageBox.Yes:
+                    return False
+                doc.export_casecat(target, overwrite=overwrite, corrected_audio=False)
+                doc.status = 'CaseCAT ZIP exported with original audio timing.'
             self.document_changed(view)
             return True
         except (OSError, ValueError) as exc:
@@ -527,7 +538,8 @@ class TranscriptEditor(QMainWindow):
                               PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()),
                               original=doc.native.original,
                               review_model=self.ai_review_model if self.ai_review_enabled.isChecked() else None,
-                              disabled_rules=frozenset(self.disabled_auto_accept_rules))
+                              disabled_rules=frozenset(self.disabled_auto_accept_rules),
+                              bundle=doc.native.bundle, job=doc.native.job)
             view.set_busy(True)
             doc.status = 'Starting...'
             doc.update_warnings()
@@ -544,15 +556,15 @@ class TranscriptEditor(QMainWindow):
             view.document.status = message
             self.document_changed(view)
 
-    def _succeeded(self, identifier, text, warnings):
+    def _succeeded(self, identifier, text, warnings, alignment):
         view = self.find_view(identifier)
         if view:
-            view.receive(text, warnings)
+            view.receive(text, warnings, alignment)
 
-    def _reviewed(self, identifier, result, warnings):
+    def _reviewed(self, identifier, result, warnings, alignment):
         view = self.find_view(identifier)
         if view:
-            view.receive_reviewed(result, warnings)
+            view.receive_reviewed(result, warnings, alignment)
 
     def _failed(self, identifier, message):
         view = self.find_view(identifier)

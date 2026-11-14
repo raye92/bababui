@@ -8,7 +8,7 @@ from .rendering import TextRenderer
 from .elements import NativeElement, field_name
 
 
-RENDERING_NOTICE = ('CaseCAT native editing. New wording inherits source passage timing; '
+RENDERING_NOTICE = ('CaseCAT native editing. New wording uses source passage timing until audio is aligned. '
                     'unsupported native structures are rejected during export.')
 NO_WAV_NOTICE = 'This job has no WAV. Transcript editing is available; audio processing is disabled.'
 

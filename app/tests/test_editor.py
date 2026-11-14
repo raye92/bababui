@@ -117,9 +117,9 @@ def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, 
     assert not window.bababui_btn.isEnabled() and window.edit_btn.isEnabled()
     window.attach_wav(1, str(wav))
     window.run_bababui()
-    window.jobs.succeeded.emit(second.document.id, 'Second result', [])
+    window.jobs.succeeded.emit(second.document.id, 'Second result', [], None)
     window.jobs.completed.emit(second.document.id)
-    window.jobs.succeeded.emit(first.document.id, 'First result', ['Review speakers'])
+    window.jobs.succeeded.emit(first.document.id, 'First result', ['Review speakers'], None)
     window.jobs.completed.emit(first.document.id)
     assert first.document.original == 'First original' and first.document.incoming == 'First result'
     assert second.document.original == 'Second original' and second.document.incoming == 'Second result'

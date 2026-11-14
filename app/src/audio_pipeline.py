@@ -22,8 +22,17 @@ AUDIO_MODEL = 'gemini-3.5-transcribe'
 class Word:
     text: str
     speaker: str
-    start: float
-    end: float
+    start: float | None
+    end: float | None
+
+
+@dataclass(frozen=True)
+class Transcription:
+    text: str
+    words: tuple[Word, ...]
+    warnings: tuple[str, ...]
+    duration_ms: int
+    wav_sha256: str
 
 
 def segments(duration):
@@ -34,7 +43,6 @@ def segments(duration):
 
 def parse_words(response):
     words = []
-    speaker_starts = {}
     for step in getattr(response, 'steps', None) or []:
         if getattr(step, 'type', None) != 'model_output':
             continue
@@ -59,24 +67,24 @@ def parse_words(response):
                 try:
                     t0 = float(a.start_offset.removesuffix('s'))
                     t1 = float(a.end_offset.removesuffix('s'))
-                    # Repair reversed intervals using the surrounding word boundaries.
-                    if math.isfinite(t0) and math.isfinite(t1) and t0 > t1 and i > 0 and i+1 < len(annotations):
-                        t0 = words[-1].end
-                        t1 = float(annotations[i+1].start_offset.removesuffix('s'))
                 except (AttributeError, TypeError, ValueError):
-                    raise ValueError('Transcription is missing valid word timestamps.') from None
-                if not a.speaker or not math.isfinite(t0) or not math.isfinite(t1) or not 0 <= t0 <= t1:
-                    raise ValueError('Transcription is missing valid speaker tags or timestamps.')
-                # Speaker turns can overlap in time. Keep the model's text order,
-                # but still reject timestamps that run backwards for one speaker.
-                if t0 < speaker_starts.get(a.speaker, 0):
-                    raise ValueError(f'Transcription timestamps are out of order for speaker {a.speaker}: '
-                                     f'{t0:g}s follows {speaker_starts[a.speaker]:g}s.')
-                speaker_starts[a.speaker] = t0
+                    t0 = t1 = math.nan
+                if not (math.isfinite(t0) and math.isfinite(t1) and 0 <= t0 <= t1):
+                    t0 = t1 = None
+                if not a.speaker:
+                    raise ValueError('Transcription is missing speaker tags.')
+                # Overlapping turns can run backward. Preserve text order and
+                # let the alignment choose timestamps that agree with it.
                 words.append(Word(text, a.speaker, t0, t1))
     if not words:
         raise ValueError('No speech with speaker tags was returned.')
     return words
+
+
+def _check_wav(path, digest):
+    with path.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+            raise ValueError('The WAV changed during transcription. Run BABABUI again.')
 
 
 def render(words):
@@ -91,16 +99,26 @@ def render(words):
     return '\n'.join(turns)
 
 
+def _seam_positions(words, default):
+    """Use adjacent times to place untimed text at a chunk seam."""
+    first = next((word.start for word in words if word.start is not None), default)
+    for word in words:
+        if word.start is not None:
+            first = word.start
+        yield first
+
+
 def stitch(chunks):
     labels = {}
     def label(speaker):
         return labels.setdefault(speaker, f'Speaker {len(labels)+1}')
     a = [replace(w, speaker=label(w.speaker)) for w in chunks[0]]
     if len(chunks) == 1:
-        return render(a), []
-    b = [replace(w, start=w.start+1740, end=w.end+1740) for w in chunks[1]]
-    left = [(i, w) for i, w in enumerate(a) if w.start >= 1740]
-    right = [(i, w) for i, w in enumerate(b) if w.start < 1800]
+        return tuple(a), []
+    b = [replace(w, start=w.start+1740, end=w.end+1740) if w.start is not None else w
+         for w in chunks[1]]
+    left = [(i, w) for i, w in enumerate(a) if w.start is not None and w.start >= 1740]
+    right = [(i, w) for i, w in enumerate(b) if w.start is not None and w.start < 1800]
     normalize = lambda w: re.sub(r'[^\w]', '', w.text.casefold())
     matcher = SequenceMatcher(None, [normalize(w) for _, w in left],
                               [normalize(w) for _, w in right], autojunk=False)
@@ -133,9 +151,10 @@ def stitch(chunks):
         (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-1770))
         combined = a[:ia] + b[ib:]
     else:
-        combined = [w for w in a if w.start < 1770] + [w for w in b if w.start >= 1770]
+        combined = [w for w, t in zip(a, _seam_positions(a, 0)) if t < 1770]
+        combined.extend(w for w, t in zip(b, _seam_positions(b, 1770)) if t >= 1770)
         warnings.append('Uncertain overlap alignment: joined at 29:30. Review for missing or repeated words.')
-    return render(combined), warnings
+    return tuple(combined), warnings
 
 
 def save_json(path, data):
@@ -189,16 +208,16 @@ class AudioPipeline:
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != '.wav':
             raise ValueError('Choose an existing .wav file.')
+        with path.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         progress('Validating WAV...')
         duration = media.probe(path)
         plan = segments(duration)
-        with path.open('rb') as stream:
-            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         directory = self.cache / AUDIO_MODEL / 'overlap-v1' / digest
         with file_lock(directory / 'cache.lock'):
-            return self._run_locked(path, plan, directory, progress)
+            return self._run_locked(path, plan, directory, progress, digest)
 
-    def _run_locked(self, path, plan, directory, progress):
+    def _run_locked(self, path, plan, directory, progress, digest):
         chunks = []
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing chunk {i+1} of {len(plan)}...')
@@ -210,10 +229,15 @@ class AudioPipeline:
                     prepared = Path(temporary) / 'segment.wav'
                     media.prepare(path, {'start': start, 'end': end}, prepared)
                     words = self.transcribe_segment(prepared)
+                _check_wav(path, digest)
                 save_json(cached, [asdict(w) for w in words])
-            chunks.append(words)
+            chunks.append([w if (w.start is not None and w.end is not None
+                                 and 0 <= w.start <= w.end <= end - start)
+                           else replace(w, start=None, end=None) for w in words])
         progress('Matching speakers and joining transcript...')
-        text, stitch_warnings = stitch(chunks)
+        words, warnings = stitch(chunks)
+        text = render(words)
         if not text.strip():
             raise ValueError('Transcription returned no usable text.')
-        return text, stitch_warnings
+        _check_wav(path, digest)
+        return Transcription(text, words, tuple(warnings), int(plan[-1][1] * 1000), digest)

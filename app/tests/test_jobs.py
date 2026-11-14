@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from threading import Event
 import pytest
+from app.src.audio_pipeline import Transcription, Word
 from app.src.jobs import TranscriptionCoordinator
 from shared.transcript_formatting import TranscriptFormatter
 
@@ -20,7 +22,7 @@ def test_shared_transcription_one_call_and_same_outcome(tmp_path, fails):
             assert release.wait(5)
             if fails:
                 raise ValueError('Transcription failed')
-            return 'Speaker 1: Hello', []
+            return Transcription('Speaker 1: Hello', (), (), 1000, sha256(path.read_bytes()).hexdigest())
     coordinator = TranscriptionCoordinator()
     with ThreadPoolExecutor(2) as pool:
         a = pool.submit(coordinator.run, wav, 'gemini-3.5-transcribe', Pipeline(), lambda _: None)
@@ -33,7 +35,7 @@ def test_shared_transcription_one_call_and_same_outcome(tmp_path, fails):
                 with pytest.raises(ValueError, match='Transcription failed'):
                     result.result(5)
             else:
-                assert result.result(5) == ('Speaker 1: Hello', [])
+                assert result.result(5).text == 'Speaker 1: Hello'
     assert len(calls) == 1
 
 
@@ -55,7 +57,7 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
             calls.append('transcribe')
             entered.set()
             assert release.wait(5)
-            return 'Audio transcript', []
+            return Transcription('Audio transcript', (), (), 1000, sha256(path.read_bytes()).hexdigest())
     class Processor:
         def __init__(self, config, model):
             self.model = model
@@ -94,7 +96,7 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
         for worker in list(manager.workers.values()):
             worker.wait(5000)
         app.processEvents()
-    assert results == [('first', 'success', [])]
+    assert results == [('first', 'success', [], None)]
     assert failures == [('second', 'Formatting failed')]
     assert set(finished) == {'first', 'second'} and not manager.workers
     assert calls.count('transcribe') == 1
@@ -116,7 +118,8 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
             pass
 
         def run(self, path, progress):
-            return 'Speaker 2: Question?', ['Transcription warning']
+            return Transcription('Speaker 2: Question?', (), ('Transcription warning',), 1000,
+                                 sha256(path.read_bytes()).hexdigest())
 
     class Processor:
         def __init__(self, *args):
@@ -139,7 +142,50 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
     worker.run()
 
     assert not failures
-    identifier, incoming, warnings = results[0]
+    identifier, incoming, warnings, alignment = results[0]
     assert identifier == 'document'
     assert warnings == ['Transcription warning']
     assert incoming == output
+    assert alignment is None
+
+
+def test_worker_delivers_timing_with_incoming_review(tmp_path):
+    from app.src.casecat import codec
+    from app.src.jobs import ProcessingWorker, Request
+    from app.tests.test_native_audio import audio_archive
+
+    bundle = audio_archive(tmp_path)
+    job = codec.load_job(bundle, bundle.jobs[0])
+    wav = tmp_path / 'sample.wav'
+    digest = sha256(wav.read_bytes()).hexdigest()
+
+    class Pipeline:
+        def __init__(self, *args, testing=False):
+            pass
+
+        def run(self, path, progress):
+            words = tuple(Word(word, 'Speaker 1', start, start + .1)
+                          for word, start in zip(('Alpha', 'beta', 'gamma.'), (4, 10, 16)))
+            return Transcription('Speaker 1: Alpha beta gamma.', words, (), 40000, digest)
+
+    class Processor:
+        def __init__(self, *args):
+            pass
+
+        def check_ready(self):
+            pass
+
+        def complete(self, text, prompt):
+            return 'Alpha New beta gamma.'
+
+    worker = ProcessingWorker(
+        Request('test', str(wav), 'model', 'transcribe', 'rules', {}, original=job.baseline,
+                bundle=bundle, job=job),
+        TranscriptionCoordinator(), Pipeline, Processor)
+    results = []
+    worker.succeeded.connect(lambda *args: results.append(args))
+    worker.run()
+    _, incoming, warnings, alignment = results[0]
+    assert incoming == 'Alpha New beta gamma.'
+    assert not warnings
+    assert alignment.stroke_ms == (4000, 10000, 16000)

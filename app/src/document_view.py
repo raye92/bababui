@@ -12,6 +12,7 @@ from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import presentation
 from app.src.suggestions import propose, resolve
 from app.src.suggestion_filter import begin_review, override_speaker, track_decision, auto_accept
+from app.src.speech_alignment import WAV_CHANGED
 
 
 class ImportView(QWidget):
@@ -119,6 +120,8 @@ class DocumentView(QWidget):
         self.editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.editor, 'original'))
         self.incoming_editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.incoming_editor, 'incoming'))
         self.playback = None
+        if document.native.alignment and not document.wav_path:
+            self._validate_alignment(document.warnings)
         if document.wav_path:
             self.setup_playback(layout)
         self.editor.textChanged.connect(self._original_changed)
@@ -128,15 +131,10 @@ class DocumentView(QWidget):
         self.schedule_restore()
 
     def setup_playback(self, layout):
-        from app.src.casecat.timing import AudioMap
         from app.src.playback import PlaybackBar
-        import wave
         doc = self.document
-        try:
-            timing = AudioMap.from_job(doc.native.bundle, doc.native.job, doc.wav_path)
-        except (ValueError, OSError, wave.Error, EOFError):
-            timing = None
-        self.playback = PlaybackBar(doc.wav_path, timing, self._playback_context, self)
+        self._validate_alignment(doc.warnings)
+        self.playback = PlaybackBar(doc.wav_path, self._playback_timing(), self._playback_context, self)
         layout.addWidget(self.playback)
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
@@ -151,6 +149,23 @@ class DocumentView(QWidget):
                 shortcut = QShortcut(QKeySequence(key), self)
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
                 shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
+
+    def _validate_alignment(self, warnings):
+        doc = self.document
+        if doc.native.alignment and not doc.native.alignment.matches_wav(doc.wav_path):
+            doc.native.alignment = None
+            warnings.append(WAV_CHANGED)
+
+    def _playback_timing(self):
+        import wave
+        from app.src.casecat.timing import AudioMap
+        doc = self.document
+        if doc.native.alignment:
+            return doc.native.alignment.playback()
+        try:
+            return AudioMap.from_job(doc.native.bundle, doc.native.job, doc.wav_path)
+        except (ValueError, OSError, wave.Error, EOFError):
+            return None
 
     def active_view(self):
         return self.incoming_editor if self.stack.currentIndex() else (self.inline_editor if self.original_stack.currentWidget() is self.inline_page else self.editor)
@@ -488,7 +503,7 @@ class DocumentView(QWidget):
         self.schedule_restore()
         self.changed.emit()
 
-    def receive(self, text, warnings):
+    def receive(self, text, warnings, alignment=None):
         self.capture_position()
         try:
             automatic_before = begin_review(self.document.native, text,
@@ -501,9 +516,9 @@ class DocumentView(QWidget):
         self._review_redo.clear()
         self.document.status = 'Incoming updated. Review the suggested revisions.'
         self._automatic_review(automatic_before)
-        self._finish_receive(warnings)
+        self._finish_receive(warnings, alignment)
 
-    def receive_reviewed(self, result, warnings):
+    def receive_reviewed(self, result, warnings, alignment=None):
         state = self.document.native
         if state.original != result.source:
             self.document.status = 'Original changed while processing. The AI review was not applied.'
@@ -520,11 +535,18 @@ class DocumentView(QWidget):
         if result.after_ai[:2] != result.after_rules[:2]:
             self._review_undo.append(result.after_rules)
         self.document.status = f'AI-assisted review. {result.summary}'
-        self._finish_receive(warnings)
+        self._finish_receive(warnings, alignment)
 
-    def _finish_receive(self, warnings):
+    def _finish_receive(self, warnings, alignment):
+        warnings = list(warnings)
+        self.document.native.alignment = alignment
+        self._validate_alignment(warnings)
+        if self.playback:
+            self.playback.timing = self._playback_timing()
         self.document.update_warnings(warnings)
         self.refresh()
+        if self.playback:
+            self.playback.show_position(self.playback.player.position())
         self.edited()
         self.schedule_restore()
 

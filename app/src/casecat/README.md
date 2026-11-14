@@ -22,7 +22,7 @@ and Next navigate between suggestions. Clicking changed text selects its card.
   / Cancel when text already exists. Multiple jobs use a picker.
 - Source ZIP, steno, WAV, and companion assets remain immutable.
 - Actual edit ranges, whole-text proposals, review, and undo retain source anchors.
-  Deleted anchors remain present. New wording inherits source passage timing.
+  Deleted anchors remain present.
 - Save creates a movable working project containing the source ZIP and both revisions.
 - File > Export CaseCAT ZIP defaults to `<source>_AI.zip`. It adds `_AI` to each
   job and its companion filenames so CaseCAT can restore them beside the originals.
@@ -30,7 +30,10 @@ and Next navigate between suggestions. Clicking changed text selects its card.
   job can still prompt for replacement.
 - Export writes the reviewed Original and updates matching WAV references to the
   new local filenames. It validates the ZIP, transcript, steno, and companions
-  before publication. Pending Incoming stays in the project.
+  before publication. Pending Incoming stays in the project. When speech
+  alignment is available, export retimes the copied job's embedded and companion
+  stroke records and adjusts the WAV offsets in its audio markers. If export
+  cannot use the alignment, BABABUI asks whether to use the original timing.
 - Original and Incoming pages are read-only while reviewing pending proposals.
 
 ## Name fields and paragraph symbols
@@ -77,10 +80,12 @@ Playback highlights source passages without changing text, caret, or undo state.
 Changing tabs or hiding the playback bar stops playback.
 
 `timing.py` maps original stroke clocks through recording pause/resume metadata
-and applies PCM drift correction using inline audio markers. Insertions and
-replacements use the writer's source-group associations. No individual word times
-are invented. Unsupported or missing timing disables cursor seeking while plain
-WAV playback remains available. Missing WAV permits transcript editing.
+and applies PCM drift correction using inline audio markers. BABABUI uses word
+times from the exact WAV to refine seeking in Original, Incoming, and inline
+review. It uses distinctive phrases as anchors, estimates timing in the gaps,
+and keeps seek times in transcript order. Timing stays with the working project
+and recovery session. A different WAV clears the alignment. If too little
+speech matches, playback uses the source passage timing when available.
 
 Import accepts an extra embedded stroke only when its complete eight-byte record
 matches an original note, including one later in the sequence. Every note must still be
@@ -88,11 +93,9 @@ covered in order. Each embedded occurrence has a separate editorial reference,
 so editing a repeated stroke's text cannot move it to the earlier occurrence.
 For playback in this app, repeats inherit the preceding occurrence's effective
 clock before pause and PCM drift correction. Leading copies use the first original
-clock. The next expected note always takes priority over a possible copy; identical
-records cannot establish which occurrence was pasted. This is passage timing, not a
-measured word timestamp. Projects reconstruct the same clocks from the source.
-Original steno, timestamps, and audio records remain byte-identical on export;
-this playback adjustment does not rewrite CaseCAT's own timing behavior.
+clock. The next expected note takes priority over a possible copy. Speech
+alignment can refine playback for each occurrence in BABABUI. CaseCAT export
+uses original timing for copied strokes when the user accepts the fallback.
 
 ## Verification and limits
 

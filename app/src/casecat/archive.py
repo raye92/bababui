@@ -10,6 +10,7 @@ import re
 import stat
 import tempfile
 import unicodedata
+import wave
 import zipfile
 import zlib
 
@@ -149,7 +150,7 @@ def _ai_member_names(bundle):
     return renamed
 
 
-def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False):
+def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False, alignment=None):
     """Export reviewed text, optionally using distinct job names for restore."""
     from .codec import validate_job, serialize_native, load_job
     target = Path(target).resolve()
@@ -166,12 +167,19 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False):
     from .fields import serialize_metadata
     metadata = serialize_metadata(job, bundle)
     native_member = bundle.member(job.key + '.sgngl')
+    notes_member = bundle.member(job.key + '.sgstn')
     metadata_member = bundle.member(job.key + '.sgxml')
+    notes, expected_stroke_ms = job.notes_bytes, None
+    if alignment is not None:
+        from .retiming import retime_export
+        serialized, notes, expected_stroke_ms = retime_export(bundle, job, serialized, metadata, alignment)
     changed = {}
     if serialized != job.native_bytes:
         changed[native_member] = serialized
     if metadata_member and metadata != bundle.read(metadata_member):
         changed[metadata_member] = metadata
+    if notes != job.notes_bytes:
+        changed[notes_member] = notes
     names = _ai_member_names(bundle) if ai_copy else {}
     if names:
         from .structure import relink_wave
@@ -185,7 +193,7 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False):
             if updated != raw:
                 changed[transcript] = updated
     data = bundle.data
-    if changed or names:
+    if changed or names or expected_stroke_ms is not None:
         buffer = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(bundle.data)) as source, zipfile.ZipFile(buffer, 'w') as output:
             output.comment = source.comment
@@ -197,10 +205,26 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False):
                 output.writestr(renamed, payload)
         data = buffer.getvalue()
         checked = inspect_archive(data, name=target.name)
-        restored = load_job(checked, names.get(native_member, native_member)[:-6])
-        if (restored.text != job.text or restored.notes_bytes != job.notes_bytes
+        try:
+            restored = load_job(checked, names.get(native_member, native_member)[:-6])
+        except ValueError as exc:
+            if expected_stroke_ms is None:
+                raise
+            from .retiming import AudioExportError
+            raise AudioExportError(f'Could not reimport the corrected CaseCAT records: {exc}') from exc
+        if (restored.text != job.text or restored.notes_bytes != notes
                 or restored.audio_member != names.get(job.audio_member, job.audio_member)):
             raise ValueError('Export validation found changed text, steno, or audio association.')
+        if expected_stroke_ms is not None:
+            from .retiming import AudioExportError
+            from .timing import AudioMap
+            try:
+                with wave.open(io.BytesIO(checked.read(restored.audio_member)), 'rb') as source:
+                    verified = AudioMap.from_recording(checked, restored, source)
+            except (ValueError, OSError, wave.Error, EOFError) as exc:
+                raise AudioExportError(f'Could not verify corrected timing: {exc}') from exc
+            if verified.stroke_ms != expected_stroke_ms:
+                raise AudioExportError('The exported stroke timings did not match the corrected playback times.')
         expected = tuple(names.get(member, member) for member in bundle.members)
         with zipfile.ZipFile(io.BytesIO(bundle.data)) as source, zipfile.ZipFile(io.BytesIO(data)) as output:
             if checked.members != expected or any(

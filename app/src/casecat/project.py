@@ -9,6 +9,7 @@ import zlib
 
 from . import archive, codec
 from .anchors import Revision
+from app.src.speech_alignment import SpeechAlignment
 
 
 # Only fingerprints live here, never archive bytes. Recovery loading still
@@ -32,6 +33,7 @@ class NativeState:
     original: Revision
     incoming: Revision
     review: dict | None = None
+    alignment: SpeechAlignment | None = None
 
     @classmethod
     def load(cls, bundle, key):
@@ -40,13 +42,13 @@ class NativeState:
 
     def duplicate(self):
         from copy import deepcopy
-        return NativeState(self.bundle, self.job, self.original, self.incoming, deepcopy(self.review))
+        return replace(self, review=deepcopy(self.review))
 
     def to_dict(self):
         return {'job': self.job.key, 'source_sha256': self.bundle.digest,
                 'source_name': self.bundle.name, 'source_path': self.bundle.source_path,
                 'original': self.original.to_dict(), 'incoming': self.incoming.to_dict(),
-                'review': self.review}
+                'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None}
 
     @classmethod
     def restore(cls, bundle, record):
@@ -61,6 +63,7 @@ class NativeState:
             state.original = Revision.from_dict(record['original'])
             state.incoming = Revision.from_dict(record['incoming'])
             state.review = record.get('review')
+            state.alignment = SpeechAlignment.restore(record.get('alignment'), len(state.job.stroke_clocks))
             if state.review is not None:
                 from app.src.suggestion_filter import validate_review
                 validate_review(state.review, state.incoming.text)

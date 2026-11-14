@@ -5,12 +5,15 @@ import hashlib
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
+import wave
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline
 from app.src.ai_review import AssistedReview, review_edits
+from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
+from app.src.speech_alignment import UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept, begin_review
 from shared.storage import atomic_bytes
 
@@ -50,6 +53,8 @@ class TranscriptionCoordinator:
             return future.result()
         try:
             result = pipeline.run(path, progress)
+            if result.wav_sha256 != key[0]:
+                raise ValueError('The WAV changed during transcription. Run BABABUI again.')
             future.set_result(result)
             return result
         except Exception as exc:
@@ -71,11 +76,13 @@ class Request:
     original: object = None
     review_model: str | None = None
     disabled_rules: frozenset[str] = frozenset()
+    bundle: object = None
+    job: object = None
 
 
 class ProcessingWorker(QThread):
-    succeeded = Signal(str, str, list)
-    reviewed = Signal(str, object, list)
+    succeeded = Signal(str, str, list, object)
+    reviewed = Signal(str, object, list, object)
     failed = Signal(str, str)
     progress = Signal(str, str)
 
@@ -97,23 +104,40 @@ class ProcessingWorker(QThread):
                                              testing=request.config.get('testing', False))
             report = lambda message: self.progress.emit(request.document_id, message)
             report('Checking WAV...')
-            text, warnings = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report)
+            transcription = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report)
+            text, warnings = transcription.text, list(transcription.warnings)
             report('Saving raw transcription...')
             save_raw_transcription(request.wav_path, text)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
+            alignment = None
+            if request.job is not None:
+                report('Aligning transcript with audio...')
+                alignment = self._align(transcription)
+                if alignment is None:
+                    warnings.append(UNAVAILABLE)
             report('Applying transcript standards...')
             if request.review_model is None:
-                self.succeeded.emit(request.document_id, result, list(warnings))
+                self.succeeded.emit(request.document_id, result, warnings, alignment)
             else:
                 reviewed = self._review(result, report)
-                self.reviewed.emit(request.document_id, reviewed, list(warnings))
+                self.reviewed.emit(request.document_id, reviewed, warnings, alignment)
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'
             for key in ('api_key', 'gemini_api_key'):
                 if request.config.get(key):
                     message = message.replace(request.config[key], '[REDACTED]')
             self.failed.emit(request.document_id, message)
+
+    def _align(self, transcription):
+        request = self.request
+        try:
+            timing = AudioMap.from_job(request.bundle, request.job, request.wav_path)
+            times = timing.stroke_ms
+        except (ValueError, OSError, wave.Error, EOFError):
+            times = (None,) * len(request.job.stroke_clocks)
+        return align_speech(request.original or request.job.baseline, times, transcription.words,
+                            transcription.duration_ms, transcription.wav_sha256)
 
     def _review(self, text, report):
         request = self.request
@@ -140,8 +164,8 @@ class ProcessingWorker(QThread):
 
 
 class JobManager(QObject):
-    succeeded = Signal(str, str, list)
-    reviewed = Signal(str, object, list)
+    succeeded = Signal(str, str, list, object)
+    reviewed = Signal(str, object, list, object)
     failed = Signal(str, str)
     progress = Signal(str, str)
     completed = Signal(str)
