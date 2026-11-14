@@ -65,6 +65,38 @@ def test_backwards_timestamps_for_same_speaker_are_rejected(speakers):
         parse_words(NS(steps=[NS(type='model_output', content=[block])]))
 
 
+def test_reversed_word_uses_neighbor_boundaries():
+    block = NS(type='text', text='30th, 2026 it', annotations=[
+        NS(type='word_info', speaker='a', start_index=0, end_index=5, start_offset='618.8s', end_offset='619.2s'),
+        NS(type='word_info', speaker='a', start_index=6, end_index=10, start_offset='619.2s', end_offset='610.4s'),
+        NS(type='word_info', speaker='a', start_index=11, end_index=13, start_offset='621.9s', end_offset='622s')])
+    words = parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+    assert words == [Word('30th,', 'a', 618.8, 619.2), Word('2026', 'a', 619.2, 621.9),
+                     Word('it', 'a', 621.9, 622)]
+
+
+@pytest.mark.parametrize('previous_end,next_start', [('623s', '621.9s'), ('619.2s', 'NaNs'),
+                                                     ('619.2s', None)])
+def test_reversed_word_rejects_invalid_neighbor_boundaries(previous_end, next_start):
+    block = NS(type='text', text='One two three', annotations=[
+        NS(type='word_info', speaker='a', start_index=0, end_index=3, start_offset='618s', end_offset=previous_end),
+        NS(type='word_info', speaker='a', start_index=4, end_index=7, start_offset='619.2s', end_offset='610.4s'),
+        NS(type='word_info', speaker='a', start_index=8, end_index=13, start_offset=next_start, end_offset='624s')])
+    with pytest.raises(ValueError, match='timestamps'):
+        parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+
+
+@pytest.mark.parametrize('position', [0, 1])
+def test_reversed_edge_word_requires_both_neighbors(position):
+    annotations = [
+        NS(type='word_info', speaker='a', start_index=0, end_index=3, start_offset='0s', end_offset='1s'),
+        NS(type='word_info', speaker='a', start_index=4, end_index=7, start_offset='2s', end_offset='3s')]
+    annotations[position].start_offset = '5s'
+    block = NS(type='text', text='One two', annotations=annotations)
+    with pytest.raises(ValueError, match='timestamps'):
+        parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+
+
 def test_real_sdk_contract_cleanup_and_cache(tmp_path, monkeypatch):
     import httpx
     from google import genai
