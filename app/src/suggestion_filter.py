@@ -3,7 +3,7 @@
 1. Restore deleted ordinary trailing spaces/tabs on aligned logical paragraphs.
    Keep newlines, internal spacing, hard spaces, and genuine paragraph changes.
 2. Match SPEAKER N labels using unambiguous aligned bylines/colloquy only.
-   A strict majority with at least two votes maps to one existing native field.
+   A strict majority with at least two votes maps to an existing speaker label.
    Matching labels disappear from review; mismatched attributions stay separate.
 3. Never infer speakers from Q/A labels or names inside testimony. Ties, weak
    evidence, and ambiguous native field identities remain unresolved.
@@ -32,10 +32,11 @@
    Excluded text is audited and restored by Undo. Ambiguous intervals stay pending.
 """
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import re
 
+from app.src.casecat.elements import NativeElement
 from app.src.casecat.fields import field_values
 
 
@@ -181,12 +182,57 @@ def aligned_paragraphs(original, incoming):
     return old, new, pairs
 
 
-def _field_names(original):
-    candidates = {}
-    for name, value in field_values(original).items():
-        if value:
-            candidates.setdefault(value.strip().casefold(), []).append(name)
-    return candidates
+def speaker_name_key(name):
+    return ' '.join(name.split()).casefold()
+
+
+def _label_range(paragraph):
+    offset, _, label, _ = paragraph
+    return offset+label.start('name'), offset+label.end('name')
+
+
+@dataclass(frozen=True)
+class SpeakerChoice:
+    name: str
+    references: tuple[NativeElement, ...]
+
+    @property
+    def selectable(self):
+        return len(self.references) <= 1
+
+
+def _speaker_choices(paragraphs, fields):
+    labels = {}
+    for paragraph in paragraphs:
+        label = paragraph[2]
+        if not label or GENERIC.fullmatch(label['name']):
+            continue
+        name = label['name'].strip()
+        _, references = labels.setdefault(speaker_name_key(name), (name, {}))
+        if field := fields.get(_label_range(paragraph)):
+            references.setdefault(field.name, field)
+    return {key: SpeakerChoice(name, tuple(references.values()))
+            for key, (name, references) in labels.items()}
+
+
+def _field_ranges(revision):
+    return {(e.start, e.end): e for e in revision.elements if e.kind == 'field'}
+
+
+def speaker_choices(original):
+    """Offer labels used in the transcript, including literal labels."""
+    return {key: choice for key, choice in
+            _speaker_choices(_paragraphs(original.text), _field_ranges(original)).items()
+            if choice.selectable}
+
+
+def _replace_speaker(revision, start, end, name, reference, values):
+    if reference is None:
+        return revision._replace(start, end, name)
+    result = revision._replace(start, end, '').insert_field(start, reference.name, values[reference.name])
+    return replace(result, elements=tuple(
+        replace(e, raw=reference.raw, source=reference.source)
+        if e.kind == 'field' and e.start == start else e for e in result.elements))
 
 
 def _restore_trailing(original, text):
@@ -217,84 +263,93 @@ def prepare(original, text, *, evidence=None, overrides=None):
     """Return a structured proposal and JSON-safe, frozen speaker evidence."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     old, new, pairs = aligned_paragraphs(original.text, text)
-    fields = _field_names(original)
+    fields = _field_ranges(original)
+    choices = _speaker_choices(old, fields)
+    paired = {j: i for i, j in pairs}
     if evidence is None:
         counts, occurrences = {}, []
+        unaligned = Counter()
         old_counts = Counter(p[3] for p in old if p[2])
         new_counts = Counter(p[3] for p in new if p[2])
-        paired = {j: i for i, j in pairs}
-        for j, (offset, line, label, body) in enumerate(new):
-            if not label or not GENERIC.fullmatch(label['name']):
+        for j, paragraph in enumerate(new):
+            _, _, label, body = paragraph
+            if not label or not (tag := GENERIC.fullmatch(label['name'])):
                 continue
-            speaker = 'SPEAKER ' + str(int(GENERIC.fullmatch(label['name'])[1]))
-            counts.setdefault(speaker, Counter())
+            speaker = f'SPEAKER {int(tag[1])}'
+            votes = counts.setdefault(speaker, Counter())
             source = old[paired[j]] if j in paired else None
             name = None
-            if (source and source[2] and body and source[3]
+            if (source and source[2] and (choice := choices.get(speaker_name_key(source[2]['name'])))
+                    and body and source[3]
                     and old_counts[source[3]] == new_counts[body] == 1
                     and SequenceMatcher(None, source[3], body, autojunk=False).ratio() >= .5):
-                name = source[2]['name'].strip()
-                counts[speaker][name] += 1
+                name = choice.name
+                votes[name] += 1
+            else:
+                unaligned[speaker] += 1
+            start, end = _label_range(paragraph)
             occurrences.append({'id': len(occurrences), 'speaker': speaker,
-                                'original_name': name, 'start': offset+label.start('name'),
-                                'end': offset+label.end('name')})
+                                'original_name': name, 'start': start, 'end': end})
         summaries = {}
         for speaker, votes in counts.items():
-            ranked = sorted(votes, key=lambda name: (-votes[name], name))
-            leader = ranked[0] if ranked else None
-            winner = leader if leader and votes[leader] >= 2 and votes[leader] > sum(votes.values())/2 else None
-            if winner and len(fields.get(winner.casefold(), [])) != 1:
-                winner = None
+            leader, support = votes.most_common(1)[0] if votes else (None, 0)
+            winner = leader if (support >= 2 and support * 2 > sum(votes.values())
+                                and choices[speaker_name_key(leader)].selectable) else None
             summaries[speaker] = {'counts': dict(votes), 'mapped': winner, 'leader': leader,
-                                  'unresolved': sum(o['speaker'] == speaker and o['original_name'] is None for o in occurrences)}
+                                  'unresolved': unaligned[speaker]}
         evidence = {'speakers': summaries, 'occurrences': occurrences}
     mappings = {key: value['mapped'] for key, value in evidence['speakers'].items()}
     mappings.update(overrides or {})
     edits = []
-    for offset, line, label, body in new:
-        if label and GENERIC.fullmatch(label['name']):
-            speaker = 'SPEAKER ' + str(int(GENERIC.fullmatch(label['name'])[1]))
-            name = mappings.get(speaker)
-            if name:
-                if len(fields.get(name.casefold(), [])) != 1:
-                    raise ValueError('Choose a name with one existing native field.')
-                edits.append((offset+label.start('name'), offset+label.end('name'), name))
+    for j, paragraph in enumerate(new):
+        label = paragraph[2]
+        if label and (tag := GENERIC.fullmatch(label['name'])) and (name := mappings.get(f'SPEAKER {int(tag[1])}')):
+            key = speaker_name_key(name)
+            choice = choices.get(key)
+            if not choice or not choice.selectable:
+                raise ValueError('Choose an existing speaker label.')
+            prior = old[paired[j]][2] if j in paired else None
+            display = prior['name'] if prior and speaker_name_key(prior['name']) == key else choice.name
+            edits.append((*_label_range(paragraph), display))
     for a, b, name in reversed(edits):
         text = text[:a] + name + text[b:]
     text = _restore_trailing(original, text)
     # Do not let whole-text revision treat attribution changes as global renames.
     attribution_paragraphs = [old[i] for i, j in pairs if new[j][2] and (
-        GENERIC.fullmatch(new[j][2]['name']) or (new[j][2]['name'].strip().casefold() in fields
+        GENERIC.fullmatch(new[j][2]['name']) or (speaker_name_key(new[j][2]['name']) in choices
         and old[i][2] and old[i][2]['name'] != new[j][2]['name']))]
     if evidence['occurrences']:
         # Unpaired paragraphs can move across token alignment blocks too.
         # No speaker occurrence may be interpreted as a global definition edit
         # while resolving generic AI labels.
         attribution_paragraphs = old
-    speaker_elements = {e for e in original.elements if e.kind == 'field' and any(
-        p[2] and p[0]+p[2].start('name') == e.start and p[0]+p[2].end('name') == e.end for p in attribution_paragraphs)}
+    speaker_elements = {fields[_label_range(p)] for p in attribution_paragraphs
+                        if p[2] and _label_range(p) in fields}
     base = replace(original, elements=tuple(e for e in original.elements if e not in speaker_elements))
     from app.src.suggestions import propose
     revision = propose(base, text)
     _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text)
     aligned_sources = {j: old[i] for i,j in projected_pairs}
+    values = field_values(original)
+    projected_fields = _field_ranges(revision)
     for paragraph_index in reversed(range(len(projected))):
-        offset, line, label, body = projected[paragraph_index]
-        if label and not GENERIC.fullmatch(label['name']):
-            names = fields.get(label['name'].strip().casefold(), [])
-            if len(names) == 1:
-                a, b = offset+label.start('name'), offset+label.end('name')
-                if any(e.kind == 'field' and e.start == a and e.end == b for e in revision.elements):
-                    continue
-                revision = revision._replace(a, b, '').insert_field(a, names[0], field_values(original)[names[0]])
-                candidates = [e for e in original.elements if e.kind == 'field' and e.name == names[0]]
-                source = aligned_sources.get(paragraph_index)
-                exact = next((e for e in candidates if source and source[2] and e.start == source[0]+source[2].start('name')), None)
-                template = exact or (candidates[0] if candidates else None)
-                if template:
-                    revision = replace(revision, elements=tuple(
-                        replace(e, raw=template.raw, source=template.source) if e.kind == 'field' and e.start == a else e
-                        for e in revision.elements))
+        paragraph = projected[paragraph_index]
+        label = paragraph[2]
+        if not label:
+            continue
+        key = speaker_name_key(label['name'])
+        if not (choice := choices.get(key)):
+            continue
+        a, b = _label_range(paragraph)
+        if (a, b) in projected_fields:
+            continue
+        source = aligned_sources.get(paragraph_index)
+        if source and source[2] and speaker_name_key(source[2]['name']) == key:
+            reference = fields.get(_label_range(source))
+        else:
+            reference = choice.references[0] if len(choice.references) == 1 else None
+        if reference:
+            revision = _replace_speaker(revision, a, b, label['name'], reference, values)
     return revision, evidence
 
 
@@ -412,20 +467,22 @@ def override_speaker(state, speaker, name):
     """Change pending attributions without replaying completed decisions."""
     if state.review is None or speaker not in state.review['evidence']['speakers']:
         raise ValueError('This speaker result is no longer available.')
-    fields = _field_names(state.original)
-    if name is not None and len(fields.get(name.casefold(), [])) != 1:
-        raise ValueError('Choose a name with one existing native field.')
+    choice = None
+    if name is not None:
+        choice = speaker_choices(state.original).get(speaker_name_key(name))
+        if choice is None:
+            raise ValueError('Choose an existing speaker label.')
+        name = choice.name
+    reference = choice.references[0] if choice and choice.references else None
+    values = field_values(state.original) if reference else {}
     revision = state.incoming
     locations = state.review['locations']
     for loc in sorted((p for p in locations if p['speaker'] == speaker and not p['resolved']), key=lambda p:p['start'], reverse=True):
         a, b = loc['start'], loc['end']
         value = name or speaker
-        revised = revision._replace(a, b, '')
-        if name:
-            field = fields[name.casefold()][0]
-            revised = revised.insert_field(a, field, field_values(state.original)[field])
-        else:
-            revised = revised._replace(a, a, value)
+        if revision.text[a:b] == value:
+            continue
+        revised = _replace_speaker(revision, a, b, value, reference, values)
         delta = len(revised.text) - len(revision.text)
         for other in locations:
             if other is loc:

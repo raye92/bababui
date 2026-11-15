@@ -204,7 +204,7 @@ def test_next_suggestion_is_shown_and_focused_before_preview_is_ready(window, ac
     first, second = panel.cards
     start, *_ = panel.changes[1].ranges[0]
     panel.select(0)
-    button = next(b for b in first.findChildren(QPushButton) if b.text() == action)
+    button = next(b for b in panel.decision_buttons if b.text() == action)
 
     button.click()
     try:
@@ -213,7 +213,7 @@ def test_next_suggestion_is_shown_and_focused_before_preview_is_ready(window, ac
         assert first.isHidden() and not second.isHidden()
         assert panel.current == 1
         assert 'horse' in second.findChild(QLabel, 'comparison').text()
-        assert all(not b.isEnabled() for b in second.findChildren(QPushButton))
+        assert all(not b.isEnabled() for b in panel.decision_buttons)
         assert view.inline_editor.source_position() == ('original', start)
         assert view.inline_editor.verticalScrollBar().value() > 0
     finally:
@@ -223,7 +223,7 @@ def test_next_suggestion_is_shown_and_focused_before_preview_is_ready(window, ac
     assert 'horse' in panel.cards[0].findChild(QLabel, 'comparison').text()
     start, *_ = panel.changes[0].ranges[0]
     assert view.inline_editor.source_position() == ('original', start)
-    assert all(b.isEnabled() for b in panel.cards[0].findChildren(QPushButton))
+    assert all(b.isEnabled() for b in panel.decision_buttons)
 
 
 def test_recovered_scroll_position_is_not_overwritten(tmp_path, monkeypatch):

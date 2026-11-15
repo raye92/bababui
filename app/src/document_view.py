@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton,
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
 from app.src.review_model import build_review
+from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
@@ -314,7 +315,8 @@ class DocumentView(QWidget):
         self._set_text(self.incoming_editor, doc.incoming, previews.get('incoming'))
         self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
         self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
-        self.inline_editor.set_model(self.review_model)
+        self.inline_editor.set_model(
+            self.review_model, unmatched_speakers=self.diff_view.unmatched_speaker_ranges)
         self.original_stack.setCurrentWidget(self.inline_page if self.review_model.edits else self.original_page)
         self.inline_page.fit_page()
         self.original_page.fit_page()
@@ -350,6 +352,15 @@ class DocumentView(QWidget):
                     if index == self.diff_view.current:
                         mark.format.setBackground(QColor('#ffaaa5' if side == 'original' else '#7ee2a8'))
                         mark.format.setFontUnderline(True)
+                    marks.append(mark)
+            if side == 'incoming' or not self.diff_view.has_changes:
+                for start, end in self.diff_view.unmatched_speaker_ranges:
+                    mark = QTextEdit.ExtraSelection()
+                    mark.cursor = QTextCursor(editor.document())
+                    mark.cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
+                    mark.cursor.setPosition(len(text[:end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
+                    mark.format.setBackground(QColor(CHECK_BACKGROUND))
+                    mark.format.setForeground(QColor(CHECK_FOREGROUND))
                     marks.append(mark)
             editor._selected_review = self.diff_view.current
             editor.set_review_marks(marks, insertions)

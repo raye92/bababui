@@ -104,6 +104,18 @@ def text_edits(a, b):
     return advanced_diff.text_edits(a, b)
 
 
+def _attribution_span(text, start, end):
+    from app.src.suggestion_filter import LABEL
+    line_start = text.rfind('\n', 0, start) + 1
+    line_end = text.find('\n', start)
+    label = LABEL.match(text[line_start:line_end if line_end >= 0 else len(text)])
+    if label:
+        a, b = (line_start + i for i in label.span('name'))
+        if a <= start <= end <= b:
+            return a, b
+    return None
+
+
 def suggestions(original, incoming):
     if original == incoming:
         return []
@@ -112,6 +124,13 @@ def suggestions(original, incoming):
     # Expand both sides together so adopting a field/symbol cannot cut it in half.
     expanded = []
     for start, end, ns, ne in gaps:
+        # A change from one speaker label to another is one decision, even
+        # for literal labels or when one side only deletes part of a name.
+        old_label = _attribution_span(a, start, end)
+        new_label = _attribution_span(b, ns, ne)
+        if old_label and new_label:
+            start, end = old_label
+            ns, ne = new_label
         left_field = next((e for e in original.elements if e.kind == 'field'
                            and e.start <= start <= end <= e.end and start < e.end), None)
         right_field = next((e for e in incoming.elements if e.kind == 'field'

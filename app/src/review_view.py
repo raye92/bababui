@@ -1,9 +1,11 @@
 """One exact review decision with fixed navigation and speaker evidence."""
+from bisect import bisect_right
+from collections import Counter
 from html import escape
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QToolButton, QComboBox, QProgressBar)
-from app.src.casecat.fields import field_values
+    QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
+from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context
 
 
@@ -69,6 +71,51 @@ class ReviewCard(QWidget):
             super().mouseReleaseEvent(event)
 
 
+class SpeakerCombo(QComboBox):
+    def wheelEvent(self, event):
+        # Wheel motion over the closed control scrolls the speaker list.
+        event.ignore()
+
+
+def _attribution_edits(model, locations, needs_check):
+    """Find pending label replacements and uncertain labels in the actual diff."""
+    pending = sorted((p for p in locations if not p['resolved'] and p['start'] < p['end']),
+                     key=lambda p: p['start'])
+    if not pending:
+        return {}
+    ends = [p['end'] for p in pending]
+    original, incoming = model.original.text, model.incoming.text
+    by_speaker = {}
+    for index, edit in enumerate(model.edits):
+        for a, b, c, d in edit.ranges:
+            if c == d:
+                continue
+            first = bisect_right(ends, c)
+            for i in range(first, len(pending)):
+                location = pending[i]
+                start, end = location['start'], location['end']
+                if start >= d:
+                    break
+                speaker = location['speaker']
+                current = speaker_name_key(incoming[start:end])
+                observed = location.get('original_name')
+                if observed and speaker_name_key(observed) == current:
+                    continue
+                line_start = original.rfind('\n', 0, a) + 1
+                line_end = original.find('\n', a)
+                before = LABEL.match(original[line_start:line_end if line_end >= 0 else len(original)])
+                mismatch = bool(observed)
+                if before and incoming.rfind('\n', 0, c) == incoming.rfind('\n', 0, start):
+                    label_start, label_end = (line_start + pos for pos in before.span('name'))
+                    if (a < label_end and b > label_start) or (a == b and label_start <= a <= label_end):
+                        if speaker_name_key(before['name']) == current:
+                            continue
+                        mismatch = True
+                if mismatch or speaker in needs_check:
+                    by_speaker.setdefault(speaker, set()).add(index)
+    return by_speaker
+
+
 class ReviewView(QWidget):
     requested = Signal(int, bool)
     bulk_requested = Signal(bool)
@@ -80,7 +127,10 @@ class ReviewView(QWidget):
         self.changes, self.cards, self.visible_indices = [], [], []
         self.current = 0
         self.speaker_filter = None
-        self.review = None
+        self.review = self._shown_review = None
+        self.speaker_edits = {}
+        self.needs_review = frozenset()
+        self.unmatched_speaker_ranges = ()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 4, 8, 4)
         self.count = QLabel()
@@ -90,9 +140,14 @@ class ReviewView(QWidget):
         self.summary.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.summary.setArrowType(Qt.DownArrow)
         self.layout.addWidget(self.summary)
-        self.speaker_box = QWidget()
-        self.layout.addWidget(self.speaker_box)
-        self.summary.toggled.connect(self.speaker_box.setVisible)
+        self.speaker_scroll = QScrollArea()
+        self.speaker_scroll.setFrameShape(QFrame.NoFrame)
+        self.speaker_scroll.setWidgetResizable(True)
+        self.speaker_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.speaker_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.speaker_scroll.hide()
+        self.layout.addWidget(self.speaker_scroll, 2)
+        self.summary.toggled.connect(self.speaker_scroll.setVisible)
         self.summary.toggled.connect(lambda on: self.summary.setArrowType(Qt.DownArrow if on else Qt.RightArrow))
         self.all_button = QPushButton('Show all suggestions')
         self.all_button.clicked.connect(lambda: self.filter_speaker(None))
@@ -111,6 +166,19 @@ class ReviewView(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.layout.addWidget(self.scroll, 1)
+        decisions = QHBoxLayout()
+        self.decision_buttons = []
+        for caption, accept in (('Accept', True), ('Reject', False)):
+            button = QPushButton(caption)
+            button.setEnabled(False)
+            button.clicked.connect(lambda _, accepted=accept: self._request_current(accepted))
+            button.setToolTip('Apply the proposed change.' if accept else 'Keep the original for this change.')
+            color = '#1f883d' if accept else '#cf222e'
+            button.setStyleSheet('QPushButton { padding: 4px; border-radius: 3px; } '
+                                 f'QPushButton:enabled {{ background: {color}; color: white; }}')
+            decisions.addWidget(button)
+            self.decision_buttons.append(button)
+        self.layout.addLayout(decisions)
         navigation = QHBoxLayout()
         self.navigation_buttons = []
         for caption, delta in (('Previous', -1), ('Next', 1)):
@@ -132,12 +200,14 @@ class ReviewView(QWidget):
     def set_model(self, model, *, review=None, page_lines=()):
         self.model = model
         self.changes = model.edits
+        for button in self.decision_buttons:
+            button.setDown(False)
         for button in self.bulk_buttons:
             button.setEnabled(self.has_changes)
         self.review = review
         original, incoming = model.original, model.incoming
-        self.original, self.incoming = original, incoming
         self._speakers(original)
+        attribution = set().union(*self.speaker_edits.values())
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -152,10 +222,16 @@ class ReviewView(QWidget):
             rows.setSpacing(6)
             before = '\n'.join(original.text[a:b] for a, b, _, _ in change.ranges)
             after = '\n'.join(incoming.text[c:d] for _, _, c, d in change.ranges)
-            title = 'Speaker attribution' if self._speaker_for(change) else 'Linked field' if change.field else 'Wording'
+            needs_review = index in self.needs_review
+            if needs_review:
+                title = 'Speaker attribution · Needs review'
+            elif index in attribution:
+                title = 'Speaker attribution'
+            else:
+                title = 'Linked field' if change.field else 'Wording'
             if change.kind == 'metadata':
                 title = 'Native fields and symbols'
-            if change.kind == 'structure':
+            if change.kind == 'structure' and index not in attribution:
                 title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
             if change.ranges:
                 start = change.ranges[0][0]
@@ -177,16 +253,6 @@ class ReviewView(QWidget):
                 label.setTextInteractionFlags(Qt.NoTextInteraction)
                 label.setStyleSheet('padding:4px;')
                 rows.addWidget(label)
-            buttons = QHBoxLayout()
-            for caption, accept in (('Accept', True), ('Reject', False)):
-                button = QPushButton(caption)
-                button.clicked.connect(lambda _, i=index, accepted=accept, snapshot=model:
-                                       self.requested.emit(i, accepted) if self.model is snapshot else None)
-                button.setToolTip('Apply the proposed change.' if accept else 'Keep the original for this change.')
-                color = '#1f883d' if accept else '#cf222e'
-                button.setStyleSheet(f'background:{color}; color:white; padding:4px; border-radius:3px;')
-                buttons.addWidget(button)
-            rows.addLayout(buttons)
             layout.addWidget(card)
             self.cards.append(card)
         layout.addStretch()
@@ -199,73 +265,102 @@ class ReviewView(QWidget):
         self._mark_selected()
 
     def _speakers(self, original):
-        old = self.speaker_box
         box = QWidget()
         rows = QVBoxLayout(box)
         rows.setContentsMargins(0, 0, 0, 0)
         summaries = (self.review or {}).get('evidence', {}).get('speakers', {})
-        total_matches = 0
-        values = field_values(original)
-        names = sorted(value for value in set(values.values()) if value and sum(v == value for v in values.values()) == 1 and any(e.kind == 'field' and e.name in values and values[e.name] == value for e in original.elements))
+        overrides = (self.review or {}).get('overrides', {})
+        choices = speaker_choices(original) if summaries else {}
+        names = sorted((choice.name for choice in choices.values()), key=str.casefold)
+        mappings = {}
         for speaker, summary in summaries.items():
-            mapped = self.review.get('overrides', {}).get(speaker, summary['mapped'])
-            leading = mapped or summary['leader']
-            matches = summary['counts'].get(leading, 0)
-            mismatches = sum(summary['counts'].values())-matches
+            name = overrides.get(speaker, summary['mapped'])
+            choice = choices.get(speaker_name_key(name)) if name else None
+            mappings[speaker] = choice.name if choice else None
+        uses = Counter(name for name in mappings.values() if name)
+        matches_by_speaker = {}
+        needs_check = set()
+        for speaker, summary in summaries.items():
+            mapped = mappings[speaker]
+            matches = sum(count for name, count in summary['counts'].items()
+                          if mapped and speaker_name_key(name) == speaker_name_key(mapped))
+            matches_by_speaker[speaker] = matches
+            if matches < 2 or (speaker not in overrides and uses[mapped] > 1):
+                needs_check.add(speaker)
+        locations = (self.review or {}).get('locations', ())
+        self.speaker_edits = _attribution_edits(self.model, locations, needs_check)
+        self.needs_review = frozenset(index for speaker in needs_check
+                                      for index in self.speaker_edits.get(speaker, ()))
+        self.unmatched_speaker_ranges = tuple(sorted(
+            (p['start'], p['end']) for p in locations
+            if not p['resolved'] and p['start'] < p['end'] and mappings.get(p['speaker']) is None))
+
+        total_matches = 0
+        for speaker, summary in summaries.items():
+            mapped = mappings[speaker]
+            matches = matches_by_speaker[speaker]
+            mismatches = sum(summary['counts'].values())-matches if mapped else 0
             total_matches += matches
-            label = QLabel(f'{speaker} → {mapped or "Unresolved"}' + (f' (leading: {leading})' if not mapped and leading else ''))
+            heading = QHBoxLayout()
+            label = QLabel(f'{speaker} → {mapped or "Needs review"}')
             label.setWordWrap(True)
             label.setTextFormat(Qt.PlainText)
-            rows.addWidget(label)
-            combo = QComboBox()
-            combo.addItem('Keep generic label', None)
+            heading.addWidget(label, 1)
+            button = QPushButton('Review')
+            button.setToolTip('Review pending attribution differences for this speaker.')
+            button.setEnabled(bool(self.speaker_edits.get(speaker)))
+            button.clicked.connect(lambda _, s=speaker: self.filter_speaker(s))
+            heading.addWidget(button, 0, Qt.AlignRight)
+            rows.addLayout(heading)
+            combo = SpeakerCombo()
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.addItem('Needs review', None)
             for name in names:
                 combo.addItem(name, name)
             combo.setCurrentIndex(max(0, combo.findData(mapped)))
-            combo.activated.connect(lambda i, s=speaker, c=combo: self.mapping_requested.emit(s, c.itemData(i)))
+            automatic = summary['mapped']
+            if automatic:
+                combo.setToolTip(f'Automatic match: {automatic}')
+            combo.activated.connect(lambda i, s=speaker, c=combo, snapshot=box:
+                                    self.mapping_requested.emit(s, c.itemData(i))
+                                    if self.speaker_scroll.widget() is snapshot else None)
             rows.addWidget(combo)
             bar = QProgressBar()
             bar.setRange(0, max(1, matches+mismatches))
             bar.setValue(matches)
-            bar.setFormat(f'{matches} matches · {mismatches} mismatches')
+            bar.setFormat(f'{matches} {"match" if matches == 1 else "matches"} · '
+                          f'{mismatches} {"mismatch" if mismatches == 1 else "mismatches"}')
             bar.setToolTip('Agreement with existing labels, not verified identity.\n'+'\n'.join(f'{n}: {v}' for n,v in summary['counts'].items()))
             rows.addWidget(bar)
-            if summary['unresolved']:
-                rows.addWidget(QLabel(f'{summary["unresolved"]} unaligned occurrences'))
-            button = QPushButton('Review attribution differences')
-            button.clicked.connect(lambda _, s=speaker: self.filter_speaker(s))
-            rows.addWidget(button)
-        self.layout.replaceWidget(old, box)
-        self.speaker_box = box
-        old.deleteLater()
-        box.setVisible(bool(summaries) and self.summary.isChecked())
+        scrollbar = self.speaker_scroll.verticalScrollBar()
+        position = scrollbar.value() if self.review is self._shown_review else 0
+        self._shown_review = self.review
+        old = self.speaker_scroll.takeWidget()
+        if old:
+            # A mapping change refreshes the list before combo activation returns.
+            old.hide()
+            old.setParent(self.speaker_scroll)
+            old.deleteLater()
+        self.speaker_scroll.setWidget(box)
+        self._size_speaker_list()
+        self.speaker_scroll.setVisible(bool(summaries) and self.summary.isChecked())
+        scrollbar.setValue(position)
         self.summary.setVisible(bool(summaries))
         self.summary.setText(f'Speakers · {total_matches} matches')
-        try:
-            self.summary.toggled.disconnect()
-        except RuntimeError:
-            pass
-        self.summary.toggled.connect(box.setVisible)
-        self.summary.toggled.connect(lambda on: self.summary.setArrowType(Qt.DownArrow if on else Qt.RightArrow))
 
-    def _speaker_for(self, change):
-        if not self.review:
-            return None
-        for location in self.review.get('locations', []):
-            if not location['resolved'] and any(c < location['end'] and d > location['start'] for _,_,c,d in change.ranges):
-                return location['speaker']
-        if self.review.get('locations'):
-            return None
-        # Useful for isolated evidence previews before positions are attached.
-        for speaker, summary in self.review['evidence']['speakers'].items():
-            mapped = self.review.get('overrides', {}).get(speaker, summary['mapped'])
-            if mapped and any(self.incoming.text[c:d] == mapped and self.original.text[a:b] != mapped for a,b,c,d in change.ranges):
-                return speaker
-        return None
+    def _size_speaker_list(self):
+        box = self.speaker_scroll.widget()
+        if box:
+            self.speaker_scroll.setMaximumHeight(min(box.sizeHint().height(), self.height() * 5 // 12))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._size_speaker_list()
 
     def filter_speaker(self, speaker, *, select=True):
         self.speaker_filter = speaker
-        self.visible_indices = [i for i,c in enumerate(self.changes) if speaker is None or self._speaker_for(c) == speaker]
+        self.visible_indices = (list(range(len(self.changes))) if speaker is None else
+                                sorted(self.speaker_edits.get(speaker, ())))
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
         if self.visible_indices and self.current not in self.visible_indices:
@@ -282,11 +377,17 @@ class ReviewView(QWidget):
             self.select(self.visible_indices[(index+step) % len(self.visible_indices)])
 
     def _mark_selected(self):
+        for button in self.decision_buttons:
+            button.setEnabled(self.current in self.visible_indices)
         for button in self.navigation_buttons:
             button.setEnabled(len(self.visible_indices) > 1)
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
+
+    def _request_current(self, accept):
+        if self.current in self.visible_indices:
+            self.requested.emit(self.current, accept)
 
     def show_next_pending(self, index):
         self.count.setText('Updating preview…')
@@ -303,7 +404,7 @@ class ReviewView(QWidget):
                 self.filter_speaker(None, select=False)
             self.current = index
             self._mark_selected()
-            self.scroll.ensureWidgetVisible(self.cards[index])
+            self.scroll.verticalScrollBar().setValue(0)
             self.selected.emit(index)
 
     def center_line(self): return self.current

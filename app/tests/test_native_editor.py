@@ -47,7 +47,7 @@ def test_review_card_click_and_space_playback(native_window, tmp_path, monkeypat
     toggles = []
     monkeypatch.setattr(view.playback, 'toggle', lambda: toggles.append(True))
     native_window.activateWindow()
-    for target in (view.editor, card.findChild(QPushButton)):
+    for target in (view.editor, view.diff_view.decision_buttons[0]):
         target.setFocus()
         app.processEvents()
         before = len(toggles)

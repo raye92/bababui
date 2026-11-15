@@ -353,7 +353,7 @@ def test_review_decisions_seek_without_changing_playback_state(audio_view, decis
     view.activateWindow()
     QTest.qWait(1)
     assert len(view.diff_view.changes) == (2 if remaining else 1)
-    button = next(button for button in view.diff_view.cards[0].findChildren(QPushButton)
+    button = next(button for button in view.diff_view.findChildren(QPushButton)
                   if button.text() == decision)
     player = view.playback.player
     before = set_playback_state(player, state)

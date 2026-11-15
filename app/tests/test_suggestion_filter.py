@@ -113,3 +113,34 @@ def test_matching_native_speakers_keep_reference_identity_and_crlf_offsets():
     assert state.original.elements==state.incoming.elements
     assert len(state.review['locations'])==2
     assert Revision.from_dict(state.incoming.to_dict())==state.incoming
+
+
+def test_automatic_match_combines_label_case_and_keeps_literal_witness():
+    from app.src.suggestion_filter import prepare
+
+    original = Revision((AnchoredSpan('root', (), (),
+        'THE WITNESS: I read the contract before signing.\n'
+        'The Witness: I kept a copy in my desk.\n'
+        'MR. LEISER: When did you receive the final invoice?'),))
+    text = '\n'.join('SPEAKER 2:' + line.split(':', 1)[1] for line in original.text.splitlines())
+    incoming, evidence = prepare(original, text)
+    assert evidence['speakers']['SPEAKER 2']['counts'] == {'THE WITNESS': 2, 'MR. LEISER': 1}
+    assert evidence['speakers']['SPEAKER 2']['mapped'] == 'THE WITNESS'
+    assert incoming.text == original.text.replace('MR. LEISER:', 'THE WITNESS:')
+    assert not incoming.elements
+
+
+def test_speaker_override_can_use_literal_label_but_not_cover_field():
+    from types import SimpleNamespace
+    import pytest
+    from app.src.suggestion_filter import begin_review, override_speaker
+
+    original = Revision((AnchoredSpan('root', (), (), 'THE WITNESS: I brought the invoice.'),))
+    original = original._replace(0, 0, '\n').insert_field(0, 'DEPONENT', 'STEPHANE JOHNSON, M.D.')
+    state = SimpleNamespace(original=original)
+    begin_review(state, original.text.replace('THE WITNESS:', 'SPEAKER 1:'))
+    with pytest.raises(ValueError, match='speaker'):
+        override_speaker(state, 'SPEAKER 1', 'STEPHANE JOHNSON, M.D.')
+    override_speaker(state, 'SPEAKER 1', 'THE WITNESS')
+    assert state.incoming.text == original.text
+    assert state.incoming.elements == original.elements

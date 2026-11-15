@@ -3,22 +3,25 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from html import unescape
 import re
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton
 from app.src.review_view import ReviewView, change_diff
-from app.src.suggestions import Suggestion
+from app.src.suggestions import Suggestion, resolve
 from app.tests.test_suggestion_filter import speakers
 from app.tests.test_suggestions import revision
 
 
 def test_speaker_summary_is_fixed_and_cards_filter_to_mismatches():
-    from app.src.suggestion_filter import prepare
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
     app = QApplication.instance() or QApplication([])
     original = speakers(['MS. SIEMENS']*8 + ['MR. LEISER']*2)
-    incoming, evidence = prepare(original, original.text.replace('MS. SIEMENS:', 'SPEAKER 3:').replace('MR. LEISER:', 'SPEAKER 3:'))
+    state = SimpleNamespace(original=original)
+    begin_review(state, original.text.replace('MS. SIEMENS:', 'SPEAKER 3:').replace('MR. LEISER:', 'SPEAKER 3:'))
     view = ReviewView()
-    view.set_revisions(original, incoming, review={'evidence':evidence,'overrides':{},'locations':[]})
+    view.set_revisions(original, state.incoming, review=state.review)
     assert view.summary.parent() is view
     assert '8 matches' in view.summary.text()
     view.filter_speaker('SPEAKER 3')
@@ -30,6 +33,127 @@ def test_speaker_summary_is_fixed_and_cards_filter_to_mismatches():
     assert sum(not card.isHidden() for card in view.cards) == 1
     view.select(1)
     assert view.current == 1
+    view.close()
+
+
+def test_speaker_dropdown_keeps_automatic_match_when_scrolling_and_lists_actual_labels():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review, override_speaker
+
+    app = QApplication.instance() or QApplication([])
+    original = speakers(['MR. REFF'] + ['MS. LIN'] * 10)
+    original = original._replace(len(original.text), len(original.text), 'THE WITNESS: I found it.\n')
+    for field, value in [
+        ('CREATION DATE IN WORDS', 'October 28, 2026'),
+        ('CREATION DAY OF WEEK', 'Wednesday'),
+        ('DEPONENT', 'STEPHANE JOHNSON, M.D.'),
+    ]:
+        original = original._replace(0, 0, '\n').insert_field(0, field, value)
+    state = SimpleNamespace(original=original)
+    begin_review(state, original.text.replace('MS. LIN:', 'SPEAKER 2:'))
+    view = ReviewView()
+    view.set_revisions(original, state.incoming, review=state.review)
+    view.show()
+    app.processEvents()
+    (combo,) = view.findChildren(QComboBox)
+    assert {combo.itemData(i) for i in range(combo.count())} == {None, 'MR. REFF', 'MS. LIN', 'THE WITNESS'}
+    assert combo.currentData() == 'MS. LIN'
+    assert '10 matches' in view.summary.text()
+
+    def select_name(speaker, name):
+        override_speaker(state, speaker, name)
+        view.set_revisions(original, state.incoming, review=state.review)
+
+    view.mapping_requested.connect(select_name)
+    point = combo.rect().center()
+    event = QWheelEvent(point, combo.mapToGlobal(point), QPoint(), QPoint(0, 120),
+                        Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
+    QApplication.sendEvent(combo, event)
+    assert combo.currentData() == 'MS. LIN' and state.review['overrides'] == {}
+    combo.setFocus()
+    QTest.keyClick(combo, Qt.Key_Up)
+    assert state.review['overrides'] == {'SPEAKER 2': 'MR. REFF'}
+    assert '0 matches' in view.summary.text()
+    view.close()
+
+
+def test_review_skips_new_turns_for_known_speaker_and_keeps_sidebar_diff_colors():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+
+    app = QApplication.instance() or QApplication([])
+    original = speakers(['MS. SIEMENS', 'MS. SIEMENS', 'MR. LEISER', 'MR. LEISER'])
+    lines = original.text.splitlines()
+    proposal = '\n'.join(
+        ['     SPEAKER 3:' + line.split(':', 1)[1] for line in lines[:3]]
+        + ['     SPEAKER 7:' + lines[3].split(':', 1)[1],
+           '     SPEAKER 3: I have an entirely new statement.', ''])
+    state = SimpleNamespace(original=original)
+    begin_review(state, proposal)
+    view = ReviewView()
+    view.set_revisions(original, state.incoming, review=state.review)
+    assert len(view.changes) > 2
+    view.filter_speaker('SPEAKER 3')
+    assert len(view.visible_indices) == 1
+    assert 'MR. LEISER' in plain_preview(view.cards[view.current].findChild(QLabel, 'comparison').text())
+    view.filter_speaker('SPEAKER 7')
+    assert len(view.visible_indices) == 1
+    card = view.cards[view.current]
+    comparison = card.findChild(QLabel, 'comparison').text()
+    assert '#ffe08a' not in comparison
+    assert '#ffd7d5' in comparison and '#ccffd8' in comparison
+    assert any('Needs review' in label.text() for label in card.findChildren(QLabel))
+    label = next(label for label in view.speaker_scroll.widget().findChildren(QLabel)
+                 if 'SPEAKER 7' in label.text())
+    assert '#ffe08a' not in label.styleSheet()
+    view.close()
+
+
+def test_literal_speaker_mismatch_is_one_review_decision():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+
+    app = QApplication.instance() or QApplication([])
+    original = revision('MS. LIN: This testimony refers to the signed contract.\n'
+                        'MS. LIN: The schedule was attached to the last page.\n'
+                        'MS. LIN JONES: Everyone received a copy the next morning.')
+    state = SimpleNamespace(original=original)
+    begin_review(state, original.text.replace('MS. LIN:', 'SPEAKER 1:').replace('MS. LIN JONES:', 'SPEAKER 1:'))
+    view = ReviewView()
+    view.set_revisions(original, state.incoming, review=state.review)
+    view.filter_speaker('SPEAKER 1')
+    assert len(view.visible_indices) == 1
+    ((a, b, c, d),) = view.changes[view.current].ranges
+    assert (original.text[a:b], state.incoming.text[c:d]) == ('MS. LIN JONES', 'MS. LIN')
+    _, rejected = resolve(original, state.incoming, view.changes[view.current], False)
+    assert rejected.text == original.text
+    view.close()
+
+
+@pytest.mark.parametrize('height', [480, 904])
+def test_long_speaker_menu_scrolls_without_covering_decisions(height):
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+
+    app = QApplication.instance() or QApplication([])
+    original = speakers(['MS. SIEMENS'] * 12)
+    state = SimpleNamespace(original=original)
+    begin_review(state, '\n'.join(line.replace('MS. SIEMENS:', f'SPEAKER {i}:')
+                                 for i, line in enumerate(original.text.split('\n'), 1)))
+    view = ReviewView()
+    view.resize(340, height)
+    view.set_revisions(original, state.incoming, review=state.review)
+    view.show()
+    view.filter_speaker('SPEAKER 4')
+    app.processEvents()
+    assert view.height() == height
+    assert view.speaker_scroll.height() > height // 3
+    assert view.speaker_scroll.verticalScrollBar().maximum() > 0
+    buttons = [b for b in view.findChildren(QPushButton) if b.text() in ('Accept', 'Reject')]
+    assert len(buttons) == 2
+    for button in buttons:
+        assert not view.scroll.isAncestorOf(button)
+        assert button.isEnabled() and button.mapTo(view, button.rect().bottomLeft()).y() < view.height()
     view.close()
 
 
@@ -136,7 +260,7 @@ def test_one_card_accepts_or_rejects_the_selected_edit():
     assert plain_preview(labels[0].text()) == 'The red car is largesmall.'
     QTest.mouseClick(card.findChild(QLabel), Qt.LeftButton)
     assert selected[-1] == 1
-    buttons = {button.text(): button for button in card.findChildren(QPushButton)}
+    buttons = {b.text(): b for b in view.findChildren(QPushButton) if b.text() in ('Accept', 'Reject')}
     assert set(buttons) == {'Accept', 'Reject'}
     buttons['Accept'].click()
     buttons['Reject'].click()
@@ -145,7 +269,7 @@ def test_one_card_accepts_or_rejects_the_selected_edit():
     view.close()
 
 
-def test_old_card_cannot_select_or_resolve_a_new_model_index():
+def test_old_card_cannot_select_a_new_model_index():
     from app.src.review_model import build_review
     from app.src.suggestions import resolve
     app = QApplication.instance() or QApplication([])
@@ -154,19 +278,15 @@ def test_old_card_cannot_select_or_resolve_a_new_model_index():
     view = ReviewView()
     view.set_model(model)
     old_card = view.cards[0]
-    old_accept = next(button for button in old_card.findChildren(QPushButton)
-                      if button.text() == 'Accept')
     requests, selected = [], []
     view.requested.connect(lambda index, accept: requests.append((index, accept)))
     view.selected.connect(selected.append)
     original, incoming = resolve(model.original, model.incoming, model.edits[0], True)
     view.set_model(build_review(original, incoming))
-    old_accept.click()
     old_card.clicked.emit()
     assert not requests
     assert not selected
-    next(button for button in view.cards[0].findChildren(QPushButton)
-         if button.text() == 'Accept').click()
+    next(button for button in view.findChildren(QPushButton) if button.text() == 'Accept').click()
     assert requests == [(0, True)]
     view.close()
 

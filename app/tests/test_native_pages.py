@@ -400,7 +400,7 @@ def test_wording_edit_preserves_native_layout_in_large_stroke_group(tmp_path, ac
     edited_text = replacement + source.text[1:]
     if action == 'accept suggestion':
         view.receive(edited_text, [])
-        button = next(button for button in view.diff_view.cards[0].findChildren(QPushButton)
+        button = next(button for button in view.diff_view.findChildren(QPushButton)
                       if button.text() == 'Accept')
         button.click()
         assert view._review_worker.wait(5000)

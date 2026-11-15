@@ -1,4 +1,5 @@
 """A read-only comparison over native transcript pages."""
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 import math
 
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
+from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 
 
 def _qt(text):
@@ -206,7 +208,7 @@ class InlineReviewEditor(QTextEdit):
                 editor.setPlainText(revision.text)
         return self.source_editors
 
-    def set_model(self, model):
+    def set_model(self, model, *, unmatched_speakers=()):
         anchor = self.source_position() if self.rows else ('original', 0)
         self.model = model
         original, incoming = self._sources(model)
@@ -309,7 +311,7 @@ class InlineReviewEditor(QTextEdit):
                          cursor_y-top+self._bottom)
             self.pages.append(ReviewPage(page, top, height))
             top += height
-        self._render_document()
+        self._render_document(unmatched_speakers)
         self.boundary_marks = []
         for index, edit in enumerate(model.edits):
             for a, b, c, d in edit.ranges:
@@ -325,8 +327,12 @@ class InlineReviewEditor(QTextEdit):
         self._refresh_selections()
         self.viewport().update()
 
-    def _render_document(self):
+    def _render_document(self, unmatched_speakers):
         document = self.document()
+        speaker_ends = [end for _, end in unmatched_speakers]
+        speaker_mark = QTextCharFormat()
+        speaker_mark.setBackground(QColor(CHECK_BACKGROUND))
+        speaker_mark.setForeground(QColor(CHECK_FOREGROUND))
         with QSignalBlocker(self), QSignalBlocker(document):
             super().setPlainText('\n'.join(row.text for row in self.rows))
             document.setUndoRedoEnabled(False)
@@ -370,6 +376,20 @@ class InlineReviewEditor(QTextEdit):
                             mark = QTextCharFormat()
                             mark.setBackground(QColor('#f2aba7' if row.kind == 'original' else '#9edcb0'))
                             cursor.mergeCharFormat(mark)
+                if speaker_ends and row.kind != 'original':
+                    source_start = row.incoming_start if row.kind == 'equal' else row.source_start
+                    source_end = source_start + len(row.text)
+                    first = bisect_right(speaker_ends, source_start)
+                    for index in range(first, len(unmatched_speakers)):
+                        start, end = unmatched_speakers[index]
+                        if start >= source_end:
+                            break
+                        left = max(0, start - source_start)
+                        right = min(len(row.text), end - source_start)
+                        if left < right:
+                            cursor.setPosition(position + _qt(row.text[:left]))
+                            cursor.setPosition(position + _qt(row.text[:right]), QTextCursor.KeepAnchor)
+                            cursor.mergeCharFormat(speaker_mark)
                 position = row.display_end + 1
             cursor.endEditBlock()
             document.setPageSize(QSizeF(self._page_width, -1))
