@@ -9,6 +9,7 @@ from app.src.suggestions import suggestions, resolve
 
 DEPARTURE = 'MR. LEISER: Can we go off real quick.\nMS. SIEMENS: Sure.\n'
 NOTE = '(A discussion was held off the record.)\nBY MS. SIEMENS:\n'
+AI_NOTE = '               (Off the record.)\n'
 RETURN = 'I would like to move to your March 27, 2026, report.'
 NEXT = 'On page 3 you state you would be willing to discuss the issue with Mr. Davis as it pertains to his inability to work correct?'
 LATER = "Yes, you know, I mean everybody's individually going to find them as they kind of thing."
@@ -71,10 +72,58 @@ def test_ambiguous_or_conflicting_boundaries_do_not_exclude(incoming):
     assert not state.review.get('off_record_changes')
 
 
-def test_spoken_request_without_original_notation_does_not_exclude():
-    state = state_for(ORIGINAL.replace(NOTE, ''))
-    begin_review(state, INCOMING)
+@pytest.mark.parametrize('notation', [
+    '(A discussion was held off the record.)',
+    '               (Off the record.)',
+    '  (  DISCUSSION OFF  THE RECORD AT 10:30 A.M.  )  ',
+    '(An off-the-record discussion followed.)',
+    "(At counsel's request, a discussion took place off the record.)",
+    '(Off the record).',
+])
+def test_reporter_notation_variants_filter_canonical_ai_output(notation):
+    reporter_note = notation + '\nBY MS. SIEMENS:\n'
+    state = state_for(ORIGINAL.replace(NOTE, reporter_note))
+    incoming = INCOMING.replace('SPEAKER 9:', AI_NOTE + 'SPEAKER 9:')
+    begin_review(state, incoming)
+    assert 'review the transcripts' not in state.incoming.text
+    assert state.incoming.text.startswith(DEPARTURE + reporter_note)
+    assert "I'd like to move" in state.incoming.text
+    change, = state.review['off_record_changes']
+    assert AI_NOTE in change['before']
+    assert change['after'] == DEPARTURE + reporter_note
+
+
+@pytest.mark.parametrize('return_note', ['(Back on the record.)', '(On the record.)'])
+def test_return_notation_stays_before_the_resumed_testimony(return_note):
+    reporter_note = AI_NOTE + return_note + '\nBY MS. SIEMENS:\n'
+    state = state_for(ORIGINAL.replace(NOTE, reporter_note))
+    incoming = INCOMING.replace('SPEAKER 9:', AI_NOTE + 'SPEAKER 9:')
+    begin_review(state, incoming)
+    assert state.incoming.text.startswith(DEPARTURE + reporter_note)
+    assert 'review the transcripts' not in state.incoming.text
+    assert "I'd like to move" in state.incoming.text
+
+
+@pytest.mark.parametrize('line', [
+    '',
+    'THE REPORTER: We are off the record.\n',
+    'THE REPORTER: We are (off the record).\n',
+    '(Off the recording device.)\n',
+    '(The parties did not go off the record.)\n',
+    '(A discussion off the record did not take place.)\n',
+    '(Counsel requested to go off the record.)\n',
+    '(The request to go off the record was denied.)\n',
+    '(Off the record was discussed, but the deposition remained on the record.)\n',
+    '(Off the record?)\n',
+    '(Back on the record after an off-the-record discussion.)\n',
+    '(The deposition resumed after an off-the-record discussion.)\n',
+])
+def test_ai_notation_without_original_departure_note_does_not_exclude(line):
+    state = state_for(ORIGINAL.replace(NOTE, line))
+    incoming = INCOMING.replace('SPEAKER 9:', AI_NOTE + 'SPEAKER 9:')
+    begin_review(state, incoming)
     assert 'review the transcripts' in state.incoming.text
+    assert not state.review.get('off_record_changes')
 
 
 def test_multiple_intervals_are_handled_in_order():

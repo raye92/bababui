@@ -2,7 +2,7 @@
 from difflib import SequenceMatcher
 import re
 
-from app.src.off_record import NOTE
+from app.src.off_record import is_off_record_note
 
 
 def _words(text):
@@ -13,7 +13,7 @@ def _words(text):
 
 
 def _has_note(text):
-    return any(NOTE.fullmatch(line) for line in text.splitlines())
+    return any(is_off_record_note(line) for line in text.splitlines())
 
 
 def _related(left, right):

@@ -35,10 +35,10 @@ def _layout(line):
 
 def _paragraph_ops(left, right):
     """Align transcript bodies with advanced diff, then place structural-only lines."""
-    from app.src.off_record import NOTE
+    from app.src.off_record import is_off_record_note
     from app.src.suggestion_filter import _paragraphs
-    notes_a = [i for i, line in enumerate(left) if NOTE.fullmatch(line)]
-    notes_b = [i for i, line in enumerate(right) if NOTE.fullmatch(line)]
+    notes_a = [i for i, line in enumerate(left) if is_off_record_note(line)]
+    notes_b = [i for i, line in enumerate(right) if is_off_record_note(line)]
     if notes_a and len(notes_a) == len(notes_b):
         result, i, j = [], 0, 0
         for a, b in zip(notes_a, notes_b):

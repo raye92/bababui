@@ -8,8 +8,29 @@ from difflib import SequenceMatcher
 import re
 
 
-NOTE = re.compile(r'^\s*\(a discussion was held off the record\s*\.?\)\s*$', re.I)
+_NOTE = re.compile(
+    r'^\s*\((?P<prefix>[^()\r\n]*?)\boff[ \t\u00a0-]+the[ \t\u00a0-]+record\b[^()\r\n]*\)\.?\s*$',
+    re.I,
+)
+_NON_DEPARTURE = re.compile(
+    r"\?|\b(?:no|not|never|denied|declined|\w+n['\u2019]t)\b"
+    r'|\b(?:ask(?:ed)?|request(?:ed)?)\s+to\s+go\b'
+    r'|\b(?:remain(?:ed)?|stay(?:ed)?)\s+on\s+the\s+record\b',
+    re.I,
+)
+_RETURN_PREFIX = re.compile(
+    r'\b(?:(?:back\s+on|return(?:ed|ing)?\s+to)\s+the\s+record|resum(?:ed|ing)\s+after)\b',
+    re.I,
+)
+_RETURN_NOTE = re.compile(r'^\s*\(\s*(?:back\s+)?on\s+the\s+record\s*\.?\s*\)\.?\s*$', re.I)
 TOKEN = re.compile(r"[^\W_]+(?:['\u2019][^\W_]+)*", re.UNICODE)
+
+
+def is_off_record_note(line):
+    """Recognize a standalone notation marking an off-the-record interval."""
+    note = _NOTE.fullmatch(line)
+    return (note is not None and not _NON_DEPARTURE.search(line)
+            and not _RETURN_PREFIX.search(note['prefix']))
 
 
 @dataclass(frozen=True)
@@ -26,7 +47,7 @@ def _tokens(text):
     for line in text.splitlines(keepends=True):
         label = LABEL.match(line) or re.match(r'^[ \t]*[QA][ \t]+', line)
         body = label.end() if label else 0
-        if not NOTE.fullmatch(line):
+        if not (is_off_record_note(line) or _RETURN_NOTE.fullmatch(line)):
             for match in TOKEN.finditer(line, body):
                 word = match[0].casefold().replace('\u2019', "'")
                 # Keep negation visible even when its apostrophe is omitted.
@@ -91,7 +112,8 @@ def exclude_discussions(original, incoming):
     """Return filtered text and JSON-safe audit records; ambiguous spans stay put."""
     from app.src.suggestion_filter import LABEL
     lines = original.splitlines(keepends=True)
-    if not any(NOTE.fullmatch(line) for line in lines):
+    departures = [index for index, line in enumerate(lines) if is_off_record_note(line)]
+    if not departures:
         return incoming, []
     offsets, position = [], 0
     for line in lines:
@@ -99,9 +121,7 @@ def exclude_discussions(original, incoming):
         position += len(line)
     source, target = _tokens(original), _tokens(incoming)
     edits, last_end = [], 0
-    for index, line in enumerate(lines):
-        if not NOTE.fullmatch(line):
-            continue
+    for index in departures:
         # The departure is the preceding substantive turn plus its short reply.
         before = index-1
         while before >= 0 and not lines[before].strip():
@@ -115,8 +135,9 @@ def exclude_discussions(original, incoming):
         departure = [t for t in source if start <= t.start < offsets[index]][-24:]
         after = index+1
         while after < len(lines):
-            label = LABEL.match(lines[after])
-            if lines[after].strip() and not (label and not lines[after][label.end():].strip()):
+            line = lines[after]
+            label = LABEL.match(line)
+            if line.strip() and not (_RETURN_NOTE.fullmatch(line) or label and not line[label.end():].strip()):
                 break
             after += 1
         if after == len(lines):

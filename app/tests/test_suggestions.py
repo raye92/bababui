@@ -21,6 +21,18 @@ def test_layout_only_is_not_a_proposal():
     assert suggestions(old, new) == []
 
 
+def test_negated_off_record_note_does_not_anchor_paragraph_alignment():
+    old = revision('Q What happened before the examination?\n'
+                   '(The parties did not go off the record.)\n'
+                   '     A    I waited for the court reporter to return.\n'
+                   'Q What happened next?\n')
+    incoming = ('Q What happened before the examination?\n'
+                'A I waited for the court reporter to return.\n'
+                '(Off the record.)\n'
+                'Q What happened next?\n')
+    assert propose(old, incoming).text == incoming.replace('A I waited', '     A    I waited')
+
+
 def test_independent_words_across_all_paragraphs():
     old = revision('Q Is the car red and large?\nA Yes it is.\n')
     new = propose(old, '     Q    Is the car blue and small?\n     A    No it is.\n')
