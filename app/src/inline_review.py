@@ -3,8 +3,8 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 import math
 
-from PySide6.QtCore import Qt, Signal, QSizeF, QRectF, QSignalBlocker
-from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPalette,
+from PySide6.QtCore import Qt, Signal, QPointF, QSizeF, QRectF, QSignalBlocker
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPalette, QPen,
                           QTextBlockFormat, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
@@ -51,7 +51,6 @@ class ReviewPage:
 @dataclass(frozen=True)
 class BoundaryMark:
     side: str
-    position: int
     edit_index: int
     display_position: int
     empty: bool
@@ -315,14 +314,18 @@ class InlineReviewEditor(QTextEdit):
         self._render_document(unmatched_speakers)
         self.boundary_marks = []
         for index, edit in enumerate(model.edits):
-            for a, b, c, d in edit.ranges:
+            preview = preview_ranges(edit)
+            for span in edit.ranges:
+                a, b, c, d = span
                 for side, start, end in (('original', a, b), ('incoming', c, d)):
+                    if start == end and span not in preview:
+                        continue
                     content = getattr(model, side).text[start:end]
                     if start != end and (content.strip() or '\n' not in content):
                         continue
                     position = self.display_position(side, start)
                     if position is not None:
-                        self.boundary_marks.append(BoundaryMark(side, start, index, position, start == end))
+                        self.boundary_marks.append(BoundaryMark(side, index, position, start == end))
         side, position = anchor
         self.set_source_position(side, min(position, len(getattr(model, side).text)))
         self._refresh_selections()
@@ -505,32 +508,39 @@ class InlineReviewEditor(QTextEdit):
         menu.exec(event.globalPos())
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            for marker in self.boundary_marks:
-                if self.boundary_rect(marker).contains(event.position()):
-                    self._current_edit = marker.edit_index
-                    self._refresh_selections()
-                    self.selected.emit(marker.edit_index)
-                    self.source_activated.emit(marker.side, marker.position)
-                    event.accept()
-                    return
         super().mouseReleaseEvent(event)
         if event.button() != Qt.LeftButton or self.textCursor().hasSelection():
             return
-        side, position = self.source_position()
-        row = self._row_at(self.textCursor().position())
-        if row and row.edit_indices:
+        caret = self.textCursor().position()
+        point = event.position()
+        scroll = QPointF(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+        # The nearest caret can be after the character under the pointer.
+        clicked = self.document().documentLayout().hitTest(point + scroll, Qt.ExactHit)
+        playback = self._source_at(clicked if clicked >= 0 else caret)
+
+        index = None
+        for mark in self.boundary_marks:
+            hit = (mark.display_position == caret if mark.empty
+                   else self.boundary_rect(mark).contains(point))
+            if hit:
+                index = mark.edit_index
+                break
+        row = self._row_at(caret)
+        if index is None and row and row.edit_indices:
+            side, position = self._source_at(caret)
             candidates = []
-            for index in row.edit_indices:
-                for a, b, c, d in self.model.edits[index].ranges:
+            for candidate in row.edit_indices:
+                for a, b, c, d in self.model.edits[candidate].ranges:
                     start, end = (a, b) if side == 'original' else (c, d)
                     distance = max(start-position, position-end, 0)
-                    candidates.append((distance, index))
+                    candidates.append((distance, candidate))
             if candidates:
-                self._current_edit = min(candidates)[1]
-                self._refresh_selections()
-                self.selected.emit(self._current_edit)
-        self.source_activated.emit(side, position)
+                index = min(candidates)[1]
+        if index is not None:
+            self._current_edit = index
+            self._refresh_selections()
+            self.selected.emit(index)
+        self.source_activated.emit(*playback)
 
     def focus_edit(self, index):
         if self.model is None or not 0 <= index < len(self.model.edits):
@@ -658,13 +668,20 @@ class InlineReviewEditor(QTextEdit):
         painter.resetTransform()
         for marker in self.boundary_marks:
             rect = self.boundary_rect(marker)
-            color = QColor('#f2aba7' if marker.side == 'original' else '#9edcb0')
-            painter.fillRect(rect, color)
+            if marker.empty:
+                color = QColor('#116329' if marker.side == 'original' else '#82071e')
+                # A cosmetic pen keeps the stroke visible when the page scales down.
+                painter.setPen(QPen(color, 0))
+                painter.drawLine(rect.topLeft(), rect.bottomLeft())
+                continue
+            painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else '#9edcb0'))
             painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
-            painter.drawText(rect, Qt.AlignCenter, '|' if marker.empty else '↵')
+            painter.drawText(rect, Qt.AlignCenter, '↵')
 
     def boundary_rect(self, marker):
         cursor = QTextCursor(self.document())
         cursor.setPosition(marker.display_position)
         rect = self.cursorRect(cursor)
+        if marker.empty:
+            return QRectF(rect.x(), rect.y()+2, 1, max(1, rect.height()-4))
         return QRectF(rect.x()-14, rect.y(), 12, max(14, rect.height()))

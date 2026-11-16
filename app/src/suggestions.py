@@ -48,11 +48,16 @@ def preview_ranges(change):
     if len(change.ranges) != 1:
         return change.ranges
     (a, b, c, d), = change.ranges
-    if a == b or c == d:
-        return change.ranges
     original, incoming = change.original.text, change.incoming.text
     left_a, right_a = word_context(original, a, b)
     left_b, right_b = word_context(incoming, c, d)
+    if a == b or c == d:
+        # Joining or splitting a word can be a one-sided character edit.
+        left, right, changed = ((left_a, right_a, incoming[c:d]) if a == b else
+                                (left_b, right_b, original[a:b]))
+        if (not left or not right or '\n' in changed or '\r' in changed
+                or not any(char.isspace() for char in changed)):
+            return change.ranges
     for _ in range(max(left_a, left_b)):
         if not a or not c or original[a-1] != incoming[c-1]:
             break

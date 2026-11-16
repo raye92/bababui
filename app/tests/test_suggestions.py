@@ -87,6 +87,21 @@ def test_structural_change_and_repeated_words():
     assert accepted.text == new.text
 
 
+@pytest.mark.parametrize('separated, joined', [
+    ('correspond responding', 'corresponding'),
+    ('note book', 'notebook'),
+])
+@pytest.mark.parametrize('join', [True, False])
+def test_preview_highlights_both_words_when_an_edit_joins_or_splits_them(separated, joined, join):
+    before, after = (separated, joined) if join else (joined, separated)
+    old, new = revision(f'The {before} was here.'), revision(f'The {after} was here.')
+    change, = suggestions(old, new)
+    (a, b, c, d), = change.ranges
+    assert (c == d) if join else (a == b)
+    (a, b, c, d), = preview_ranges(change)
+    assert (old.text[a:b], new.text[c:d]) == (before, after)
+
+
 def test_linked_fields_are_one_decision():
     old = revision('Said: ').insert_field(6, 'SPEAKER', 'Jane')
     old = old.replace(len(old.text), len(old.text), ' and ')

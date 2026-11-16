@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -157,6 +157,26 @@ def test_empty_side_has_visible_clickable_boundary_without_duplicate_context():
     assert selected == [0]
     assert [(row.page, row.number) for row in view.rows if row.number] == [(1, 1)]
     view.close()
+
+
+def test_click_beside_insertion_marker_seeks_the_clicked_character():
+    before, after = 'We would go.', "We wouldn't go."
+    boundary = before.index(' go')
+    model = comparison(before, after, [(boundary, boundary, boundary, boundary + 3)],
+                       (0, len(before), 0, len(after)))
+    view = widget(model)
+    cursor = QTextCursor(view.document())
+    cursor.setPosition(view.display_position('original', boundary))
+    rect = view.cursorRect(cursor)
+    activated = []
+    view.source_activated.connect(lambda side, position: activated.append((side, position)))
+
+    # Click the right half of the final letter in "would".
+    QTest.mouseClick(view.viewport(), Qt.LeftButton,
+                     pos=QPoint(rect.x() - 1, rect.center().y()))
+    view.close()
+
+    assert activated == [('original', boundary - 1)]
 
 
 def test_unchanged_paragraph_context_is_shown_once_around_whole_paragraph_changes():
