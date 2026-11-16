@@ -47,6 +47,24 @@ def test_annotation_bytes_preserve_unicode():
     assert [w.text for w in words] == ['Café?', 'Yes.']
 
 
+@pytest.mark.parametrize('speaker_field', [{}, {'speaker': None}, {'speaker': ''}])
+@pytest.mark.parametrize('second_chunk', [False, True])
+def test_missing_speaker_preserves_words_and_timestamps(speaker_field, second_chunk):
+    block = NS(type='text', text='Who? Me.', annotations=[
+        NS(type='word_info', start_index=0, end_index=4, start_offset='40s', end_offset='41s',
+           **speaker_field),
+        NS(type='word_info', speaker='b', start_index=5, end_index=8, start_offset='42s', end_offset='43s')])
+    words = parse_words(NS(steps=[NS(type='model_output', content=[block])]))
+    chunks = [[Word('Earlier.', 'a', 0, 1)], words] if second_chunk else [words]
+    stitched, _ = stitch(chunks)
+
+    expected = 'Unknown speaker: Who?\nSpeaker 1: Me.'
+    if second_chunk:
+        expected = 'Speaker 1: Earlier.\nUnknown speaker: Who?\nSpeaker 2: Me.'
+    assert render(stitched) == expected
+    assert (stitched[-2].start, stitched[-2].end) == ((1780, 1781) if second_chunk else (40, 41))
+
+
 def test_overlapping_speakers_preserve_transcript_order():
     block = NS(type='text', text='No. How can I?', annotations=[
         NS(type='word_info', speaker='a', start_index=0, end_index=3, start_offset='345.4s', end_offset='345.5s'),

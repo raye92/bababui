@@ -160,7 +160,7 @@ def open_document(path):
     raise ValueError('Plain-text documents are no longer supported. Import a CaseCAT ZIP.')
 
 
-def save_session(path, documents, active_id):
+def save_session(path, documents, active_id, *, settings=None):
     records = []
     for doc in documents:
         raw = _document_record(doc)
@@ -169,10 +169,17 @@ def save_session(path, documents, active_id):
             raw['native'] = doc.native.to_dict()
         records.append(raw)
     record = {'version': 2, 'active_id': active_id, 'documents': records}
+    if settings is not None:
+        record['settings'] = settings
     atomic_bytes(path, json.dumps(record, ensure_ascii=False).encode('utf-8'))
 
 
 def load_session(path):
+    docs, active, _ = load_session_state(path)
+    return docs, active
+
+
+def load_session_state(path):
     try:
         record = json.loads(Path(path).read_text(encoding='utf-8'))
         if record['version'] not in (1, 2) or not isinstance(record['documents'], list):
@@ -209,7 +216,8 @@ def load_session(path):
                 doc.busy = False
                 doc.status = 'Processing was interrupted. Click BABABUI to retry explicitly.'
             docs.append(doc)
-        return docs, record.get('active_id')
+        settings = record.get('settings')
+        return docs, record.get('active_id'), settings if isinstance(settings, dict) else {}
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError('Could not read session recovery. The recovery file has been preserved.') from exc
 

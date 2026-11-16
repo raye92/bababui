@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
@@ -17,7 +17,7 @@ from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load
 from app.src.ai_review import DEFAULT_REVIEW_MODEL
 from app.src.audio_pipeline import AUDIO_MODEL
 from app.src.documents import (Document, canonical, save_document, open_document,
-    suggested_path, save_session, load_session, import_casecat)
+    suggested_path, save_session, load_session_state, import_casecat)
 from app.src.casecat.archive import inspect_archive
 from app.src.casecat.retiming import AudioExportError
 from app.src.document_view import DocumentView, ImportView
@@ -33,7 +33,6 @@ class TranscriptEditor(QMainWindow):
         self.setMinimumWidth(720)
         self.session_path = Path(session_path) if session_path is not None else APP_DIR/'data'/'session.json'
         self.legacy_dir = Path(legacy_dir) if legacy_dir is not None else Path(__file__).parent
-        self.preferences = QSettings(str(self.session_path.with_name('settings.ini')), QSettings.IniFormat)
         self.disabled_auto_accept_rules = set()
         self._restoring = True
         self._recovery_enabled = True
@@ -66,8 +65,9 @@ class TranscriptEditor(QMainWindow):
         self.plus_btn.setToolTip('New tab (Ctrl+T)')
         self.plus_btn.clicked.connect(lambda: self.new_tab())
         self.tabs.setCornerWidget(self.plus_btn, Qt.TopRightCorner)
+        documents, active, notice, self.settings = self._read_session()
         self._build_toolbar()
-        self._restore()
+        self._restore(documents, active, notice)
         self._restoring = False
         self._tab_changed(self.tabs.currentIndex())
         self.persist_session()
@@ -147,7 +147,7 @@ class TranscriptEditor(QMainWindow):
         ):
             action = automated_edits.addAction(label)
             action.setCheckable(True)
-            enabled = self.preferences.value(f'auto_accept/{rule}', True, type=bool)
+            enabled = self._load_setting(f'auto_accept/{rule}', True)
             action.setChecked(enabled)
             if not enabled:
                 self.disabled_auto_accept_rules.add(rule)
@@ -155,7 +155,7 @@ class TranscriptEditor(QMainWindow):
         trailing_whitespace = automated_edits.addMenu('Trailing whitespaces')
         whitespace_group = QActionGroup(trailing_whitespace)
         whitespace_group.setExclusive(True)
-        delete_whitespace = self.preferences.value('auto_accept/trailing_whitespace', True, type=bool)
+        delete_whitespace = self._load_setting('auto_accept/trailing_whitespace', True)
         if not delete_whitespace:
             self.disabled_auto_accept_rules.add('trailing_whitespace')
         for label, delete in (('Keep', False), ('Delete', True)):
@@ -168,13 +168,13 @@ class TranscriptEditor(QMainWindow):
         ai_review = automated_edits.addMenu('AI-assisted review')
         self.ai_review_enabled = ai_review.addAction('Enabled')
         self.ai_review_enabled.setCheckable(True)
-        self.ai_review_enabled.setChecked(self.preferences.value('ai_review/enabled', True, type=bool))
+        self.ai_review_enabled.setChecked(self._load_setting('ai_review/enabled', True))
         self.ai_review_enabled.toggled.connect(
-            lambda checked: self.preferences.setValue('ai_review/enabled', checked))
+            lambda checked: self._set_setting('ai_review/enabled', checked))
         review_models = ai_review.addMenu('Model')
         review_group = QActionGroup(self)
         review_group.setExclusive(True)
-        self.ai_review_model = self.preferences.value('ai_review/model', DEFAULT_REVIEW_MODEL, type=str)
+        self.ai_review_model = self._load_setting('ai_review/model', DEFAULT_REVIEW_MODEL)
         if self.ai_review_model not in MODELS:
             self.ai_review_model = DEFAULT_REVIEW_MODEL
         for model, label in MODELS.items():
@@ -223,12 +223,13 @@ class TranscriptEditor(QMainWindow):
         if editor and self.current.document.native and not editor.isReadOnly():
             getattr(editor, method)()
 
-    def _restore(self):
+    def _read_session(self):
         documents, active = [], None
         notice = ''
+        settings = {}
         if self.session_path.exists():
             try:
-                documents, active = load_session(self.session_path)
+                documents, active, settings = load_session_state(self.session_path)
             except (OSError, ValueError) as exc:
                 try:
                     backup = self.session_path.with_name(self.session_path.name + f'.unreadable-{time.time_ns()}')
@@ -236,6 +237,9 @@ class TranscriptEditor(QMainWindow):
                 except OSError:
                     self._recovery_enabled = False
                 notice = str(exc)
+        return documents, active, notice, settings
+
+    def _restore(self, documents, active, notice):
         for document in documents:
             self.add_document(document)
         if not documents:
@@ -343,17 +347,24 @@ class TranscriptEditor(QMainWindow):
         self.status_label.setText(message)
         self.status_label.setToolTip(message)
 
+    def _load_setting(self, key, default):
+        value = self.settings.get(key, default)
+        return value if type(value) is type(default) else default
+
+    def _set_setting(self, key, value):
+        self.settings[key] = value
+        self.schedule_recovery()
+
     def set_auto_accept_rule(self, rule, enabled):
         if enabled:
             self.disabled_auto_accept_rules.discard(rule)
         else:
             self.disabled_auto_accept_rules.add(rule)
-        self.preferences.setValue(f'auto_accept/{rule}', enabled)
-        self.preferences.sync()
+        self._set_setting(f'auto_accept/{rule}', enabled)
 
     def set_ai_review_model(self, model):
         self.ai_review_model = model
-        self.preferences.setValue('ai_review/model', model)
+        self._set_setting('ai_review/model', model)
 
     def set_processing_model(self, model):
         if self.current and not self.current.document.busy and model in MODELS:
@@ -617,7 +628,7 @@ class TranscriptEditor(QMainWindow):
             for view in self.views():
                 view.capture_position()
             save_session(self.session_path, [v.document for v in self.views()],
-                         self.current.document.id if self.current else None)
+                         self.current.document.id if self.current else None, settings=self.settings)
             return True
         except (OSError, ValueError) as exc:
             self.show_status(f'Could not save recovery: {exc}')

@@ -475,7 +475,8 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
     assert state.original.text == 'The 3rd floor.'
     assert len(view.diff_view.changes) == 1
 
-    reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
+    assert native_window.persist_session()
+    reopened = TranscriptEditor(session_path=native_window.session_path, legacy_dir=tmp_path)
     try:
         assert {label for label, action in actions(reopened).items()
                 if not action.isChecked()} == {'Accept punctuation', 'Accept ordinal suffix changes'}
@@ -510,7 +511,8 @@ def test_trailing_whitespace_menu_defaults_to_delete_and_remembers_keep(native_w
     view.receive('A Yes.', [])
     assert state.original.text == state.incoming.text == '     A    Yes. '
     assert not view.diff_view.changes
-    reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
+    assert native_window.persist_session()
+    reopened = TranscriptEditor(session_path=native_window.session_path, legacy_dir=tmp_path)
     try:
         assert actions(reopened)['Keep'].isChecked()
     finally:

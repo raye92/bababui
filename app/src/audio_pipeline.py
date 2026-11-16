@@ -21,7 +21,7 @@ AUDIO_MODEL = 'gemini-3.5-transcribe'
 @dataclass(frozen=True)
 class Word:
     text: str
-    speaker: str
+    speaker: str | None
     start: float | None
     end: float | None
 
@@ -71,13 +71,12 @@ def parse_words(response):
                     t0 = t1 = math.nan
                 if not (math.isfinite(t0) and math.isfinite(t1) and 0 <= t0 <= t1):
                     t0 = t1 = None
-                if not a.speaker:
-                    raise ValueError('Transcription is missing speaker tags.')
+                speaker = getattr(a, 'speaker', None) or None
                 # Overlapping turns can run backward. Preserve text order and
                 # let the alignment choose timestamps that agree with it.
-                words.append(Word(text, a.speaker, t0, t1))
+                words.append(Word(text, speaker, t0, t1))
     if not words:
-        raise ValueError('No speech with speaker tags was returned.')
+        raise ValueError('No speech was returned.')
     return words
 
 
@@ -91,8 +90,8 @@ def render(words):
     turns = []
     previous = None
     for word in words:
-        if word.speaker != previous:
-            turns.append(f'{word.speaker}: {word.text}')
+        if not turns or word.speaker != previous:
+            turns.append(f'{word.speaker or "Unknown speaker"}: {word.text}')
             previous = word.speaker
         else:
             turns[-1] += ' ' + word.text
@@ -112,7 +111,7 @@ def stitch(chunks):
     labels = {}
     def label(speaker):
         return labels.setdefault(speaker, f'Speaker {len(labels)+1}')
-    a = [replace(w, speaker=label(w.speaker)) for w in chunks[0]]
+    a = [replace(w, speaker=label(w.speaker)) if w.speaker is not None else w for w in chunks[0]]
     if len(chunks) == 1:
         return tuple(a), []
     b = [replace(w, start=w.start+1740, end=w.end+1740) if w.start is not None else w
@@ -130,7 +129,8 @@ def stitch(chunks):
                          and abs(left[match.a+k][1].start-right[match.b+k][1].start) <= 10)
     votes = defaultdict(Counter)
     for (_, wa), (_, wb) in pairs:
-        votes[wb.speaker][wa.speaker] += 1
+        if wa.speaker is not None and wb.speaker is not None:
+            votes[wb.speaker][wa.speaker] += 1
     candidates = {}
     for speaker, counts in votes.items():
         ranked = counts.most_common()
@@ -142,11 +142,11 @@ def stitch(chunks):
     warnings = []
     next_label = len(labels) + 1
     for speaker in dict.fromkeys(w.speaker for w in b):
-        if speaker not in mapping:
+        if speaker is not None and speaker not in mapping:
             mapping[speaker] = f'Speaker {next_label}'
             next_label += 1
             warnings.append(f'Unmatched speaker in chunk 2 assigned {mapping[speaker]}; review the identity.')
-    b = [replace(w, speaker=mapping[w.speaker]) for w in b]
+    b = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in b]
     if len(pairs) >= 5:
         (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-1770))
         combined = a[:ia] + b[ib:]

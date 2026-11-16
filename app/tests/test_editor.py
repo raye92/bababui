@@ -260,6 +260,38 @@ def test_reorder_and_active_tab_survive_recovery(window, tmp_path):
     assert active == second.document.id
 
 
+def test_session_starts_with_defaults_and_remembers_settings(tmp_path):
+    import json
+    from PySide6.QtCore import QSettings
+    from app.src.documents import save_session
+
+    app = QApplication.instance() or QApplication([])
+    session = tmp_path/'session.json'
+    save_session(session, [], None)
+    ini = tmp_path/'settings.ini'
+    legacy = QSettings(str(ini), QSettings.IniFormat)
+    legacy.setValue('auto_accept/punctuation', False)
+    legacy.sync()
+
+    window = main.TranscriptEditor(session_path=session, legacy_dir=tmp_path)
+    assert 'punctuation' not in window.disabled_auto_accept_rules
+    window.set_auto_accept_rule('punctuation', False)
+    window.ai_review_enabled.setChecked(False)
+    window.set_ai_review_model('deepseek-v4-pro')
+    assert window.close()
+    settings = json.loads(session.read_text(encoding='utf-8'))['settings']
+    assert settings == {'auto_accept/punctuation': False, 'ai_review/enabled': False,
+                        'ai_review/model': 'deepseek-v4-pro'}
+
+    reopened = main.TranscriptEditor(session_path=session, legacy_dir=tmp_path)
+    try:
+        assert 'punctuation' in reopened.disabled_auto_accept_rules
+        assert not reopened.ai_review_enabled.isChecked()
+        assert reopened.ai_review_model == 'deepseek-v4-pro'
+    finally:
+        reopened.close()
+
+
 def test_saved_name_conflict_and_close_save_cancel_preserve_tabs(window, tmp_path, monkeypatch):
     path = tmp_path/'taken.txt'
     path.write_text('Keep this')
