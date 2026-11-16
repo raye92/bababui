@@ -164,7 +164,7 @@ def test_bababui_timing_follows_review_and_survives_project_and_recovery(audio_v
     signed = doc.incoming.index('signed')
     assert view.playback.timing.position_ms(doc.native.incoming, signed) == 6000
     view.inline_editor.source_activated.emit('incoming', signed)
-    assert view.playback.player.position() == 6000
+    assert view.playback.player.position() == 5000
 
     for accept in (True, False):
         view._start_review(0, accept)
@@ -363,7 +363,7 @@ def test_review_decisions_seek_without_changing_playback_state(audio_view, decis
     QTest.mouseClick(button, Qt.LeftButton)
     assert view.document.busy
     if remaining:
-        assert abs(player.position() - 11940) < 100
+        assert abs(player.position() - 10940) < 100
         player.setPosition(15000)
     QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
     assert player.playbackState() == expected
@@ -378,10 +378,33 @@ def test_review_decisions_seek_without_changing_playback_state(audio_view, decis
     assert player.playbackState() == before
 
     # Finishing the update must not rewind audio after the initial jump.
-    assert abs(player.position() - (15000 if remaining else 11940)) < 100
+    assert abs(player.position() - (15000 if remaining else 10940)) < 100
     QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
     assert player.playbackState() == expected
     QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    assert player.playbackState() == before
+
+
+@pytest.mark.parametrize('side', ['original', 'incoming'])
+def test_review_navigation_seeks_one_second_before_the_selected_edit(audio_view, side):
+    from PySide6.QtWidgets import QPushButton
+
+    view = audio_view
+    revision = view.document.native.original.revise('Alpha \nAn unchanged sentence.\nbeta \ngamma.')
+    view.document.set_text('original', revision.text, revision=revision)
+    view.document.set_text('incoming', revision.text, revision=revision)
+    view.receive(revision.text.replace('Alpha', 'Orange').replace('beta', 'copper'), [])
+    view.stack.setCurrentIndex(int(side == 'incoming'))
+    player = view.playback.player
+    before = set_playback_state(player, 'paused')
+    player.setPosition(1000)
+    buttons = {button.text(): button for button in view.diff_view.findChildren(QPushButton)}
+    buttons['Next'].click()
+    assert view.diff_view.current == 1
+    assert player.position() == 10940
+    buttons['Previous'].click()
+    assert view.diff_view.current == 0
+    assert player.position() == 4940
     assert player.playbackState() == before
 
 
@@ -424,7 +447,7 @@ def test_transcript_mouse_click_seeks_source_passage_without_changing_play_state
     undo_steps = editor.document().availableUndoSteps()
     view.document.dirty = False
     QTest.mouseClick(editor.viewport(), Qt.LeftButton, pos=point)
-    assert abs(player.position() - 11940) < 50
+    assert abs(player.position() - 10940) < 50
     assert player.playbackState() == before
     assert getattr(view.document.native, side) == revision
     assert not view.document.dirty
@@ -462,7 +485,7 @@ def test_skip_buttons_seek_five_seconds_and_clamp_to_recording(audio_view, state
 
 
 @pytest.mark.parametrize('state', ['stopped', 'paused', 'playing'])
-def test_progress_bar_click_seeks_directly_and_drag_keeps_play_state(audio_view, state):
+def test_progress_bar_click_seeks_early_and_drag_seeks_precisely(audio_view, state):
     from PySide6.QtCore import Qt, QPoint
     from PySide6.QtTest import QTest
     bar = audio_view.playback
@@ -470,15 +493,18 @@ def test_progress_bar_click_seeks_directly_and_drag_keeps_play_state(audio_view,
     bar.player.setPosition(1000)
     mid = QPoint(bar.slider.width() // 2, bar.slider.height() // 2)
     QTest.mouseClick(bar.slider, Qt.LeftButton, pos=mid)
-    assert abs(bar.player.position() - 20000) < 200
+    assert abs(bar.player.position() - 19000) < 200
     QTest.mousePress(bar.slider, Qt.LeftButton, pos=mid)
     QTest.mouseMove(bar.slider, QPoint(bar.slider.width() - 1, mid.y()))
     QTest.mouseRelease(bar.slider, Qt.LeftButton, pos=QPoint(bar.slider.width() - 1, mid.y()))
     assert bar.player.position() == 40000
+    near_start = QPoint(bar.slider.width() // 40, mid.y())
+    QTest.mouseClick(bar.slider, Qt.LeftButton, pos=near_start)
+    assert bar.player.position() < 50
     assert bar.player.playbackState() == before
 
 
-@pytest.mark.parametrize('row_text, expected', [('Alpha', 5940), ('beta', 11940), ('beta changed', 11940)])
+@pytest.mark.parametrize('row_text, expected', [('Alpha', 4940), ('beta', 10940), ('beta changed', 10940)])
 def test_review_clicks_seek_equal_original_and_incoming_passages(audio_view, row_text, expected):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -511,4 +537,4 @@ def test_transcript_click_maps_utf16_offsets_to_native_anchors(audio_view):
     cursor = editor.textCursor()
     cursor.setPosition(len(text[:text.index('beta') + 1].encode('utf-16-le')) // 2)
     QTest.mouseClick(editor.viewport(), Qt.LeftButton, pos=editor.cursorRect(cursor).center())
-    assert view.playback.player.position() == 11940
+    assert view.playback.player.position() == 10940

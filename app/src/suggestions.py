@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 import re
 from unicodedata import category
 from app.src import advanced_diff
+from app.src.casecat.elements import QA_SYMBOL
 
 
 @dataclass(frozen=True)
@@ -136,9 +137,31 @@ def _token_edits(a, b, start, end, ns, ne):
             for i, j, k, l in advanced_diff.text_edits(a[start:end], b[ns:ne])]
 
 
-def text_edits(a, b):
-    """advanced diff inner changes, without whitespace or proximity regrouping."""
-    return advanced_diff.text_edits(a, b)
+def text_edits(original, incoming):
+    """Keep equivalent wording edits outside unchanged native Q/A symbols."""
+    edits = advanced_diff.text_edits(original, incoming)
+    for index, (a, b, c, d) in enumerate(edits):
+        if (a == b) == (c == d):
+            continue
+        line_start = original.rfind('\n', 0, a) + 1
+        symbol = QA_SYMBOL.match(original, line_start)
+        if not symbol:
+            continue
+        padding = original[a:symbol.end()]
+        if not padding.isspace():
+            continue
+        incoming_start = c - (a - line_start)
+        if incoming_start < 0 or not incoming.startswith(symbol[0], incoming_start):
+            continue
+        if incoming_start > 0 and incoming[incoming_start-1] != '\n':
+            continue
+        # Slide the edit over identical spaces without crossing the next edit.
+        shift = len(padding)
+        next_a, next_c = edits[index+1][::2] if index+1 < len(edits) else (len(original), len(incoming))
+        if (b+shift <= next_a and d+shift <= next_c
+                and original[b:b+shift] == incoming[d:d+shift] == padding):
+            edits[index] = (a+shift, b+shift, c+shift, d+shift)
+    return edits
 
 
 def _attribution_span(text, start, end):

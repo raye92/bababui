@@ -97,6 +97,7 @@ class DocumentView(QWidget):
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self._start_review)
         self.diff_view.selected.connect(self.select_suggestion)
+        self.diff_view.navigated.connect(self._seek_selected_suggestion)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
@@ -183,6 +184,11 @@ class DocumentView(QWidget):
         if self.playback:
             revision = getattr(self.document.native, side)
             self.playback.seek_passage(revision, position)
+
+    def _seek_selected_suggestion(self):
+        index = self.diff_view.current
+        if self.playback and index >= 0 and self.diff_view.changes[index].ranges:
+            self.playback.seek_from_cursor()
 
     def capture_position(self):
         self.document.view = self.stack.currentIndex()
@@ -457,9 +463,7 @@ class DocumentView(QWidget):
                 self.diff_view.count.setText('Updating preview…')
             else:
                 self.diff_view.show_next_pending(index)
-                pending = self.diff_view.current
-                if self.playback and pending >= 0 and self.diff_view.changes[pending].ranges:
-                    self.playback.seek_from_cursor()
+                self._seek_selected_suggestion()
             self.changed.emit()
             worker.start()
             return

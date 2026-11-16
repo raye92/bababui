@@ -1,5 +1,9 @@
+import pytest
+
 from app.src.casecat.anchors import Revision, AnchoredSpan
-from app.src.suggestions import suggestions, propose, resolve
+from app.src.casecat.elements import NativeElement
+from app.src.review_model import build_review
+from app.src.suggestions import preview_ranges, suggestions, propose, resolve
 
 
 def test_invalid_proposed_field_values_are_rejected_before_review():
@@ -19,6 +23,30 @@ def test_layout_only_is_not_a_proposal():
     new = propose(old, '     Q    What is your name?\n     A    Jane.\n')
     assert new == old
     assert suggestions(old, new) == []
+
+
+@pytest.mark.parametrize('trailing', ['', '  '])
+@pytest.mark.parametrize('added', [True, False])
+def test_answer_opening_edit_keeps_native_label_out_of_highlight(trailing, added):
+    question = 'Do you know what part of body that relates to?'
+    label = '     A    '
+    body = 'I would have to go into his subjective reports.'
+    before, after = ('', 'Well, ') if added else ('Well, ', '')
+    start = len(question + trailing + '\n')
+    symbol = NativeElement(start, start + len(label), 'symbol', '160300', source=1)
+    original = Revision((AnchoredSpan('test', (0,), (), question + trailing + '\n' + label + before + body),),
+                        (symbol,))
+    incoming = propose(original, question + '\n' + label + after + body)
+    edits = build_review(original, incoming).edits
+    pairs = [(original.text[a:b], incoming.text[c:d])
+             for edit in edits for a, b, c, d in preview_ranges(edit)]
+
+    assert pairs == ([(trailing, '')] if trailing else []) + [(before, after)]
+    assert incoming.elements[0].source == symbol.source
+    accepted, _ = resolve(original, incoming, edits[-1], True)
+    _, rejected = resolve(original, incoming, edits[-1], False)
+    assert accepted.text == question + trailing + '\n' + label + after + body
+    assert rejected.text == question + '\n' + label + before + body
 
 
 def test_negated_off_record_note_does_not_anchor_paragraph_alignment():

@@ -119,6 +119,7 @@ def _attribution_edits(model, locations, needs_check):
 class ReviewView(QWidget):
     requested = Signal(int, bool)
     selected = Signal(int)
+    navigated = Signal()
     mapping_requested = Signal(str, object)
 
     def __init__(self):
@@ -372,7 +373,10 @@ class ReviewView(QWidget):
     def navigate(self, step):
         if self.visible_indices:
             index = self.visible_indices.index(self.current) if self.current in self.visible_indices else -1
-            self.select(self.visible_indices[(index+step) % len(self.visible_indices)])
+            target = self.visible_indices[(index+step) % len(self.visible_indices)]
+            if target != self.current:
+                self.select(target)
+                self.navigated.emit()
 
     def _mark_selected(self):
         for button in self.decision_buttons:

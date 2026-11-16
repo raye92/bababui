@@ -10,13 +10,16 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlide
 from app.src.casecat.anchors import utf16_index
 
 
+SEEK_LEAD_IN_MS = 1000
+
+
 def timestamp(milliseconds):
     seconds = max(0, milliseconds) // 1000
     return f'{seconds // 60}:{seconds % 60:02d}'
 
 
 class SeekSlider(QSlider):
-    """Seek to the clicked time, retaining handle dragging and keyboard control."""
+    """Give timeline clicks a lead-in and keep dragging and keyboard seeks precise."""
 
     def _geometry(self):
         option = QStyleOptionSlider()
@@ -25,34 +28,40 @@ class SeekSlider(QSlider):
         handle = self.style().subControlRect(QStyle.CC_Slider, option, QStyle.SC_SliderHandle, self)
         return option, groove, handle
 
-    def _seek_at(self, point):
+    def _seek_at(self, point, *, lead_in=0):
         option, groove, handle = self._geometry()
         value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(),
             point.x() - self._grab_offset - groove.left(),
             max(1, groove.width() - handle.width()), option.upsideDown)
-        self.setSliderPosition(value)
+        self.setSliderPosition(value - lead_in)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
         _, _, handle = self._geometry()
         point = event.position().toPoint()
-        self._grab_offset = point.x() - handle.left() if handle.contains(point) else handle.width() // 2
+        on_handle = handle.contains(point)
+        self._grab_offset = point.x() - handle.left() if on_handle else handle.width() // 2
+        self._groove_click_x = None if on_handle else point.x()
         self.setFocus(Qt.MouseFocusReason)
         self.setSliderDown(True)
-        self._seek_at(point)
         event.accept()
 
     def mouseMoveEvent(self, event):
         if not self.isSliderDown():
             return super().mouseMoveEvent(event)
-        self._seek_at(event.position().toPoint())
+        point = event.position().toPoint()
+        if point.x() != self._groove_click_x:
+            self._groove_click_x = None
+            self._seek_at(point)
         event.accept()
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or not self.isSliderDown():
             return super().mouseReleaseEvent(event)
-        self._seek_at(event.position().toPoint())
+        point = event.position().toPoint()
+        lead_in = SEEK_LEAD_IN_MS if point.x() == self._groove_click_x else 0
+        self._seek_at(point, lead_in=lead_in)
         self.setSliderDown(False)
         event.accept()
 
@@ -76,7 +85,7 @@ class PlaybackBar(QWidget):
         self.forward_button.setToolTip('Forward 5 seconds')
         self.slider = SeekSlider(Qt.Horizontal)
         self.slider.setAccessibleName('Audio position')
-        self.slider.setToolTip('Click or drag to seek. Click the transcript to seek to its source passage.')
+        self.slider.setToolTip('Click here or in the transcript to seek one second early. Drag to seek precisely.')
         self.clock = QLabel('0:00 / 0:00')
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 2, 4, 2)
@@ -118,16 +127,15 @@ class PlaybackBar(QWidget):
         return self.timing.position_ms(revision, position)
 
     def seek_from_cursor(self):
-        position = self.cursor_position_ms()
-        if position is None:
-            return
-        self.seek(position)
+        self._seek_with_lead_in(self.cursor_position_ms())
 
     def seek_passage(self, revision, position):
         if self.timing is not None:
-            milliseconds = self.timing.position_ms(revision, position)
-            if milliseconds is not None:
-                self.seek(milliseconds)
+            self._seek_with_lead_in(self.timing.position_ms(revision, position))
+
+    def _seek_with_lead_in(self, position):
+        if position is not None:
+            self.seek(position - SEEK_LEAD_IN_MS)
 
     def seek(self, position):
         """Move the playback head without changing playing/paused state."""

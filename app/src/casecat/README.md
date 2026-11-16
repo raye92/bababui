@@ -73,9 +73,11 @@ layout observed in controlled CaseCAT saves. Empty definitions retain an editabl
 ## Audio playback
 
 Native tabs with WAV audio have back/forward five seconds, Play/Pause, and a
-clickable, draggable progress bar below the editor. Clicking transcript text in
-Original, Incoming, or the review view seeks to its source passage. Seeking keeps
-the current playing or paused state. Shift+F9 seeks to the editor cursor; Ctrl+F9 stops.
+clickable, draggable progress bar below the editor. Clicking the progress bar or
+transcript seeks one second before the target, with a minimum of 0:00. Shift+F9
+and jumps to an edit after Next, Previous, Accept, or Reject use the same lead-in.
+Dragging the progress bar seeks to the exact position. Seeking keeps the current
+playing or paused state. Ctrl+F9 stops playback.
 Playback highlights source passages without changing text, caret, or undo state.
 Changing tabs or hiding the playback bar stops playback.
 

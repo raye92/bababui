@@ -7,6 +7,9 @@ from difflib import SequenceMatcher
 import re
 
 
+QA_SYMBOL = re.compile(r'(?m)^     [QA]    ')
+
+
 @dataclass(frozen=True)
 class NativeElement:
     start: int
@@ -73,7 +76,7 @@ def edited_elements(elements, text, start, end, content, preserve=None):
 
 def paragraph_symbols(text, elements):
     result = [e for e in elements if e.kind != 'symbol' or e.start == 0 or text[e.start - 1] == '\n']
-    for match in re.finditer(r'(?m)^     [QA]    ', text):
+    for match in QA_SYMBOL.finditer(text):
         if not any(e.start < match.end() and e.end > match.start() for e in elements):
             result.append(NativeElement(match.start(), match.end(), 'symbol',
                                         '160200' if match[0][5] == 'Q' else '160300'))
