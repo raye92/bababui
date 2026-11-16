@@ -6,7 +6,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
-from app.src.suggestions import preview_context, word_context
+from app.src.suggestions import preview_context, preview_ranges
 
 
 def visible_text(text, empty):
@@ -15,25 +15,6 @@ def visible_text(text, empty):
     if not text.strip():
         return text.replace(' ', '·').replace('\t', '⇥').replace('\n', '↵\n')
     return text.replace('\n', ' ↵\n')
-
-
-def _replacement_preview(original, incoming, a, b, c, d):
-    before, after = original[a:b], incoming[c:d]
-    if not before or not after or '\n' in before + after:
-        return None
-    left_a, right_a = word_context(original, a, b)
-    left_b, right_b = word_context(incoming, c, d)
-    # Borrow only shared letters. Nearby pending edits are separate decisions.
-    for _ in range(max(left_a, left_b)):
-        if not a or not c or original[a-1] != incoming[c-1]:
-            break
-        a, c = a-1, c-1
-    for _ in range(max(right_a, right_b)):
-        if b == len(original) or d == len(incoming) or original[b] != incoming[d]:
-            break
-        b, d = b+1, d+1
-    prefix, suffix = map(escape, preview_context(original, a, b))
-    return prefix + _highlight(original[a:b], False) + _highlight(incoming[c:d], True) + suffix
 
 
 def change_diff(change):
@@ -47,14 +28,10 @@ def change_diff(change):
                      +_highlight(after.get(name, '(undefined)'), True)) for name in names]
         return [('change', _highlight('Existing native fields and symbols', False)+' '
                  +_highlight('Proposed native fields and symbols', True))]
-    if len(change.ranges) == 1:
-        replacement = _replacement_preview(original, incoming, *change.ranges[0])
-        if replacement is not None:
-            return [('change', replacement)]
     # Linked fields can occur far apart. Keep their paragraphs separate, but
     # apply every linked occurrence within a displayed paragraph together.
     spans = []
-    for span in change.ranges:
+    for span in preview_ranges(change):
         if spans and (not change.field or '\n' not in original[spans[-1][-1][1]:span[0]]):
             spans[-1].append(span)
         else:

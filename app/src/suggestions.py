@@ -42,6 +42,27 @@ def word_context(text, start, end):
     return start - first, last - end
 
 
+def preview_ranges(change):
+    """Include shared letters in replacement highlights without changing the decision."""
+    if len(change.ranges) != 1:
+        return change.ranges
+    (a, b, c, d), = change.ranges
+    if a == b or c == d:
+        return change.ranges
+    original, incoming = change.original.text, change.incoming.text
+    left_a, right_a = word_context(original, a, b)
+    left_b, right_b = word_context(incoming, c, d)
+    for _ in range(max(left_a, left_b)):
+        if not a or not c or original[a-1] != incoming[c-1]:
+            break
+        a, c = a-1, c-1
+    for _ in range(max(right_a, right_b)):
+        if b == len(original) or d == len(incoming) or original[b] != incoming[d]:
+            break
+        b, d = b+1, d+1
+    return ((a, b, c, d),)
+
+
 def _layout(line):
     match = re.match(r'^(\s*)([QA])([ \t]+)(.*)$', line)
     if match:

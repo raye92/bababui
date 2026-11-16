@@ -15,17 +15,32 @@ def revision(text):
     ('The last day of work.', 'The last date of work.', [('day', 'date')]),
     ('I saw a dog.', 'I saw a big dog.', [('', 'big')]),
     ('I saw a big dog.', 'I saw a dog.', [('big', '')]),
-    ('A track was there.', 'A tract was there.', []),
-    ('I saw something.', 'I saw somethingz.', []),
-    ('I saw a dog.', 'I saw a big red dog.', []),
+    ('A track was there.', 'A tract was there.', [('track', 'tract')]),
+    ('I saw something.', 'I saw somethingz.', [('something', 'somethingz')]),
+    ('I saw a dog.', 'I saw a big red dog.', [('', 'big red')]),
+    ('I saw a big red dog.', 'I saw a dog.', [('big red', '')]),
+    ('Our old dog slept.', 'His new dog slept.', [('Our old', 'His new')]),
+    ('The work restrictions by Dr. Pelton.', 'The work restriction for Dr. Pelton.',
+     [('restrictions by', 'restriction for')]),
+    ('Who is providing the treatment?', "Who's providing the treatment?", [('Who is', "Who's")]),
+    ("Who's providing the treatment?", 'Who is providing the treatment?', [("Who's", 'Who is')]),
+    ('I saw a dog.', 'I saw a big red old dog.', []),
+    ('I saw a dog.', 'I saw a brown dog.', []),
+    ('I saw a dog.', 'I saw a big brown dog.', []),
+    ('Our old red dog slept.', 'His new tan dog slept.', []),
+    ('Who is providing the treatment?', "Who's actually providing the treatment?", []),
     ('I saw a dog.', 'I saw a dog?', []),
+    ('I saw it,', 'I saw that.', [('it,', 'that.')]),
+    ('I saw it by noon.', 'I saw it, at noon.', [('by', ', at')]),
+    ("Who's in?", 'Who is out?', [("Who's in", 'Who is out')]),
+    ('I saw a dog.', 'I saw a brown dog?', []),
     ('I saw it.', 'I saw IT.', []),
     ('THE MAN: Yes.', 'THE BOY: Yes.', []),
     ('First.\nThen.', 'First. Then.', []),
     ('Value 1000.', 'Value 1,000.', []),
-    ('A long-term job.', 'A long-time job.', []),
+    ('A long-term job.', 'A long-time job.', [('long-term', 'long-time')]),
 ])
-def test_candidates_use_whole_words(before, after, words):
+def test_candidates_limit_affected_words_and_changed_letters(before, after, words):
     original = revision(before)
     assert [(item['original_word'], item['proposed_word'])
             for _, item in candidates(original, original.revise(after))] == words

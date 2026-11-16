@@ -142,6 +142,7 @@ class TranscriptEditor(QMainWindow):
             ('capitalization', 'Accept capitalization'),
             ('contractions', 'Accept contractions'),
             ('short_common_words', 'Accept short/common words'),
+            ('date_ordinals', 'Accept ordinal suffix changes'),
             ('off_record', 'Filter off-record discussion'),
         ):
             action = automated_edits.addAction(label)
@@ -151,6 +152,19 @@ class TranscriptEditor(QMainWindow):
             if not enabled:
                 self.disabled_auto_accept_rules.add(rule)
             action.toggled.connect(lambda checked, key=rule: self.set_auto_accept_rule(key, checked))
+        trailing_whitespace = automated_edits.addMenu('Trailing whitespaces')
+        whitespace_group = QActionGroup(trailing_whitespace)
+        whitespace_group.setExclusive(True)
+        delete_whitespace = self.preferences.value('auto_accept/trailing_whitespace', True, type=bool)
+        if not delete_whitespace:
+            self.disabled_auto_accept_rules.add('trailing_whitespace')
+        for label, delete in (('Keep', False), ('Delete', True)):
+            action = trailing_whitespace.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(delete == delete_whitespace)
+            whitespace_group.addAction(action)
+            action.triggered.connect(
+                lambda checked, enabled=delete: self.set_auto_accept_rule('trailing_whitespace', enabled))
         ai_review = automated_edits.addMenu('AI-assisted review')
         self.ai_review_enabled = ai_review.addAction('Enabled')
         self.ai_review_enabled.setCheckable(True)

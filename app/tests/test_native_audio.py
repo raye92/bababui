@@ -478,7 +478,7 @@ def test_progress_bar_click_seeks_directly_and_drag_keeps_play_state(audio_view,
     assert bar.player.playbackState() == before
 
 
-@pytest.mark.parametrize('row_text, expected', [('Alpha ', 5940), ('beta ', 11940), ('beta changed ', 11940)])
+@pytest.mark.parametrize('row_text, expected', [('Alpha', 5940), ('beta', 11940), ('beta changed', 11940)])
 def test_review_clicks_seek_equal_original_and_incoming_passages(audio_view, row_text, expected):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest

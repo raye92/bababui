@@ -12,7 +12,7 @@ from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import presentation
-from app.src.suggestions import resolve, resolve_all, text_edits
+from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
 from app.src.suggestion_filter import begin_review, override_speaker, track_decisions, auto_accept, questionable_speaker_defaults
 from app.src.speech_alignment import WAV_CHANGED
 
@@ -330,7 +330,7 @@ class DocumentView(QWidget):
             text = getattr(self.document, side)
             marks, insertions = [], []
             for index, change in enumerate(self.diff_view.changes):
-                for a, b, c, d in change.ranges:
+                for a, b, c, d in preview_ranges(change):
                     start, end = (a, b) if side == 'original' else (c, d)
                     if index == self.diff_view.current:
                         focus = QTextEdit.ExtraSelection()

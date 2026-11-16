@@ -196,13 +196,34 @@ def plain_preview(html):
     ('She is talking here.', 'She is speaking here.', (7, 11, 7, 12), ['talking', 'speaking']),
     ('She is talking here.', 'She is tallking here.', (10, 10, 10, 11), ['l']),
     ('She is tallking here.', 'She is talking here.', (10, 11, 10, 10), ['l']),
-    ('She is\ntalking here.', 'He is\nspeaking here.', (0, 11, 0, 12), ['She is ↵\ntalk', 'He is ↵\nspeaki']),
 ])
-def test_only_single_line_replacements_highlight_whole_words(before, after, span, expected):
+def test_replacements_highlight_whole_words_and_one_sided_edits_stay_exact(before, after, span, expected):
     original = revision(before)
     change = Suggestion(original, original.revise(after), (span,))
     (_, preview), = change_diff(change)
     assert highlighted_text(preview) == expected
+
+
+def test_paragraph_join_highlights_whole_word_on_both_sides():
+    from app.src.review_model import build_review
+    from app.tests.test_inline_review import widget
+    original = revision('     Q    \n     MR. GUERRA:  This is regarding my client.')
+    incoming = original.revise('     Q    Okay.  Excellent.  So this is regarding my client.')
+    model = build_review(original, incoming)
+    (edit,) = model.edits
+    assert edit.kind == 'structure'
+    (_, preview), = change_diff(edit)
+    removed, added = highlighted_text(preview)
+    assert removed.endswith(' This')
+    assert added.endswith(' this')
+    inline = widget(model)
+    inline.focus_edit(0)
+    selections = [mark.cursor.selectedText() for mark in inline.extraSelections()]
+    assert any(text.endswith(' This') for text in selections)
+    assert any(text.endswith(' this') for text in selections)
+    inline.close()
+    assert resolve(original, incoming, edit, True)[0].text == incoming.text
+    assert resolve(original, incoming, edit, False)[1].text == original.text
 
 
 def test_preview_uses_authoritative_pair_without_splitting_word_changes():

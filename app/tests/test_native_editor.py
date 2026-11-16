@@ -453,6 +453,7 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
     toggles = actions(native_window)
     assert list(toggles) == ['Accept punctuation', 'Accept capitalization',
                              'Accept contractions', 'Accept short/common words',
+                             'Accept ordinal suffix changes',
                              'Filter off-record discussion']
     assert all(action.isChecked() for action in toggles.values())
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
@@ -467,10 +468,51 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
     assert view.document.incoming == incoming
     assert view.diff_view.changes
 
+    state = view.document.native
+    state.original = state.incoming = state.original.revise('The 3rd floor.')
+    toggles['Accept ordinal suffix changes'].trigger()
+    view.receive('The 3 floor.', [])
+    assert state.original.text == 'The 3rd floor.'
+    assert len(view.diff_view.changes) == 1
+
     reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
     try:
         assert {label for label, action in actions(reopened).items()
-                if not action.isChecked()} == {'Accept punctuation'}
+                if not action.isChecked()} == {'Accept punctuation', 'Accept ordinal suffix changes'}
+    finally:
+        reopened.close()
+
+
+def test_trailing_whitespace_menu_defaults_to_delete_and_remembers_keep(native_window, tmp_path):
+    def actions(window):
+        automated = next(action.menu() for action in window.settings_btn.menu().actions()
+                         if action.text() == 'Automated edits')
+        submenu = next(action.menu() for action in automated.actions()
+                       if action.text() == 'Trailing whitespaces')
+        return {action.text(): action for action in submenu.actions()}
+
+    choices = actions(native_window)
+    assert list(choices) == ['Keep', 'Delete']
+    assert choices['Delete'].isChecked()
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    state = view.document.native
+    state.original = state.incoming = state.original.revise('     A    Yes. ')
+    view.refresh()
+    view.receive('A Yes.', [])
+    assert state.original.text == state.incoming.text == '     A    Yes.'
+    assert not view.diff_view.changes
+    view.undo_review()
+    assert state.original.text == state.incoming.text == '     A    Yes. '
+
+    choices['Keep'].trigger()
+    assert not choices['Delete'].isChecked()
+    view.receive('A Yes.', [])
+    assert state.original.text == state.incoming.text == '     A    Yes. '
+    assert not view.diff_view.changes
+    reopened = TranscriptEditor(session_path=tmp_path/'other-session.json', legacy_dir=tmp_path)
+    try:
+        assert actions(reopened)['Keep'].isChecked()
     finally:
         reopened.close()
 

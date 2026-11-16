@@ -146,7 +146,7 @@ class ProcessingWorker(QThread):
         before_rules = state.original, state.incoming, state.review
         auto_accept(state, disabled_rules=request.disabled_rules)
         after_rules = state.original, state.incoming, state.review
-        report('Reviewing short-word edits...')
+        report('Reviewing small wording edits...')
 
         def complete(payload, prompt):
             client = self.processor_factory(request.config, request.review_model)

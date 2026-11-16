@@ -25,6 +25,8 @@ def revision(text):
     ('year.   March', 'year, March'),
     ('the report', 'report'),
     ('report correct?', 'report; correct?'),
+    ('the patients or the applicant', 'the patient’s or the applicant'),
+    ("the patient's report", 'the patients report'),
 ])
 def test_general_rules_accept_complete_authorized_edits(before, after):
     original = revision(before)
@@ -34,8 +36,28 @@ def test_general_rules_accept_complete_authorized_edits(before, after):
     assert all(filters.automatic_reason(c) for c in changes)
 
 
+@pytest.mark.parametrize('contracted,expanded', [
+    ("the left arm isn't mentioned", 'the left arm is not mentioned'),
+    ('the left arm isn’t mentioned', 'the left arm is not mentioned'),
+    ("I don't remember.", 'I do not remember.'),
+    ("I can't tell.", 'I cannot tell.'),
+    ('That won’t work.', 'That will not work.'),
+    ("IT ISN'T READY.", 'IT IS NOT READY.'),
+])
+@pytest.mark.parametrize('contract', [False, True])
+def test_negative_contractions_are_bidirectional_and_respect_toggle(contracted, expanded, contract):
+    before, after = (expanded, contracted) if contract else (contracted, expanded)
+    original = revision(before)
+    changes = suggestions(original, original.revise(after))
+    assert changes
+    assert all(filters.automatic_reason(change, disabled_rules={
+        'capitalization', 'punctuation', 'short_common_words'}) for change in changes)
+    assert all(not filters.automatic_reason(change, disabled_rules={'contractions'}) for change in changes)
+
+
 @pytest.mark.parametrize('before,after,disabled', [
     ('Yes I saw it.', 'Yes, I saw it.', 'punctuation'),
+    ('the patients report', "the patient's report", 'punctuation'),
     ('It was may.', 'It was May.', 'capitalization'),
     ("We're ready.", 'We are ready.', 'contractions'),
     ('I saw the report.', 'I saw report.', 'short_common_words'),
@@ -71,10 +93,11 @@ def test_each_rule_can_accept_edits_on_its_own(before, after, enabled):
     ("I'm there which page?", 'And there which page?'),
     ('stayed', 'stated'), ('form', 'from'), ('Kristin', 'Kristen'),
     ('no work', 'to work'), ('not working', 'working'),
+    ("isn't working", 'is working'), ("can't work", 'can work'),
     ('1.5', '15'), ('11-17-1999', '11171999'), ('911', '9/11'),
     ('5', '-5'), ('value 5', 'value -5'), ('12:30', '1230'),
     ("he's done", 'he is done'), ("I'd go", 'I would go'),
-    ('persons', "person's"), ('word\u00a0word', 'word word'),
+    ('patient', "patient's"), ('word\u00a0word', 'word word'),
     ('Q    Yes.', 'A    Yes.'), ('First\nSecond', 'First Second'),
     ('SPEAKER 2: Hello', 'SPEAKER 3: Hello'),
     ('THE WITNESS: Yes', 'THE DOCTOR: Yes'),
@@ -103,3 +126,52 @@ def test_native_field_values_never_auto_accept_even_case_only():
     original = revision('').insert_field(0, 'name', 'MS. OLD')
     incoming = original.set_field('NAME', 'Ms. Old')
     assert not filters.automatic_reason(suggestions(original, incoming)[0])
+
+
+@pytest.mark.parametrize('keep', [False, True])
+def test_trailing_whitespace_mode_before_review(keep):
+    original = revision('     A    Yes.\u00a0\n     Q    Two  words? \t\n')
+    state = SimpleNamespace(original=original, incoming=original, review=None)
+    filters.begin_review(state, 'A Yes.\nQ Two  words?\n')
+    filters.auto_accept(state, disabled_rules={'trailing_whitespace'} if keep else frozenset())
+
+    expected = original.text if keep else '     A    Yes.\n     Q    Two  words?\n'
+    assert state.original.text == state.incoming.text == expected
+    assert not suggestions(state.original, state.incoming)
+
+
+@pytest.mark.parametrize('ordinal,plain', [
+    ('On page 4 of your September 3rd report.', 'On page 4 of your September 3 report.'),
+    ('It was October 21st.', 'It was October 21.'),
+    ('Meet on 2nd of Feb.', 'Meet on 2 of Feb.'),
+    ('Dated the 11th of May.', 'Dated the 11 of May.'),
+    ('Take the 3rd floor.', 'Take the 3 floor.'),
+    ('It was the 100th item.', 'It was the 100 item.'),
+])
+@pytest.mark.parametrize('add_suffix', [False, True])
+def test_ordinal_suffixes_are_accepted_in_both_directions(ordinal, plain, add_suffix):
+    before, after = (plain, ordinal) if add_suffix else (ordinal, plain)
+    original = revision(before)
+    state = SimpleNamespace(original=original, incoming=original.revise(after), review=None)
+    changes = suggestions(state.original, state.incoming)
+    assert changes
+    assert all(not filters.automatic_reason(change, disabled_rules={'date_ordinals'}) for change in changes)
+    assert [record['rule'] for record in filters.auto_accept(state)] == ['ordinal suffix']
+    assert state.original == state.incoming
+    assert state.original.text == after
+
+
+@pytest.mark.parametrize('before,after', [
+    ('The May 3rd report.', 'The May 4 report.'),
+    ('The May 3rd report.', 'The June 3 report.'),
+    ('It was May 3.5.', 'It was May 3rd.5.'),
+    ('It was the 3rd.', 'It was the 3?'),
+    ('The 3rd floor.', 'The 3th floor.'),
+    ('The 3rd floor.', 'The 3 loft.'),
+    ('The May 3rd report.', 'The May 3rd statement.'),
+])
+def test_ordinal_suffix_rule_leaves_other_edits_pending(before, after):
+    original = revision(before)
+    changes = suggestions(original, original.revise(after))
+    assert changes
+    assert all(not filters.automatic_reason(change) for change in changes)

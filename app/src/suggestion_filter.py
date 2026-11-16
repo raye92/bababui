@@ -1,7 +1,7 @@
 """Automatic rules. Preparation preserves Original; auto_accept edits it natively.
 
-1. Restore deleted ordinary trailing spaces/tabs on aligned logical paragraphs.
-   Keep newlines, internal spacing, hard spaces, and genuine paragraph changes.
+1. Restore deleted trailing spaces/tabs while preparing aligned paragraphs.
+   Delete mode removes paragraph-ending whitespace as an undoable native edit.
 2. Match SPEAKER N labels using unambiguous aligned bylines/colloquy only.
    A strict majority with at least two votes maps to an existing speaker label.
    Matching labels disappear from review; mismatched attributions stay separate.
@@ -14,14 +14,17 @@
 6. Keep Original's leading indentation and generated Q/A spacing on aligned
    paragraphs, using the existing proposal rule (test_suggestions covers this).
 
-7. Auto-accept wording only through these four composable rules:
+7. Auto-accept wording through these rules:
    - Punctuation: insert/delete/replace , ; : . ? ! or dashes, with adjacent
-     ordinary spaces. Never change numeric punctuation or apostrophes this way.
+     ordinary spaces. Accept apostrophe-only edits, but preserve numeric punctuation.
    - Case: unchanged spelling with different capitalization.
    - Contractions: equivalent I am / I'm, pronoun are / 're and have / 've.
-     Ambiguous 's and 'd remain reviewable.
+     Unambiguous negative contractions also match their expanded forms
+     in either direction. Ambiguous forms remain reviewable.
    - Short/common words: replace words only when BOTH are at most two letters;
      insert/delete such words or the closed set {and, the}. Never alter negation.
+   - Ordinal suffixes: add or remove st/nd/rd/th on an unchanged number.
+     The suggestion must contain only the suffix change.
    Check whole words, not changed character fragments. These rules may combine
    within one card, but every part must qualify. Preserve speaker/Q/A labels,
    native fields/symbols, numbers, hard spaces, indentation and paragraph breaks.
@@ -31,6 +34,7 @@
    approximate departure/return matches and subsequent corroborating testimony.
    Excluded text is audited and restored by Undo. Ambiguous intervals stay pending.
 """
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -44,9 +48,39 @@ LABEL = re.compile(r'^(?P<prefix>[ \t]*(?:BY[ \t]+)?)(?P<name>SPEAKER\s+\d+|(?:M
 GENERIC = re.compile(r'SPEAKER\s+(\d+)', re.I)
 
 PUNCTUATION = frozenset(',;:.?!-\u2013\u2014')
+DROP_APOSTROPHES = str.maketrans('', '', "'’")
 COMMON_WORDS = frozenset({'and', 'the'})
 WORD = re.compile(r"[A-Za-z]+(?:['\u2019][A-Za-z]+)*|\d+|[^\s]")
 CONTRACTION = re.compile(r"\b(i)['\u2019]m\b|\b(you|we|they)['\u2019]re\b|\b(i|you|we|they)['\u2019]ve\b", re.I)
+NEGATIVE_CONTRACTION = re.compile(
+    r"\b(is|are|was|were|do|does|did|has|have|had|could|should|would|must|might|need|dare|ca|wo|sha)n['\u2019]t\b",
+    re.I,
+)
+IRREGULAR_NEGATIVES = {'ca': 'cannot', 'wo': 'will not', 'sha': 'shall not'}
+TRAILING_WHITESPACE = re.compile(r'[ \t\u00a0]+$', re.M)
+TRAILING_CHARS = ' \t\u00a0'
+ORDINAL_NUMBER = re.compile(r'([0-9]+)(?:st|nd|rd|th)', re.I)
+
+
+def _ordinal_suffix_change(left, right, a, b, c, d):
+    ordinal, number = left[a:b], right[c:d]
+    following_number = right[d:d+2]
+    if len(ordinal) < len(number):
+        ordinal, number = number, ordinal
+        following_number = left[b:b+2]
+    match = ORDINAL_NUMBER.fullmatch(ordinal)
+    # A suffix inserted before the decimal point is inside the number.
+    return bool(match and match[1] == number and not re.fullmatch(r'\.[0-9]', following_number))
+
+
+def _expand_negative(match):
+    stem = match[1]
+    expanded = IRREGULAR_NEGATIVES.get(stem.lower(), f'{stem} not')
+    if match[0].isupper():
+        return expanded.upper()
+    if stem.istitle():
+        return expanded.capitalize()
+    return expanded
 
 
 def _words(text, disabled_rules):
@@ -62,6 +96,7 @@ def _words(text, disabled_rules):
             return f'{pronoun} {verb.upper() if suffix.isupper() else verb}'
 
         text = CONTRACTION.sub(expand, text)
+        text = NEGATIVE_CONTRACTION.sub(_expand_negative, text)
     return [m[0] for m in WORD.finditer(text)
             if 'punctuation' in disabled_rules or m[0] not in PUNCTUATION]
 
@@ -104,6 +139,8 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     for revision, start, end in ((original, a, b), (incoming, c, d)):
         if any(start < e.end and end > e.start or start == end and e.start < start < e.end for e in revision.elements):
             return None
+    if 'date_ordinals' not in disabled_rules and _ordinal_suffix_change(left, right, a, b, c, d):
+        return 'ordinal suffix'
     before_words, after_words = _words(left[a:b], disabled_rules), _words(right[c:d], disabled_rules)
     aa = [word.casefold() for word in before_words]
     bb = [word.casefold() for word in after_words]
@@ -111,6 +148,9 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     # their punctuation. Do not turn decimal/date changes into cosmetic edits.
     if any(ch.isdigit() for ch in left[a:b]+right[c:d]) and left[a:b] != right[c:d]:
         return None
+    if ('punctuation' not in disabled_rules and before != after
+            and before.translate(DROP_APOSTROPHES) == after.translate(DROP_APOSTROPHES)):
+        return 'punctuation'
     short = lambda word: word.isascii() and word.isalpha() and len(word) <= 2 and word != 'no'
     common = lambda word: short(word) or word in COMMON_WORDS
     for tag, i, j, k, l in SequenceMatcher(None, aa, bb, autojunk=False).get_opcodes():
@@ -128,6 +168,25 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     return 'punctuation/case/contraction' if aa == bb else 'short/common words'
 
 
+def _delete_trailing(revision, side, review, records):
+    text = revision.text
+    edits = []
+    for match in TRAILING_WHITESPACE.finditer(text):
+        start, end = match.span()
+        last_element = bisect_left(revision.elements, end, key=lambda element: element.start) - 1
+        if last_element >= 0:
+            start = max(start, revision.elements[last_element].end)
+        if start < end:
+            edits.append((start, end))
+            records.append({'side': side, 'range': [start, end], 'before': text[start:end],
+                            'after': '', 'rule': 'trailing whitespace'})
+    for start, end in reversed(edits):
+        revision = revision._replace(start, end, '')
+    if side == 'incoming' and edits:
+        track_decisions(review, [(start, start, start, end) for start, end in edits], incoming_changed=True)
+    return revision
+
+
 def auto_accept(state, *, disabled_rules=frozenset()):
     """Apply one undoable native batch once per AI result, keeping an audit log."""
     from copy import deepcopy
@@ -137,9 +196,16 @@ def auto_accept(state, *, disabled_rules=frozenset()):
     review = deepcopy(state.review) if state.review else {
         'version': 1, 'evidence': {'speakers': {}, 'occurrences': []}, 'overrides': {}, 'locations': []}
     original, incoming = state.original, state.incoming
+    whitespace_records = []
+    if 'trailing_whitespace' not in disabled_rules:
+        original = _delete_trailing(original, 'original', review, whitespace_records)
+        incoming = _delete_trailing(incoming, 'incoming', review, whitespace_records)
+        if (whitespace_records and original.text == incoming.text and original.elements == incoming.elements
+                and original.definitions == incoming.definitions):
+            incoming = original
     candidates = [(change, reason) for change in suggestions(original, incoming)
                   if (reason := automatic_reason(change, disabled_rules=disabled_rules))]
-    records = list(reversed(review.get('off_record_changes', [])))
+    records = []
     # Descending positions preserve all earlier offsets. Resolve uses the same
     # anchored operations as an individual Accept, retaining destination audio.
     for change, reason in reversed(candidates):
@@ -150,7 +216,8 @@ def auto_accept(state, *, disabled_rules=frozenset()):
         old_text = incoming.text
         original, incoming = resolve(original, incoming, change, True)
         track_decision(review, change, old_text, incoming.text)
-    review.update(automatic_filter=1, automatic_changes=list(reversed(records)))
+    review.update(automatic_filter=1, automatic_changes=[
+        *review.get('off_record_changes', []), *whitespace_records, *reversed(records)])
     state.original, state.incoming, state.review = original, incoming, review
     return review['automatic_changes']
 
@@ -242,8 +309,8 @@ def _restore_trailing(original, text):
     edits = []
     for i, j in pairs:
         a, b = old[i][1], new[j][1]
-        before = re.search(r'[ \t]*$', a)[0]
-        after = re.search(r'[ \t]*$', b)[0]
+        before = a[len(a.rstrip(TRAILING_CHARS)):]
+        after = b[len(b.rstrip(TRAILING_CHARS)):]
         if len(before) > len(after) and before.startswith(after) and b.strip():
             edits.append((new[j][0]+len(b)-len(after), new[j][0]+len(b), before))
     for a, b, value in reversed(edits):
@@ -252,7 +319,7 @@ def _restore_trailing(original, text):
     # one-to-one paragraph match. Restore deletions at those endings too.
     source = original.text
     for a, b, c, d in reversed(text_edits(source, text)):
-        if (c == d and not source[a:b].strip(' \t')
+        if (c == d and not source[a:b].strip(TRAILING_CHARS)
                 and source[b:b+1] == text[c:c+1] and text[c:c+1] in ('', '\n')
                 and text[text.rfind('\n', 0, c)+1:c].strip()):
             text = text[:c] + source[a:b] + text[c:]

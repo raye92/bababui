@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
 from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
+from app.src.suggestions import preview_ranges
 
 
 def _qt(text):
@@ -366,7 +367,7 @@ class InlineReviewEditor(QTextEdit):
                 cursor.setCharFormat(char)
                 if row.kind != 'equal':
                     for index in row.edit_indices:
-                        for a, b, c, d in self.model.edits[index].ranges:
+                        for a, b, c, d in preview_ranges(self.model.edits[index]):
                             start, end = (a, b) if row.kind == 'original' else (c, d)
                             start, end = max(start, row.source_start), min(end, row.source_end)
                             if start >= end:
@@ -557,7 +558,7 @@ class InlineReviewEditor(QTextEdit):
         marks = []
         intervals = []
         if self.model is not None and 0 <= self._current_edit < len(self.model.edits):
-            for a, b, c, d in self.model.edits[self._current_edit].ranges:
+            for a, b, c, d in preview_ranges(self.model.edits[self._current_edit]):
                 intervals.extend([('original', a, b, False), ('incoming', c, d, False)])
         if self._source_highlight:
             intervals.append((*self._source_highlight, True))

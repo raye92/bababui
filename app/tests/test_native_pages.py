@@ -385,7 +385,7 @@ def test_wording_edit_preserves_native_layout_in_large_stroke_group(tmp_path, ac
     files['jobs/example.sgngl'] = bytes(native)
     del files['jobs/example.wav']
     doc = import_casecat(inspect_archive(zip_bytes(files)))
-    view = DocumentView(doc)
+    view = DocumentView(doc, disabled_auto_accept_rules={'trailing_whitespace'})
     source = doc.native.original
 
     def layout(view):
