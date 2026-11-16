@@ -1,5 +1,7 @@
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from app.tests.test_native_editor import native_window, source_zip
 
@@ -27,6 +29,27 @@ def test_pending_review_blocks_direct_edits_until_resolved(native_window, tmp_pa
     assert view.active_editor() is None
     view.redo_review()
     assert view.active_editor() is view.editor
+
+
+def test_ctrl_z_undoes_review_with_focus_on_sidebar(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    state = view.document.native
+    state.original = state.original.revise('The car is red. The house is old.')
+    state.incoming = state.original.revise('The car is blue. The house is new.')
+    view.refresh()
+    original = state.original
+    view.review(0, True)
+    assert state.original != original
+
+    native_window.show()
+    native_window.activateWindow()
+    button = view.diff_view.decision_buttons[0]
+    button.setFocus()
+    QApplication.processEvents()
+    assert button.hasFocus()
+    QTest.keyClick(button, Qt.Key_Z, Qt.ControlModifier)
+    assert state.original == original
 
 
 def test_unmatched_speaker_marks_only_the_label_and_keeps_the_diff(native_window, tmp_path):

@@ -1,6 +1,7 @@
 """Review decisions over exact structured revision ranges, independent of Qt."""
 from dataclasses import dataclass, replace
 import re
+from unicodedata import category
 from app.src import advanced_diff
 
 
@@ -24,6 +25,21 @@ def preview_context(text, start, end):
     prefix = '… ' + text[left + before[-8].start():start] if len(before) > 8 else text[left:start]
     suffix = text[end:end + after[7].end()] + ' …' if len(after) > 8 else text[end:right]
     return prefix, suffix
+
+
+def word_context(text, start, end):
+    """Count the characters needed on either side to include whole words."""
+    def word_char(char):
+        return char.isalnum() or char in "_'’‐‑-" or category(char).startswith('M')
+
+    first, last = start, end
+    if start < len(text) and word_char(text[start]):
+        while first and word_char(text[first - 1]):
+            first -= 1
+    if end and word_char(text[end - 1]):
+        while last < len(text) and word_char(text[last]):
+            last += 1
+    return start - first, last - end
 
 
 def _layout(line):

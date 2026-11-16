@@ -1,4 +1,4 @@
-"""One exact review decision with fixed navigation and speaker evidence."""
+"""One review decision with its preview and speaker evidence."""
 from bisect import bisect_right
 from collections import Counter
 from html import escape
@@ -6,7 +6,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
-from app.src.suggestions import preview_context
+from app.src.suggestions import preview_context, word_context
 
 
 def visible_text(text, empty):
@@ -17,8 +17,27 @@ def visible_text(text, empty):
     return text.replace('\n', ' ↵\n')
 
 
+def _replacement_preview(original, incoming, a, b, c, d):
+    before, after = original[a:b], incoming[c:d]
+    if not before or not after or '\n' in before + after:
+        return None
+    left_a, right_a = word_context(original, a, b)
+    left_b, right_b = word_context(incoming, c, d)
+    # Borrow only shared letters. Nearby pending edits are separate decisions.
+    for _ in range(max(left_a, left_b)):
+        if not a or not c or original[a-1] != incoming[c-1]:
+            break
+        a, c = a-1, c-1
+    for _ in range(max(right_a, right_b)):
+        if b == len(original) or d == len(incoming) or original[b] != incoming[d]:
+            break
+        b, d = b+1, d+1
+    prefix, suffix = map(escape, preview_context(original, a, b))
+    return prefix + _highlight(original[a:b], False) + _highlight(incoming[c:d], True) + suffix
+
+
 def change_diff(change):
-    """Flow exact removed/added ranges through one copy of their context."""
+    """Show whole-word replacements and preserve exact structural edits."""
     original, incoming = change.original.text, change.incoming.text
     if not change.ranges:
         before, after = dict(change.original.definitions), dict(change.incoming.definitions)
@@ -28,6 +47,10 @@ def change_diff(change):
                      +_highlight(after.get(name, '(undefined)'), True)) for name in names]
         return [('change', _highlight('Existing native fields and symbols', False)+' '
                  +_highlight('Proposed native fields and symbols', True))]
+    if len(change.ranges) == 1:
+        replacement = _replacement_preview(original, incoming, *change.ranges[0])
+        if replacement is not None:
+            return [('change', replacement)]
     # Linked fields can occur far apart. Keep their paragraphs separate, but
     # apply every linked occurrence within a displayed paragraph together.
     spans = []
@@ -118,7 +141,6 @@ def _attribution_edits(model, locations, needs_check):
 
 class ReviewView(QWidget):
     requested = Signal(int, bool)
-    bulk_requested = Signal(bool)
     selected = Signal(int)
     mapping_requested = Signal(str, object)
 
@@ -153,18 +175,9 @@ class ReviewView(QWidget):
         self.all_button.clicked.connect(lambda: self.filter_speaker(None))
         self.layout.addWidget(self.all_button)
         self.layout.addWidget(self.count)
-        bulk_actions = QHBoxLayout()
-        self.bulk_buttons = []
-        for caption, accept in (('Accept All', True), ('Reject All', False)):
-            button = QPushButton(caption)
-            button.setEnabled(False)
-            button.setToolTip(f'{caption} remaining suggestions in this transcript.')
-            button.clicked.connect(lambda _, accepted=accept: self.bulk_requested.emit(accepted))
-            bulk_actions.addWidget(button)
-            self.bulk_buttons.append(button)
-        self.layout.addLayout(bulk_actions)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.layout.addWidget(self.scroll, 1)
         decisions = QHBoxLayout()
         self.decision_buttons = []
@@ -187,6 +200,7 @@ class ReviewView(QWidget):
             navigation.addWidget(button)
             self.navigation_buttons.append(button)
         self.layout.addLayout(navigation)
+        self.layout.addStretch()
 
     @property
     def has_changes(self):
@@ -202,8 +216,6 @@ class ReviewView(QWidget):
         self.changes = model.edits
         for button in self.decision_buttons:
             button.setDown(False)
-        for button in self.bulk_buttons:
-            button.setEnabled(self.has_changes)
         self.review = review
         original, incoming = model.original, model.incoming
         self._speakers(original)
@@ -246,12 +258,12 @@ class ReviewView(QWidget):
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
             for _, text in change_diff(change):
                 text = text.replace('\n', '<br>')
-                label = QLabel(f'<span style="white-space:pre-wrap">{text}</span>')
+                label = QLabel(f'<span style="white-space:pre-wrap; font-size:large">{text}</span>')
+                label.setStyleSheet('padding:4px;')
                 label.setObjectName('comparison')
                 label.setTextFormat(Qt.RichText)
                 label.setWordWrap(True)
                 label.setTextInteractionFlags(Qt.NoTextInteraction)
-                label.setStyleSheet('padding:4px;')
                 rows.addWidget(label)
             layout.addWidget(card)
             self.cards.append(card)
@@ -262,7 +274,6 @@ class ReviewView(QWidget):
         self.scroll.setWidget(root)
         self.current = max(0, min(self.current, len(self.changes)-1))
         self.filter_speaker(self.speaker_filter, select=False)
-        self._mark_selected()
 
     def _speakers(self, original):
         box = QWidget()
@@ -356,13 +367,23 @@ class ReviewView(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._size_speaker_list()
+        self._size_comparison()
+
+    def _size_comparison(self):
+        root = self.scroll.widget()
+        if root:
+            margins = self.layout.contentsMargins()
+            frame = 2 * self.scroll.frameWidth()
+            width = self.contentsRect().width() - margins.left() - margins.right() - frame
+            layout = root.layout()
+            height = (layout.totalHeightForWidth(max(1, width)) if layout.hasHeightForWidth()
+                      else layout.sizeHint().height())
+            self.scroll.setMaximumHeight(height + frame)
 
     def filter_speaker(self, speaker, *, select=True):
         self.speaker_filter = speaker
         self.visible_indices = (list(range(len(self.changes))) if speaker is None else
                                 sorted(self.speaker_edits.get(speaker, ())))
-        for i,card in enumerate(self.cards):
-            card.setVisible(i == self.current and i in self.visible_indices)
         if self.visible_indices and self.current not in self.visible_indices:
             self.current = self.visible_indices[0]
         self._mark_selected()
@@ -384,6 +405,7 @@ class ReviewView(QWidget):
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
+        self._size_comparison()
 
     def _request_current(self, accept):
         if self.current in self.visible_indices:

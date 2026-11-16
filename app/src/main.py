@@ -121,8 +121,15 @@ class TranscriptEditor(QMainWindow):
             self.file_actions[label] = action
         self.edit_btn, edit = self._menu_button('Edit', row)
         edit.addAction('Attach WAV...', lambda: self.choose_wav(self.tabs.currentIndex()))
-        edit.addAction('Undo review', lambda: self.current.undo_review())
+        self.undo_review_action = edit.addAction('Undo review', lambda: self.current.undo_review())
+        self.addAction(self.undo_review_action)
         edit.addAction('Redo review', lambda: self.current.redo_review())
+        self.bulk_review_actions = []
+        for caption, accept in (('Accept All', True), ('Reject All', False)):
+            action = edit.addAction(caption)
+            action.triggered.connect(
+                lambda _, accepted=accept: self.current.review(None, accepted, background=True))
+            self.bulk_review_actions.append(action)
         insert = edit.addMenu('Insert')
         insert.addAction('Field...', lambda: self.native_edit_action('insert_native_field'))
         insert.addAction('Insert Format Symbols...', lambda: self.native_edit_action('choose_native_symbol'))
@@ -290,6 +297,11 @@ class TranscriptEditor(QMainWindow):
             return
         doc = view.document
         self.edit_btn.setEnabled(bool(doc.native) and not doc.busy)
+        pending_review = isinstance(view, DocumentView) and bool(view.review_model.edits)
+        self.undo_review_action.setShortcut(QKeySequence(QKeySequence.Undo) if pending_review else QKeySequence())
+        self.undo_review_action.setEnabled(bool(doc.native) and not doc.busy)
+        for action in self.bulk_review_actions:
+            action.setEnabled(pending_review and not doc.busy)
         self.settings_btn.setEnabled(not doc.busy)
         self.bababui_btn.setVisible(not doc.busy)
         self.bababui_btn.setEnabled(not doc.busy and bool(doc.wav_path))

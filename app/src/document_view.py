@@ -96,7 +96,6 @@ class DocumentView(QWidget):
         self.inline_editor.source_activated.connect(self._seek_review_passage)
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self._start_review)
-        self.diff_view.bulk_requested.connect(lambda accept: self.review(None, accept, background=True))
         self.diff_view.selected.connect(self.select_suggestion)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):

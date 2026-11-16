@@ -68,7 +68,7 @@ def test_accept_all_preserves_index_page_break_and_centering():
     view = DocumentView(doc)
     view.receive(doc.original.replace('Cover sheet', 'Cover information'), [])
 
-    view.diff_view.bulk_buttons[0].click()
+    view.review(None, True, background=True)
     assert view._review_worker.wait(5000)
     app.processEvents()
 
@@ -97,7 +97,7 @@ def test_accept_all_formats_inserted_turns_in_a_saved_proposal():
     doc.set_text('incoming', proposal)
     view = DocumentView(doc)
 
-    view.diff_view.bulk_buttons[0].click()
+    view.review(None, True, background=True)
     assert view._review_worker.wait(5000)
     app.processEvents()
 
@@ -134,7 +134,7 @@ def test_bulk_review_keeps_the_visible_passage_after_reflow(tmp_path, monkeypatc
     line = next(i for i, row in enumerate(editor.page_lines()) if row.text == anchor)
     editor.scroll_to_center_line(line)
 
-    view.diff_view.bulk_buttons[0 if accept else 1].click()
+    view.review(None, accept, background=True)
     assert view._review_worker.wait(5000)
     app.processEvents()
     app.processEvents()

@@ -11,6 +11,7 @@ from app.src.review_view import ReviewView, change_diff
 from app.src.suggestions import Suggestion, resolve
 from app.tests.test_suggestion_filter import speakers
 from app.tests.test_suggestions import revision
+from app.tests.test_native_editor import native_window
 
 
 def test_speaker_summary_is_fixed_and_cards_filter_to_mismatches():
@@ -157,13 +158,51 @@ def test_long_speaker_menu_scrolls_without_covering_decisions(height):
     view.close()
 
 
+@pytest.mark.parametrize('long_preview', [False, True], ids=['short', 'scrolling'])
+def test_decisions_follow_preview_until_it_needs_to_scroll(long_preview):
+    app = QApplication.instance() or QApplication([])
+    before, after = 'The car is red.', 'The car is blue.'
+    if long_preview:
+        before += '\n' + '\n'.join(f'Additional wording {i}.' for i in range(48))
+    original = revision(before)
+    view = ReviewView()
+    view.resize(300, 800)
+    view.set_revisions(original, original.revise(after))
+    if long_preview:
+        view.select(len(view.changes) - 1)
+    view.show()
+    app.processEvents()
+    button = next(b for b in view.findChildren(QPushButton) if b.text() == 'Accept')
+    y = button.mapTo(view, QPoint()).y()
+    if long_preview:
+        assert view.scroll.verticalScrollBar().maximum() > 0
+        assert view.height() - 75 < y < view.height() - button.height()
+    else:
+        assert view.scroll.verticalScrollBar().maximum() == 0
+        assert y < view.height() // 2
+    view.close()
+
+
 def highlighted_text(html):
     return [unescape(re.sub(r'<[^>]*>', '', text))
             for text in re.findall(r'<b\b[^>]*>(.*?)</b>', html, re.DOTALL)]
 
 
 def plain_preview(html):
-    return unescape(re.sub(r'<[^>]*>', '', html))
+    return unescape(re.sub(r'<[^>]*>', '', html.replace('<br>', '\n')))
+
+
+@pytest.mark.parametrize('before, after, span, expected', [
+    ('She is talking here.', 'She is speaking here.', (7, 11, 7, 12), ['talking', 'speaking']),
+    ('She is talking here.', 'She is tallking here.', (10, 10, 10, 11), ['l']),
+    ('She is tallking here.', 'She is talking here.', (10, 11, 10, 10), ['l']),
+    ('She is\ntalking here.', 'He is\nspeaking here.', (0, 11, 0, 12), ['She is ↵\ntalk', 'He is ↵\nspeaki']),
+])
+def test_only_single_line_replacements_highlight_whole_words(before, after, span, expected):
+    original = revision(before)
+    change = Suggestion(original, original.revise(after), (span,))
+    (_, preview), = change_diff(change)
+    assert highlighted_text(preview) == expected
 
 
 def test_preview_uses_authoritative_pair_without_splitting_word_changes():
@@ -172,12 +211,12 @@ def test_preview_uses_authoritative_pair_without_splitting_word_changes():
     lead = Suggestion(original, incoming, ((0, 1, 0, 11),))
     name = Suggestion(original, incoming, ((41, 46, 51, 56),))
     (_, preview), = change_diff(lead)
-    assert highlighted_text(preview) == ['Y', 'Okay. And y']
-    assert plain_preview(preview) == "YOkay. And you're familiar with the case of Timothy Welch?"
+    assert highlighted_text(preview) == ["You're", "Okay. And you're"]
+    assert plain_preview(preview) == "You'reOkay. And you're familiar with the case of Timothy Welch?"
     assert 'Walsh' not in plain_preview(preview)
     (_, preview), = change_diff(name)
     assert highlighted_text(preview) == ['Welch', 'Walsh']
-    assert plain_preview(preview) == "You're familiar with the case of Timothy WelchWalsh?"
+    assert plain_preview(preview) == original.text.replace('Welch', 'WelchWalsh')
     assert 'Okay.' not in plain_preview(preview)
 
 
@@ -191,8 +230,7 @@ def test_preview_keeps_edits_visible_with_short_context_and_escapes_markup():
     assert highlighted_text(preview) == ['<old>', '<new>']
     assert '<old>' not in preview and '<new>' not in preview
     assert 'word0 ' not in plain_preview(preview)
-    assert plain_preview(preview).count('word19') == 1
-    assert plain_preview(preview).count('tail0') == 1
+    assert plain_preview(preview).count('word19') == plain_preview(preview).count('tail0') == 1
     assert 'tail19' not in plain_preview(preview)
 
 
@@ -296,9 +334,8 @@ def test_old_card_cannot_select_a_new_model_index():
     ('Reject All', 'The blue car is large and old.', 'MR. LEISER'),
 ])
 def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
-        tmp_path, monkeypatch, caption, expected, speaker):
+        native_window, tmp_path, monkeypatch, caption, expected, speaker):
     from copy import deepcopy
-    from app.src.document_view import DocumentView
     from app.tests.test_native_projects import native_doc
 
     app = QApplication.instance() or QApplication([])
@@ -307,7 +344,7 @@ def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
     original = original.replace(0, 0, 'The red car is large and old.\n')
     doc.set_text('original', original.text, revision=original)
     doc.set_text('incoming', original.text, revision=original)
-    view = DocumentView(doc)
+    view = native_window.add_document(doc)
     proposal = original.text.replace('red car is large and old', 'blue car is small and new')
     view.receive(proposal.replace('MS. SIEMENS:', 'SPEAKER 3:').replace('MR. LEISER:', 'SPEAKER 3:'), [])
     view.review(0, True)
@@ -317,10 +354,10 @@ def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
     view.diff_view.filter_speaker('SPEAKER 3')
     assert len(view.diff_view.visible_indices) == 2
 
-    buttons = {button.text(): button for button in view.diff_view.findChildren(QPushButton)}
-    assert caption in buttons
-    assert buttons[caption].isEnabled()
-    buttons[caption].click()
+    actions = {action.text(): action for action in native_window.edit_btn.menu().actions()}
+    assert not {b.text() for b in native_window.findChildren(QPushButton)} & {'Accept All', 'Reject All'}
+    assert actions[caption].isVisible() and actions[caption].isEnabled()
+    actions[caption].trigger()
     if view._review_worker is not None:
         assert view._review_worker.wait(5000)
         app.processEvents()
@@ -331,7 +368,7 @@ def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
     assert sum(location['resolved'] for location in locations) == 2
     assert all(doc.incoming[location['start']:location['end']] == speaker for location in locations[-2:])
     assert not view.review_model.edits
-    assert all(not buttons[label].isEnabled() for label in ('Accept All', 'Reject All'))
+    assert all(not actions[label].isEnabled() for label in ('Accept All', 'Reject All'))
     assert doc.dirty
     view.undo_review()
     assert (doc.native.original, doc.native.incoming, doc.native.review) == before
@@ -339,13 +376,11 @@ def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
     view.redo_review()
     assert doc.original == doc.incoming
     assert doc.original.splitlines()[0] == expected
-    view.close()
 
 
 @pytest.mark.parametrize('risk', ['zero matches', 'shared default'])
-def test_accept_all_confirms_questionable_automatic_speaker_names(tmp_path, monkeypatch, risk):
+def test_accept_all_confirms_questionable_automatic_speaker_names(native_window, tmp_path, monkeypatch, risk):
     from PySide6.QtWidgets import QMessageBox
-    from app.src.document_view import DocumentView
     from app.src.suggestion_filter import begin_review, override_speaker
     from app.tests.test_native_projects import native_doc
 
@@ -367,7 +402,9 @@ def test_accept_all_confirms_questionable_automatic_speaker_names(tmp_path, monk
         summary['counts']['MR. LEISER'] = 3
         override_speaker(state, 'SPEAKER 2', 'MR. LEISER')
         state.review['evidence']['speakers']['SPEAKER 2']['mapped'] = state.review['overrides'].pop('SPEAKER 2')
-    view = DocumentView(doc)
+    view = native_window.add_document(doc)
+    action = next(action for action in native_window.edit_btn.menu().actions()
+                  if action.text() == 'Accept All')
     before = state.original
     prompts = []
 
@@ -376,17 +413,16 @@ def test_accept_all_confirms_questionable_automatic_speaker_names(tmp_path, monk
         return QMessageBox.Cancel
 
     monkeypatch.setattr(QMessageBox, 'question', cancel)
-    view.diff_view.bulk_buttons[0].click()
+    action.trigger()
     assert len(prompts) == 1 and 'SPEAKER 1' in prompts[0]
     assert not doc.busy and state.original == before and view.review_model.edits
     monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.Yes)
-    view.diff_view.bulk_buttons[0].click()
+    action.trigger()
     assert view._review_worker.wait(5000)
     app.processEvents()
     assert state.original.text == state.incoming.text and not view.review_model.edits
     view.undo_review()
     assert state.original == before and view.review_model.edits
-    view.close()
 
 
 def test_page_fit_changes_display_scale_without_reflow():

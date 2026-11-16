@@ -6,11 +6,10 @@ import json
 from pathlib import Path
 import re
 import tempfile
-from unicodedata import category
 from uuid import uuid4
 
 from app.src.suggestion_filter import LABEL, track_decision
-from app.src.suggestions import preview_context, resolve, suggestions
+from app.src.suggestions import preview_context, resolve, suggestions, word_context
 from shared.storage import atomic_bytes
 
 
@@ -34,21 +33,6 @@ class AssistedReview:
     summary: str
 
 
-def _word_char(char):
-    return char.isalnum() or char in "_'’‐‑-" or category(char).startswith('M')
-
-
-def _word_context(text, start, end):
-    first, last = start, end
-    if start < len(text) and _word_char(text[start]):
-        while first and _word_char(text[first - 1]):
-            first -= 1
-    if end and _word_char(text[end - 1]):
-        while last < len(text) and _word_char(text[last]):
-            last += 1
-    return start - first, last - end
-
-
 def _protected(revision, start, end):
     text = revision.text
     line_start = text.rfind('\n', 0, start) + 1
@@ -70,8 +54,8 @@ def candidates(original, incoming):
         if edit.kind != 'text' or edit.field or len(edit.ranges) != 1:
             continue
         a, b, c, d = span = edit.ranges[0]
-        front_a, back_a = _word_context(left, a, b)
-        front_b, back_b = _word_context(right, c, d)
+        front_a, back_a = word_context(left, a, b)
+        front_b, back_b = word_context(right, c, d)
         front, back = max(front_a, front_b), max(back_a, back_b)
         x, y, z, w = a-front, b+back, c-front, d+back
         before, after = left[x:y].strip(' '), right[z:w].strip(' ')
