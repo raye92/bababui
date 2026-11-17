@@ -41,7 +41,7 @@ def segments(duration):
     return [(0, duration)] if duration <= 1800 else [(0, 1800), (1740, duration)]
 
 
-def parse_words(response):
+def parse_words(response, *, timestamps=True):
     words = []
     for step in getattr(response, 'steps', None) or []:
         if getattr(step, 'type', None) != 'model_output':
@@ -53,7 +53,9 @@ def parse_words(response):
             annotations = [a for a in (getattr(block, 'annotations', None) or [])
                            if getattr(a, 'type', None) == 'word_info']
             if raw.strip() and not annotations:
-                raise ValueError('Transcription is missing word timestamps or speaker tags.')
+                if timestamps:
+                    raise ValueError('Transcription is missing word timestamps or speaker tags.')
+                words.extend(Word(token, None, None, None) for token in block.text.split())
             for i, a in enumerate(annotations):
                 start, end = a.start_index, a.end_index
                 if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= len(raw):
@@ -64,6 +66,11 @@ def parse_words(response):
                 next_start = annotations[i+1].start_index if i+1 < len(annotations) else len(raw)
                 begin = 0 if i == 0 else start
                 text = raw[begin:next_start].decode('utf-8').strip()
+                speaker = getattr(a, 'speaker', None) or None
+                if not timestamps:
+                    # Without timestamps, one annotation can cover an entire speaker turn.
+                    words.extend(Word(token, speaker, None, None) for token in text.split())
+                    continue
                 try:
                     t0 = float(a.start_offset.removesuffix('s'))
                     t1 = float(a.end_offset.removesuffix('s'))
@@ -71,7 +78,6 @@ def parse_words(response):
                     t0 = t1 = math.nan
                 if not (math.isfinite(t0) and math.isfinite(t1) and 0 <= t0 <= t1):
                     t0 = t1 = None
-                speaker = getattr(a, 'speaker', None) or None
                 # Overlapping turns can run backward. Preserve text order and
                 # let the alignment choose timestamps that agree with it.
                 words.append(Word(text, speaker, t0, t1))
@@ -116,17 +122,34 @@ def stitch(chunks):
         return tuple(a), []
     b = [replace(w, start=w.start+1740, end=w.end+1740) if w.start is not None else w
          for w in chunks[1]]
+    a_timed = any(w.start is not None for w in a)
+    b_timed = any(w.start is not None for w in b)
     left = [(i, w) for i, w in enumerate(a) if w.start is not None and w.start >= 1740]
     right = [(i, w) for i, w in enumerate(b) if w.start is not None and w.start < 1800]
+    # Search near the edge of an untimed chunk for the repeated minute.
+    if not a_timed:
+        left = list(enumerate(a[-400:], max(0, len(a) - 400)))
+    if not b_timed:
+        right = list(enumerate(b[:400]))
     normalize = lambda w: re.sub(r'[^\w]', '', w.text.casefold())
-    matcher = SequenceMatcher(None, [normalize(w) for _, w in left],
-                              [normalize(w) for _, w in right], autojunk=False)
+    left_text = [normalize(w) for _, w in left]
+    right_text = [normalize(w) for _, w in right]
+    matcher = SequenceMatcher(None, left_text, right_text, autojunk=False)
     pairs = []
-    for match in matcher.get_matching_blocks():
-        if match.size >= 3:
-            pairs.extend((left[match.a+k], right[match.b+k]) for k in range(match.size)
-                         if normalize(left[match.a+k][1])
-                         and abs(left[match.a+k][1].start-right[match.b+k][1].start) <= 10)
+    if a_timed and b_timed:
+        for match in matcher.get_matching_blocks():
+            if match.size >= 3:
+                pairs.extend((left[match.a+k], right[match.b+k]) for k in range(match.size)
+                             if left_text[match.a+k]
+                             and abs(left[match.a+k][1].start-right[match.b+k][1].start) <= 10)
+    else:
+        match = matcher.find_longest_match()
+        tokens = left_text[match.a:match.a+match.size]
+        phrase = ' ' + ' '.join(tokens) + ' '
+        edges = [' ' + ' '.join(edge) + ' ' for edge in (left_text, right_text)]
+        if match.size >= 8 and len(set(tokens) - {''}) >= 4 and all(
+                edge.find(phrase) == edge.rfind(phrase) for edge in edges):
+            pairs = [(left[match.a+k], right[match.b+k]) for k in range(match.size)]
     votes = defaultdict(Counter)
     for (_, wa), (_, wb) in pairs:
         if wa.speaker is not None and wb.speaker is not None:
@@ -148,8 +171,18 @@ def stitch(chunks):
             warnings.append(f'Unmatched speaker in chunk 2 assigned {mapping[speaker]}; review the identity.')
     b = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in b]
     if len(pairs) >= 5:
-        (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-1770))
-        combined = a[:ia] + b[ib:]
+        if a_timed and b_timed:
+            (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-1770))
+            combined = a[:ia] + b[ib:]
+        elif a_timed:
+            (ia, _), (ib, _) = pairs[-1]
+            combined = a[:ia+1] + b[ib+1:]
+        else:
+            (ia, _), (ib, _) = pairs[0]
+            combined = a[:ia] + b[ib:]
+    elif not (a_timed and b_timed):
+        combined = a + b
+        warnings.append('Could not match the overlap without timestamps. Both chunks were kept. Review for repeated words.')
     else:
         combined = [w for w, t in zip(a, _seam_positions(a, 0)) if t < 1770]
         combined.extend(w for w, t in zip(b, _seam_positions(b, 1770)) if t >= 1770)
@@ -181,28 +214,38 @@ class AudioPipeline:
             uploaded = sdk.files.get(name=uploaded.name)
         if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
             raise ValueError('Audio upload processing failed.')
-        response = sdk.interactions.create(model=AUDIO_MODEL,
-            input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
-            generation_config={'transcription_config': {'mode': {'type': 'verbatim',
-                'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}}},
-            automatic_continuation=False, timeout=1800)
-        if self.testing:
-            # Preserve the response before validation, including malformed timestamps.
-            debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            debug_path = debug_dir / f'response-{time.time_ns()}.json'
-            payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
-            debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
-                                  encoding='utf-8')
-            debug_path.with_suffix('.txt').write_text('\n'.join(
-                block.text
-                for step in getattr(response, 'steps', None) or []
-                if getattr(step, 'type', None) == 'model_output'
-                for block in getattr(step, 'content', None) or []
-                if getattr(block, 'type', None) == 'text'), encoding='utf-8')
-        if getattr(response.status, 'value', response.status) != 'completed':
-            raise ValueError('Transcription did not complete; existing text was preserved.')
-        return parse_words(response)
+        for timestamps in (True, False):
+            mode = {'type': 'verbatim', 'diarization_mode': 'speaker'}
+            if timestamps:
+                mode['timestamp_granularities'] = ['word']
+            response = sdk.interactions.create(model=AUDIO_MODEL,
+                input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
+                generation_config={'max_output_tokens': 16384, 'transcription_config': {'mode': mode}},
+                automatic_continuation=False, timeout=1800)
+            if self.testing:
+                self._save_response(response)
+            status = getattr(response.status, 'value', response.status)
+            if status == 'completed':
+                return parse_words(response, timestamps=timestamps)
+            if status != 'incomplete':
+                break
+        raise ValueError('Transcription did not complete; existing text was preserved.')
+
+    @staticmethod
+    def _save_response(response):
+        # Preserve the response before validation, including malformed timestamps.
+        debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_dir / f'response-{time.time_ns()}.json'
+        payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
+        debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
+                              encoding='utf-8')
+        debug_path.with_suffix('.txt').write_text('\n'.join(
+            block.text
+            for step in getattr(response, 'steps', None) or []
+            if getattr(step, 'type', None) == 'model_output'
+            for block in getattr(step, 'content', None) or []
+            if getattr(block, 'type', None) == 'text'), encoding='utf-8')
 
     def run(self, path, progress=lambda message: None):
         path = Path(path)
@@ -218,7 +261,7 @@ class AudioPipeline:
             return self._run_locked(path, plan, directory, progress, digest)
 
     def _run_locked(self, path, plan, directory, progress, digest):
-        chunks = []
+        chunks, timing_warnings = [], []
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing chunk {i+1} of {len(plan)}...')
             cached = directory / f'chunk-{i}.json'
@@ -234,10 +277,12 @@ class AudioPipeline:
             chunks.append([w if (w.start is not None and w.end is not None
                                  and 0 <= w.start <= w.end <= end - start)
                            else replace(w, start=None, end=None) for w in words])
+            if not any(w.start is not None for w in chunks[-1]):
+                timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
         words, warnings = stitch(chunks)
         text = render(words)
         if not text.strip():
             raise ValueError('Transcription returned no usable text.')
         _check_wav(path, digest)
-        return Transcription(text, words, tuple(warnings), int(plan[-1][1] * 1000), digest)
+        return Transcription(text, words, tuple(timing_warnings + warnings), int(plan[-1][1] * 1000), digest)

@@ -225,6 +225,10 @@ def align_speech(revision, native_times, words, duration_ms, wav_sha256):
             time = round(word.start * 1000)
         audio.extend((key, time) for _, key in _tokens(word.text))
 
+    if not any(time is not None for _, time in audio):
+        # No speech correction means playback and export use the CaseCAT stroke timing.
+        return None
+
     _, keys, refs = _passages(revision)
     matches = _matches(keys, _unique_phrases([key for key, _ in audio]),
                        [time for _, time in audio], _at_strokes(refs, native_times), learn_offset=True)

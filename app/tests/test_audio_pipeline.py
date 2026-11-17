@@ -172,6 +172,66 @@ def test_missing_annotations_and_bad_timestamps_are_rejected():
         parse_words(NS(steps=[NS(type='model_output', content=[NS(type='text', text='Hello', annotations=[])])]))
 
 
+def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(tmp_path, monkeypatch):
+    from app.src.audio_pipeline import AudioPipeline, media
+
+    overlap = 'Please read the signed agreement to the witness again.'
+    untimed = f'Opening remarks. {overlap}'
+    requests, uploads = [], []
+
+    def upload(**kwargs):
+        uploads.append(kwargs['file'])
+        return NS(uri=f'files/chunk-{len(uploads)}', state='ACTIVE')
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return NS(status='incomplete')
+        if len(requests) == 2:
+            text = untimed
+            annotations = [NS(type='word_info', start_index=0, end_index=len(text), speaker='first')]
+        else:
+            text = f'{overlap} We can adjourn.'
+            annotations, offset = [], 0
+            for i, token in enumerate(text.split()):
+                start = i + 27 if i < len(overlap.split()) else i + 62
+                annotations.append(NS(type='word_info', start_index=offset, end_index=offset+len(token),
+                                      speaker='second', start_offset=f'{start}s', end_offset=f'{start+0.5}s'))
+                offset += len(token) + 1
+        block = NS(type='text', text=text, annotations=annotations)
+        return NS(status='completed', steps=[NS(type='model_output', content=[block])])
+
+    wav = tmp_path/'source.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: 2942)
+    monkeypatch.setattr(media, 'prepare', lambda *args: None)
+    sdk = NS(files=NS(upload=upload), interactions=NS(create=create))
+    pipeline = AudioPipeline('fake', tmp_path/'cache', sdk)
+
+    result = pipeline.run(wav)
+
+    assert result.text == f'Speaker 1: {untimed} We can adjourn.'
+    assert result.words[0].start is None
+    assert next(w.start for w in result.words if w.text == 'Please') == 1767
+    assert any('chunk 1' in warning for warning in result.warnings)
+    assert pipeline.run(wav) == result
+    assert len(uploads) == 2
+    assert [request['input'][0]['uri'] for request in requests] == ['files/chunk-1', 'files/chunk-1', 'files/chunk-2']
+    configs = [request['generation_config'] for request in requests]
+    assert [config['max_output_tokens'] for config in configs] == [16384, 16384, 16384]
+    modes = [config['transcription_config']['mode'] for config in configs]
+    assert [mode.get('timestamp_granularities') for mode in modes] == [['word'], None, ['word']]
+    assert all(mode['diarization_mode'] == 'speaker' for mode in modes)
+
+
+def test_unmatched_untimed_overlap_keeps_text_from_both_chunks():
+    a = [Word('Keep the first chunk.', 'a', 1742, 1745)]
+    b = [Word('Keep the second chunk.', 'b', None, None)]
+    words, warnings = stitch([a, b])
+    assert render(words) == 'Speaker 1: Keep the first chunk.\nSpeaker 2: Keep the second chunk.'
+    assert any('Both chunks' in warning for warning in warnings)
+
+
 def test_ambiguous_speakers_are_not_merged():
     a = [Word(str(i), 'a' if i < 6 else 'b', 1750+i, 1751+i) for i in range(12)]
     b = [Word(str(i), 'c', 10+i, 11+i) for i in range(12)]

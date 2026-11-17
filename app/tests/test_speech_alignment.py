@@ -129,3 +129,9 @@ def test_alignment_can_use_speech_when_native_timing_is_missing():
     words = audio(('one', 3), ('two', 4), ('three', 5), ('four', 7), ('five', 8), ('six', 9))
     alignment = align(source, (None,) * 7, words)
     assert alignment.stroke_ms == (3000, 4000, 5000, 6000, 7000, 8000, 9000)
+
+
+def test_untimed_transcript_leaves_native_stroke_timing():
+    source = revision('One ', 'two ', 'three ', 'four ', 'five ', 'six.')
+    words = tuple(Word(word, 'speaker', None, None) for word in source.text.split())
+    assert align(source, (1000, 2000, 3000, 4000, 5000, 6000), words) is None
