@@ -13,6 +13,13 @@ from app.src.suggestion_filter import LABEL
 QA_PREFIX = re.compile(r'^ *([QA]) {2,}')
 
 
+def prepare_editor_presentation(job, bundle):
+    try:
+        return presentation(job, bundle)
+    except ValueError:
+        return job.text, {}, frozenset()
+
+
 @lru_cache(maxsize=8)
 def presentation(job, bundle):
     if job.revision != job.baseline:

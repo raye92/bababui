@@ -2,8 +2,9 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.src import native_editor as editor
@@ -19,6 +20,82 @@ def paged_editor():
     view.resize(1000, 700)
     view.show()
     return app, view
+
+
+@pytest.mark.parametrize('width, cancel', [(600, 'click'), (1450, 'escape')])
+def test_middle_click_autoscroll_tracks_pointer_and_stops(width, cancel):
+    from app.src.page_view import PageView
+
+    app = QApplication.instance() or QApplication([])
+    editor_view = editor.NativeTranscriptEditor(QFont('Courier New', 12))
+    editor_view.setPlainText('\n'.join(f'Transcript line {i}.' for i in range(120)))
+    page = PageView(editor_view)
+    page.resize(width, 550)
+    page.show()
+    page.activateWindow()
+    app.processEvents()
+    try:
+        bar = editor_view.verticalScrollBar()
+        midpoint = bar.maximum() // 2
+        assert midpoint > 0
+        bar.setValue(midpoint)
+        viewport = page.viewport()
+        anchor = viewport.rect().center()
+        QTest.mouseMove(viewport, anchor)
+        QTest.mouseClick(viewport, Qt.MiddleButton, pos=anchor)
+
+        QTest.mouseMove(viewport, anchor + QPoint(0, 6))
+        QTest.qWait(120)
+        assert bar.value() == midpoint
+
+        QTest.mouseMove(viewport, anchor + QPoint(0, 90))
+        QTest.qWait(120)
+        assert bar.value() > midpoint
+        down = bar.value()
+        QTest.mouseMove(viewport, anchor - QPoint(0, 90))
+        QTest.qWait(120)
+        assert bar.value() < down
+
+        if cancel == 'click':
+            QTest.mouseClick(viewport, Qt.MiddleButton, pos=anchor)
+        else:
+            QTest.keyClick(page, Qt.Key_Escape)
+        stopped = bar.value()
+        QTest.mouseMove(viewport, anchor + QPoint(0, 90))
+        QTest.qWait(120)
+        assert bar.value() == stopped
+    finally:
+        page.close()
+
+
+def test_review_splitter_keeps_paged_editor_visible_when_dragged_left():
+    from app.src.casecat.project import NativeState
+    from app.src.document_view import DocumentView
+    from app.src.documents import Document
+
+    app = QApplication.instance() or QApplication([])
+    bundle = review_layout_bundle(('Cover sheet.\n\x0c\x16\x07\x00', 'INDEX\nFirst entry.\nSecond entry.'))
+    state = NativeState.load(bundle, bundle.jobs[0])
+    state.incoming = state.original.revise(state.original.text.replace('Cover sheet', 'Cover information'))
+    view = DocumentView(Document(native=state))
+    view.resize(720, 800)
+    view.show()
+    app.processEvents()
+    try:
+        splitter = view.review_splitter
+        splitter.moveSplitter(0, 1)
+        app.processEvents()
+        assert splitter.sizes()[0] >= 400
+        assert view.inline_page.viewport().width() >= 400
+        assert view.inline_page.sceneRect().height() < 3000
+
+        splitter.moveSplitter(445, 1)
+        splitter.moveSplitter(splitter.width(), 1)
+        app.processEvents()
+        assert splitter.sizes()[1] == 0
+        assert view.inline_page.transform().m11() > 0.5
+    finally:
+        view.close()
 
 
 def test_native_page_numbers_are_decoration_and_wrapping_does_not_change_content():

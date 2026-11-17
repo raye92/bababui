@@ -127,6 +127,10 @@ class TranscriptEditor(QMainWindow):
             self.addAction(action)
             menu.addAction(action)
             self.file_actions[label] = action
+        menu.addSeparator()
+        self.accept_all_preview_action = menu.addAction('Preview Accept All')
+        self.accept_all_preview_action.setCheckable(True)
+        self.accept_all_preview_action.triggered.connect(self.toggle_accept_all_preview)
         self.edit_btn, edit = self._menu_button('Edit', row)
         edit.addAction('Attach WAV...', lambda: self.choose_wav(self.tabs.currentIndex()))
         self.undo_review_action = edit.addAction('Undo review', lambda: self.current.undo_review())
@@ -340,6 +344,9 @@ class TranscriptEditor(QMainWindow):
         self.bababui_btn.setEnabled(bool(doc and doc.wav_path) and not busy)
         self.progress.setVisible(busy)
         self.toggle_view_btn.setEnabled(isinstance(view, DocumentView))
+        self.accept_all_preview_action.setEnabled(isinstance(view, DocumentView))
+        with QSignalBlocker(self.accept_all_preview_action):
+            self.accept_all_preview_action.setChecked(isinstance(view, DocumentView) and view.accept_all_preview)
         for name in ('Save', 'Save As', 'Export CaseCAT ZIP'):
             self.file_actions[name].setEnabled(editable)
         self.file_actions['Close Tab'].setEnabled(not busy)
@@ -619,6 +626,10 @@ class TranscriptEditor(QMainWindow):
     def toggle_view(self):
         if self.current:
             self.current.toggle_view()
+
+    def toggle_accept_all_preview(self, enabled):
+        if isinstance(self.current, DocumentView):
+            self.current.set_accept_all_preview(enabled)
 
     def run_bababui(self):
         view = self.current

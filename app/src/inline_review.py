@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
-from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.suggestions import preview_ranges
 
 
@@ -378,7 +378,7 @@ class InlineReviewEditor(QTextEdit):
                             cursor.setPosition(row.display_start+_qt(row.text[:start-row.source_start]))
                             cursor.setPosition(row.display_start+_qt(row.text[:end-row.source_start]), QTextCursor.KeepAnchor)
                             mark = QTextCharFormat()
-                            mark.setBackground(QColor('#f2aba7' if row.kind == 'original' else '#9edcb0'))
+                            mark.setBackground(QColor('#f2aba7' if row.kind == 'original' else ADDITION_BACKGROUND))
                             cursor.mergeCharFormat(mark)
                 if speaker_ends and row.kind != 'original':
                     source_start = row.incoming_start if row.kind == 'equal' else row.source_start
@@ -674,7 +674,7 @@ class InlineReviewEditor(QTextEdit):
                 painter.setPen(QPen(color, 0))
                 painter.drawLine(rect.topLeft(), rect.bottomLeft())
                 continue
-            painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else '#9edcb0'))
+            painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else ADDITION_BACKGROUND))
             painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
             painter.drawText(rect, Qt.AlignCenter, '↵')
 

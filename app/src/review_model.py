@@ -18,6 +18,30 @@ class ReviewModel:
     edits: tuple[Suggestion, ...]
     sections: tuple[ReviewSection, ...]
 
+    @property
+    def ranges(self):
+        return tuple(span for edit in self.edits for span in edit.ranges)
+
+    def position_on(self, side, position, target):
+        if side == target:
+            return position
+        ranges = self.ranges
+        if side == 'incoming':
+            ranges = ((c, d, a, b) for a, b, c, d in ranges)
+        return map_position(position, sorted(ranges))
+
+
+def map_position(position, ranges):
+    """Map a reading position through ordered old and new text ranges."""
+    shift = 0
+    for a, b, c, d in ranges:
+        if position < a:
+            break
+        if position < b:
+            return c + min(position - a, d - c)
+        shift = d - b
+    return position + shift
+
 
 def _paragraph_bounds(text, start, end):
     first = text.rfind('\n', 0, start) + 1

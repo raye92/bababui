@@ -1,18 +1,19 @@
 """One structured document and its review transactions."""
 from bisect import bisect_right
 from copy import deepcopy
-from PySide6.QtCore import Signal, Slot, QThread, QTimer, Qt
+from PySide6.QtCore import Signal, Slot, QThread, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit, QMessageBox
+from app.src.accept_all_preview import AcceptAllPreviewEditor, AcceptAllPreviewTask, PreviewSignals
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
-from app.src.review_model import build_review
+from app.src.review_model import build_review, map_position
 from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
 from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, PlaybackBar
 from app.src.casecat.anchors import utf16_index
-from app.src.casecat.presentation import presentation
+from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
 from app.src.suggestion_filter import begin_review, override_speaker, track_decisions, auto_accept, questionable_speaker_defaults
 from app.src.speech_alignment import WAV_CHANGED
@@ -54,10 +55,8 @@ class ReviewPreviewWorker(QThread):
             self.revisions = self.decision()
             for side, old, revision in zip(('original', 'incoming'), self.before, self.revisions):
                 if old != revision:
-                    try:
-                        self.previews[side] = presentation(self.job.with_revision(revision), self.bundle)
-                    except ValueError:
-                        self.previews[side] = (revision.text, {}, frozenset())
+                    job = self.job.with_revision(revision)
+                    self.previews[side] = prepare_editor_presentation(job, self.bundle)
             self.model = build_review(*self.revisions)
         except Exception as exc:
             self.error = exc
@@ -81,9 +80,20 @@ class DocumentView(QWidget):
                                             exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
         self._updating = False
         self._position_pending = True
+        self._restore_source = None
+        self._restore_timer = QTimer(self, singleShot=True)
+        self._restore_timer.timeout.connect(self.restore_position)
         self._native_history = {'original': {}, 'incoming': {}}
         self._review_undo, self._review_redo = [], []
         self._review_worker = None
+        self.accept_all_preview = False
+        self._preview_anchor = None
+        self._preview_model = None
+        self._preview_preparing = False
+        # The task may finish after the tab closes. It keeps the signal sender
+        # alive, and Qt disconnects the tab's slot when the tab is deleted.
+        self._preview_signals = PreviewSignals()
+        self._preview_signals.finished.connect(self._finish_accept_all_preview, Qt.QueuedConnection)
         if document.native.original != document.native.incoming or automatic_before:
             self._automatic_review(automatic_before)
         self.stack = QStackedWidget()
@@ -96,6 +106,9 @@ class DocumentView(QWidget):
         self.inline_editor.selected.connect(self.select_inline)
         self.inline_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.inline_editor.source_activated.connect(self._seek_review_passage)
+        self.preview_editor = AcceptAllPreviewEditor(font)
+        self.preview_editor.passage_clicked.connect(self._preview_clicked)
+        self.preview_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self._start_review)
         self.diff_view.selected.connect(self.select_suggestion)
@@ -110,6 +123,11 @@ class DocumentView(QWidget):
         self.original_stack.addWidget(self.original_page)
         self.inline_page = PageView(self.inline_editor)
         self.original_stack.addWidget(self.inline_page)
+        self.preview_page = PageView(self.preview_editor)
+        self.original_stack.addWidget(self.preview_page)
+        self.preview_loading = QLabel('Preparing Accept All preview…', alignment=Qt.AlignCenter)
+        self.preview_loading.setFocusPolicy(Qt.StrongFocus)
+        self.original_stack.addWidget(self.preview_loading)
         self.stack.addWidget(self.original_stack)
         self.stack.addWidget(self.incoming_page)
         layout = QVBoxLayout(self)
@@ -117,6 +135,8 @@ class DocumentView(QWidget):
         self.review_splitter = QSplitter(Qt.Horizontal)
         self.review_splitter.addWidget(self.stack)
         self.review_splitter.addWidget(self.diff_view)
+        self.stack.setMinimumWidth(400)
+        self.review_splitter.setCollapsible(0, False)
         self.diff_view.setMinimumWidth(260)
         self.review_splitter.setStretchFactor(0, 1)
         self.review_splitter.setStretchFactor(1, 1)
@@ -168,7 +188,7 @@ class DocumentView(QWidget):
         targets = ((state.original, a), (state.incoming, c))
         # Start on the displayed side when it contains the edit. An insertion
         # or deletion can use its other side, or fall back to the source anchor.
-        if a == b or (self.stack.currentIndex() and c != d):
+        if a == b or ((self.stack.currentIndex() or self._showing_accept_all_preview()) and c != d):
             targets = targets[::-1]
         for revision, offset in targets:
             if self.playback.seek_passage(revision, offset):
@@ -193,14 +213,20 @@ class DocumentView(QWidget):
             return None
 
     def active_view(self):
-        return self.incoming_editor if self.stack.currentIndex() else (self.inline_editor if self.original_stack.currentWidget() is self.inline_page else self.editor)
+        if self.stack.currentIndex():
+            return self.incoming_editor
+        page = self.original_stack.currentWidget()
+        return page.editor if isinstance(page, PageView) else None
 
     def _playback_context(self):
         editor = self.active_view()
+        if editor is None:
+            return None, None
         if editor is self.inline_editor:
             side, _ = editor.source_position()
-            return editor, getattr(self.document.native, side)
-        return editor, getattr(self.document.native, 'incoming' if self.stack.currentIndex() else 'original')
+        else:
+            side = 'original' if editor is self.editor else 'incoming'
+        return editor, getattr(self.document.native, side)
 
     def _seek_review_passage(self, side, position):
         if self.playback:
@@ -210,57 +236,84 @@ class DocumentView(QWidget):
     def _seek_selected_suggestion(self):
         index = self.diff_view.current
         if self.playback and index >= 0 and self.diff_view.changes[index].ranges:
-            self.playback.seek_from_cursor()
+            if self._showing_accept_all_preview():
+                a, _, c, d = self.diff_view.changes[index].ranges[0]
+                side, position = ('incoming', c) if c != d else ('original', a)
+                self._seek_review_passage(side, position)
+            else:
+                self.playback.seek_from_cursor()
 
     def capture_position(self):
         self.document.view = self.stack.currentIndex()
-        if not self._position_pending:
-            self.document.center_line = self.active_view().center_line()
+        editor = self.active_view()
+        if self._position_pending or editor is None:
+            return
+        if editor is self.preview_editor:
+            self._preview_anchor = self._review_position()
+            anchor = self._inline_anchor(*self._preview_anchor)
+            position = self.inline_editor.display_position(*anchor)
+            if position is not None:
+                lines = self.inline_editor.page_lines()
+                self.document.center_line = max(0, bisect_right([line.position for line in lines], position) - 1)
+        else:
+            self.document.center_line = editor.center_line()
 
     def schedule_restore(self, source_position=None):
+        if self.active_view() is None and source_position is not None:
+            self._preview_anchor = source_position
         self._position_pending = True
-        QTimer.singleShot(0, lambda: self.restore_position(source_position))
+        self._restore_source = source_position
+        self._restore_timer.start(0)
 
-    def restore_position(self, source_position=None):
+    def restore_position(self):
         editor = self.active_view()
+        source_position, self._restore_source = self._restore_source, None
+        self._position_pending = False
+        if editor is None:
+            return
+        if source_position is None and editor is self.preview_editor:
+            source_position = self._preview_anchor
         if source_position is None:
             editor.scroll_to_center_line(self.document.center_line)
         elif editor is self.inline_editor:
-            editor.scroll_to_source_position(*source_position)
+            editor.scroll_to_source_position(*self._inline_anchor(*source_position))
         else:
             side, offset = source_position
-            position = len(getattr(self.document, side)[:offset].encode('utf-16-le')) // 2
+            target = 'original' if editor is self.editor else 'incoming'
+            offset = self.review_model.position_on(side, offset, target)
+            position = len(getattr(self.document, target)[:offset].encode('utf-16-le')) // 2
             lines = editor.page_lines()
             editor.scroll_to_center_line(bisect_right([line.position for line in lines], position) - 1)
-        self._position_pending = False
         if source_position is not None:
             self.capture_position()
 
+    def _inline_anchor(self, side, offset):
+        if self.inline_editor.display_position(side, offset) is None:
+            target = 'incoming' if side == 'original' else 'original'
+            return target, self.review_model.position_on(side, offset, target)
+        return side, offset
+
     def _review_position(self):
+        if self._position_pending and self._restore_source is not None:
+            return self._restore_source
         editor = self.active_view()
+        if editor is None:
+            return self._preview_anchor or ('original', 0)
         if editor is self.inline_editor:
             return editor.center_source_position()
-        side = 'incoming' if editor is self.incoming_editor else 'original'
+        side = 'original' if editor is self.editor else 'incoming'
         lines = editor.page_lines()
         position = lines[editor.center_line()].position if lines else 0
-        return side, utf16_index(getattr(self.document, side), position)
+        return side, utf16_index(editor.toPlainText(), position)
 
     def _restore_review_position(self, anchor, before):
         side, position = anchor
         old = before[1 if side == 'incoming' else 0].text
         editor = self.active_view()
         if editor is not self.inline_editor:
-            side = 'incoming' if editor is self.incoming_editor else 'original'
+            side = 'original' if editor is self.editor else 'incoming'
         new = getattr(self.document, side)
-        shift = 0
-        for a, b, c, d in text_edits(old, new):
-            if position < a:
-                break
-            if position < b:
-                self.schedule_restore((side, c + min(position - a, d - c)))
-                return
-            shift = d - b
-        self.schedule_restore((side, position + shift))
+        self.schedule_restore((side, map_position(position, text_edits(old, new))))
 
     def _set_text(self, editor, text, prepared=None):
         side = 'original' if editor is self.editor else 'incoming'
@@ -334,7 +387,77 @@ class DocumentView(QWidget):
             doc.set_text('incoming', revision.text, revision=revision)
         self.edited()
 
+    def _showing_accept_all_preview(self):
+        return self.accept_all_preview and not self.stack.currentIndex() and bool(self.review_model.edits)
+
+    def _preview_matches(self, model):
+        return (model is not None and self.review_model.original is model.original
+                and self.review_model.incoming is model.incoming)
+
+    def set_accept_all_preview(self, enabled):
+        if enabled == self.accept_all_preview:
+            return
+        anchor = self._review_position()
+        self.accept_all_preview = enabled
+        if enabled:
+            self.stack.setCurrentIndex(0)
+        self._update_original_page()
+        self.schedule_restore(anchor)
+        self.document.view = self.stack.currentIndex()
+        self.changed.emit()
+
+    def _update_original_page(self):
+        if not self.review_model.edits:
+            page = self.original_page
+        elif not self.accept_all_preview:
+            page = self.inline_page
+        elif self._preview_matches(self._preview_model):
+            page = self.preview_page
+        else:
+            page = self.preview_loading
+            if not self.stack.currentIndex() and not self._preview_preparing:
+                state = self.document.native
+                self._preview_preparing = True
+                QThreadPool.globalInstance().start(AcceptAllPreviewTask(
+                    self.review_model, state.bundle, state.job, self._preview_signals))
+        previous = self.original_stack.currentWidget()
+        if previous is not page:
+            self.original_stack.setCurrentWidget(page)
+            if (self.playback and not self.stack.currentIndex()
+                    and self.preview_page in (previous, page)):
+                self.playback.show_position(self.playback.player.position())
+
+    @Slot(object, object, str)
+    def _finish_accept_all_preview(self, model, result, error):
+        self._preview_preparing = False
+        if not self.accept_all_preview:
+            return
+        if not self._preview_matches(model):
+            self._update_original_page()
+            return
+        if result is None:
+            self.document.status = f'Could not prepare Accept All preview. {error}'
+            self.set_accept_all_preview(False)
+            return
+        job, prepared = result
+        self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, self.diff_view.current)
+        self._preview_model = model
+        self._update_original_page()
+        if not self.stack.currentIndex():
+            self.schedule_restore(self._preview_anchor)
+
+    @Slot(int, int)
+    def _preview_clicked(self, index, position):
+        if self.active_view() is not self.preview_editor:
+            return
+        if index >= 0 and not self.document.busy:
+            self.select_inline(index)
+        self._seek_review_passage('incoming', position)
+
     def refresh(self, *, previews=None, model=None):
+        previous_model = getattr(self, 'review_model', None)
+        anchor = (self._review_position() if self.accept_all_preview and previous_model is not None
+                  and not self.stack.currentIndex() else None)
         self._updating = True
         doc = self.document
         previews = previews or {}
@@ -344,7 +467,7 @@ class DocumentView(QWidget):
         self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
         self.inline_editor.set_model(
             self.review_model, unmatched_speakers=self.diff_view.unmatched_speaker_ranges)
-        self.original_stack.setCurrentWidget(self.inline_page if self.review_model.edits else self.original_page)
+        self._update_original_page()
         self.inline_page.fit_page()
         self.original_page.fit_page()
         self.incoming_page.fit_page()
@@ -352,6 +475,8 @@ class DocumentView(QWidget):
         self.highlight_suggestions()
         self._updating = False
         self.set_busy(doc.busy)
+        if anchor is not None and not self._preview_matches(previous_model):
+            self._restore_review_position(anchor, (previous_model.original, previous_model.incoming))
 
     def highlight_suggestions(self):
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
@@ -391,6 +516,8 @@ class DocumentView(QWidget):
                     marks.append(mark)
             editor._selected_review = self.diff_view.current
             editor.set_review_marks(marks, insertions)
+        if self._preview_matches(self._preview_model):
+            self.preview_editor.highlight_edit(self.diff_view.current)
 
     def select_inline(self, index):
         if self._review_worker is not None:
@@ -405,15 +532,26 @@ class DocumentView(QWidget):
         if not 0 <= index < len(self.diff_view.changes):
             return
         change = self.diff_view.changes[index]
-        if not getattr(self, "_inline_selection", False):
+        inline_selection = getattr(self, '_inline_selection', False)
+        if not inline_selection:
             self.inline_editor.focus_edit(index)
         self.highlight_suggestions()
-        if change.ranges:
+        if change.ranges and not (inline_selection and self._showing_accept_all_preview()):
             self._focus_passage(change.ranges[0])
 
     def _focus_passage(self, span):
-        side = 'incoming' if self.stack.currentIndex() else 'original'
-        editor = self.incoming_editor if self.stack.currentIndex() else self.editor
+        if self._showing_accept_all_preview():
+            self._restore_timer.stop()
+            self._restore_source = None
+            self._position_pending = False
+            self._preview_anchor = ('incoming', span[2])
+            if self.active_view() is None:
+                return
+            side, editor = 'incoming', self.preview_editor
+        elif self.stack.currentIndex():
+            side, editor = 'incoming', self.incoming_editor
+        else:
+            side, editor = 'original', self.editor
         start = span[2 if side == 'incoming' else 0]
         cursor = editor.textCursor()
         cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
@@ -453,7 +591,7 @@ class DocumentView(QWidget):
                     return
                 if (self.review_model.original, self.review_model.incoming) != before[:2]:
                     raise ValueError('These suggestions are stale. Refresh the review.')
-                ranges = tuple(span for edit in self.review_model.edits for span in edit.ranges)
+                ranges = self.review_model.ranges
                 questionable = questionable_speaker_defaults(before[2], ranges) if accept else []
                 if questionable:
                     names = '\n'.join(f'{speaker} → {name}' for speaker, name in questionable)
@@ -534,7 +672,7 @@ class DocumentView(QWidget):
             self.diff_view.select(target)
             # The preview already moved playback to this edit while the worker ran.
             if self.playback and ranges and tuple(span[side] for span in ranges) != next_ranges:
-                self.playback.seek_from_cursor()
+                self._seek_selected_suggestion()
         elif not self.diff_view.changes and ranges:
             self._focus_passage(ranges[0])
             if self.playback:
@@ -596,12 +734,14 @@ class DocumentView(QWidget):
         self._native_history[side][editor.document().availableUndoSteps()] = revision
 
     def toggle_view(self):
+        anchor = self._review_position() if self.accept_all_preview else None
         self.capture_position()
         if self._review_worker is None:
             self.refresh()
         self.stack.setCurrentIndex(1-self.stack.currentIndex())
+        self._update_original_page()
         self.document.view = self.stack.currentIndex()
-        self.schedule_restore()
+        self.schedule_restore(anchor)
         self.changed.emit()
 
     def receive(self, text, warnings, alignment=None):
@@ -649,7 +789,8 @@ class DocumentView(QWidget):
         if self.playback:
             self.playback.show_position(self.playback.player.position())
         self.edited()
-        self.schedule_restore()
+        if self._restore_source is None:
+            self.schedule_restore()
 
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
