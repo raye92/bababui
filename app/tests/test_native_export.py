@@ -1,5 +1,6 @@
 import struct
 import zipfile
+from dataclasses import replace
 
 import pytest
 
@@ -8,6 +9,33 @@ from app.src.casecat.codec import load_job
 from app.src import documents
 from app.tests.test_native_casecat import zip_bytes
 from app.tests.test_native_structure import container_files
+
+
+def test_export_moves_boundary_to_retained_byline_control(tmp_path):
+    byline = b'\x16\x05\x00\x11\x06\x02\x00\x00\x00BY COUNSEL:'
+    bundle = inspect_archive(zip_bytes(container_files(('Before. ', byline.decode('cp1252')))))
+    job = load_job(bundle, bundle.jobs[0])
+    # Accepted edits can leave the LF on the preceding stroke while retaining
+    # the by-line symbol and its own paragraph control on the next stroke.
+    first, second = job.baseline.spans
+    revision = replace(job.baseline,
+                       spans=(replace(first, content='Before.\n'),
+                              replace(second, content='BY COUNSEL:')),
+                       elements=tuple(replace(e, start=e.start-1, end=e.end-1)
+                                      for e in job.baseline.elements))
+    target = tmp_path / 'byline.zip'
+
+    export_zip(bundle, job.with_revision(revision), target)
+
+    exported = inspect_archive(target)
+    restored = load_job(exported, job.key)
+    assert restored.text == 'Before.\nBY COUNSEL:'
+    assert bytes.fromhex(restored.baseline.elements[0].raw) == byline[:12]
+    assert restored.stroke_clocks == job.stroke_clocks
+    assert restored.notes_bytes == job.notes_bytes
+    for name in bundle.members:
+        if name != bundle.member(job.key + '.sgngl'):
+            assert exported.read(name) == bundle.read(name)
 
 
 def test_edited_export_updates_only_selected_native_member(tmp_path):

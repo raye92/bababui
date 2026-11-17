@@ -372,8 +372,13 @@ def serialize_candidate(job, bundle):
     targets = group_targets(job)
     # A surviving symbol owns its paragraph break, even if range deletion left
     # that break anchored to the preceding source group.
-    for index in range(1, len(targets)):
-        if targets[index].startswith(('     Q    ', '     A    ')):
+    paragraph_symbols = {e.start for e in job.revision.elements
+                         if e.kind == 'symbol' and bytes.fromhex(e.raw).startswith(b'\x16')}
+    boundary = 0
+    for index, target in enumerate(targets):
+        owns_break = boundary in paragraph_symbols or target.startswith(('     Q    ', '     A    '))
+        boundary += len(target)
+        if index and target and owns_break:
             previous = next((i for i in range(index-1, -1, -1) if targets[i]), None)
             if previous is not None and targets[previous].endswith('\n'):
                 targets[previous] = targets[previous][:-1]
