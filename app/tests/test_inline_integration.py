@@ -2,8 +2,100 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+import pytest
 
 from app.tests.test_native_editor import native_window, source_zip
+
+
+@pytest.fixture
+def audio_review(native_window, tmp_path):
+    from app.src.documents import import_casecat
+    from app.tests.test_native_audio import audio_archive
+
+    view = native_window.add_document(import_casecat(audio_archive(tmp_path)))
+    state = view.document.native
+    state.original = state.original.revise('Alpha \nAn unchanged sentence.\nbeta \ngamma.')
+    state.incoming = state.original
+    view.receive(state.original.text.replace('Alpha', 'Orange').replace('beta', 'copper'), [])
+    player = view.playback.player
+    for _ in range(100):
+        if player.isSeekable():
+            break
+        QTest.qWait(10)
+    assert player.isSeekable()
+    return view
+
+
+@pytest.mark.parametrize('key, expected', [(Qt.Key_A, 'The car is blue.'), (Qt.Key_D, 'The car is red.')])
+def test_review_decision_hotkeys_resolve_only_the_selected_suggestion(native_window, tmp_path, key, expected):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('The car is red.\nThe house is old.')
+    view.receive('The car is blue.\nThe house is new.', [])
+    native_window.activateWindow()
+    view.inline_editor.setFocus()
+    QApplication.processEvents()
+
+    QTest.keyClick(view.inline_editor, key)
+    for _ in range(100):
+        if not view.document.busy:
+            break
+        QTest.qWait(10)
+    assert not view.document.busy
+    assert view.document.original == f'{expected}\nThe house is old.'
+    assert view.document.incoming == f'{expected}\nThe house is new.'
+
+
+def test_w_replays_the_selected_edit_with_a_lead_in_even_after_the_caret_moves(native_window, audio_review):
+    view = audio_review
+    view.diff_view.select(1)
+    view.inline_editor.set_source_position('original', 0)
+    player = view.playback.player
+    player.play()
+    player.pause()
+    player.setPosition(20000)
+    native_window.activateWindow()
+    view.inline_editor.setFocus()
+    QApplication.processEvents()
+
+    QTest.keyClick(view.inline_editor, Qt.Key_W)
+    assert player.isPlaying()
+    assert abs(player.position() - 10940) < 100
+    assert view.inline_editor.source_position() == ('original', 0)
+
+
+def test_s_uses_the_saved_forward_interval_and_preserves_pause(native_window, audio_review):
+    view = audio_review
+    player = view.playback.player
+    native_window.activateWindow()
+    view.inline_editor.setFocus()
+    QApplication.processEvents()
+    player.play()
+    player.pause()
+    player.setPosition(10000)
+
+    QTest.keyClick(view.inline_editor, Qt.Key_S)
+    assert player.position() == 15000 and not player.isPlaying()
+
+    native_window.settings_btn.click()
+    native_window.tabs.currentWidget().forward_seconds.setValue(9)
+    native_window.tabs.setCurrentWidget(view)
+    view.inline_editor.setFocus()
+    QApplication.processEvents()
+    player.setPosition(10000)
+    QTest.keyClick(view.inline_editor, Qt.Key_S)
+    assert player.position() == 19000 and not player.isPlaying()
+    view.playback.forward_button.click()
+    assert player.position() == 28000
+
+    view.review(None, False)
+    view.editor.setFocus()
+    cursor = view.editor.textCursor()
+    cursor.movePosition(QTextCursor.Start)
+    view.editor.setTextCursor(cursor)
+    QTest.keyClicks(view.editor, 'wasd')
+    assert view.document.original.startswith('wasdAlpha')
+    assert player.position() == 28000
 
 
 def test_pending_review_blocks_direct_edits_until_resolved(native_window, tmp_path):

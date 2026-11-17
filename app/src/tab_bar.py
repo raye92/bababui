@@ -61,7 +61,7 @@ class AudioTabBar(QTabBar):
 
     def is_empty(self, index):
         info = self.tabData(index) or {}
-        return index >= 0 and not info.get('native') and not info.get('wav_path')
+        return index >= 0 and not (info.get('settings') or info.get('native') or info.get('wav_path'))
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -90,10 +90,15 @@ class AudioTabBar(QTabBar):
         if index < 0:
             return
         menu = QMenu(self)
+        info = self.tabData(index) or {}
+        if info.get('settings'):
+            menu.addAction('Close', lambda: self.close_requested.emit(index))
+            menu.exec(event.globalPos())
+            return
         menu.addAction('Duplicate Tab', lambda: self.duplicate_requested.emit(index))
         replace = menu.addAction('Import CaseCAT ZIP', lambda: self.replace_requested.emit(index))
         close = menu.addAction('Close', lambda: self.close_requested.emit(index))
-        busy = (self.tabData(index) or {}).get('busy', False)
+        busy = info.get('busy', False)
         replace.setEnabled(not busy)
         close.setEnabled(not busy)
         menu.exec(event.globalPos())
@@ -101,7 +106,8 @@ class AudioTabBar(QTabBar):
     def _drop(self, event):
         index = self.tabAt(event.position().toPoint())
         urls = event.mimeData().urls()
-        if index >= 0 and not (self.tabData(index) or {}).get('busy') and len(urls) == 1 and urls[0].isLocalFile():
+        info = self.tabData(index) or {}
+        if index >= 0 and not (info.get('settings') or info.get('busy')) and len(urls) == 1 and urls[0].isLocalFile():
             path = Path(urls[0].toLocalFile())
             if path.is_file() and path.suffix.lower() == '.zip':
                 return index, str(path)

@@ -8,10 +8,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
-    QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QTabWidget, QProgressBar,
+    QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QProgressBar,
     QFileDialog, QSizePolicy, QLabel, QInputDialog)
 from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
 from app.src.ai_review import DEFAULT_REVIEW_MODEL
@@ -21,6 +21,8 @@ from app.src.documents import (Document, canonical, save_document, open_document
 from app.src.casecat.archive import inspect_archive
 from app.src.casecat.retiming import AudioExportError
 from app.src.document_view import DocumentView, ImportView
+from app.src.playback import DEFAULT_FORWARD_SECONDS
+from app.src.settings_page import SettingsPage
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
 
@@ -37,6 +39,7 @@ class TranscriptEditor(QMainWindow):
         self._restoring = True
         self._recovery_enabled = True
         self._last_view = None
+        self._last_document_id = None
         self._recovery_timer = QTimer(self)
         self._recovery_timer.setSingleShot(True)
         self._recovery_timer.setInterval(300)
@@ -67,6 +70,7 @@ class TranscriptEditor(QMainWindow):
         self.tabs.setCornerWidget(self.plus_btn, Qt.TopRightCorner)
         documents, active, notice, self.settings = self._read_session()
         self._build_toolbar()
+        self._build_settings()
         self._restore(documents, active, notice)
         self._restoring = False
         self._tab_changed(self.tabs.currentIndex())
@@ -74,10 +78,14 @@ class TranscriptEditor(QMainWindow):
 
     @property
     def current(self):
-        return self.tabs.currentWidget()
+        return self.document_tab(self.tabs.currentIndex())
+
+    def document_tab(self, index):
+        page = self.tabs.widget(index)
+        return page if isinstance(page, (DocumentView, ImportView)) else None
 
     def views(self):
-        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+        return [view for i in range(self.tabs.count()) if (view := self.document_tab(i)) is not None]
 
     def find_view(self, identifier):
         return next((v for v in self.views() if v.document.id == identifier), None)
@@ -124,79 +132,36 @@ class TranscriptEditor(QMainWindow):
         self.undo_review_action = edit.addAction('Undo review', lambda: self.current.undo_review())
         self.addAction(self.undo_review_action)
         edit.addAction('Redo review', lambda: self.current.redo_review())
+        edit.addSeparator()
+        self.review_actions = []
+        for label, shortcut, callback in (
+            ('Accept suggestion', 'A', lambda v: v.diff_view.request_current(True)),
+            ('Reject suggestion', 'D', lambda v: v.diff_view.request_current(False)),
+            ('Replay current edit', 'W', lambda v: v.replay_current_edit()),
+            ('Fast forward', 'S', lambda v: v.playback.skip_forward() if v.playback else None),
+        ):
+            action = edit.addAction(label)
+            action.setShortcut(QKeySequence(shortcut))
+            action.setAutoRepeat(False)
+            action.triggered.connect(lambda _, cb=callback: self._run_suggestion_action(cb))
+            self.addAction(action)
+            self.review_actions.append(action)
         self.bulk_review_actions = []
         for caption, accept in (('Accept All', True), ('Reject All', False)):
             action = edit.addAction(caption)
             action.triggered.connect(
                 lambda _, accepted=accept: self.current.review(None, accepted, background=True))
             self.bulk_review_actions.append(action)
+        edit.addSeparator()
         insert = edit.addMenu('Insert')
         insert.addAction('Field...', lambda: self.native_edit_action('insert_native_field'))
         insert.addAction('Insert Format Symbols...', lambda: self.native_edit_action('choose_native_symbol'))
         edit.addAction('Fill In Field...', lambda: self.native_edit_action('edit_native_field'))
         edit.addAction('Change Format Symbol...', lambda: self.native_edit_action('change_native_symbol'))
-        self.settings_btn, settings = self._menu_button('Settings', row)
-        automated_edits = settings.addMenu('Automated edits')
-        for rule, label in (
-            ('punctuation', 'Accept punctuation'),
-            ('capitalization', 'Accept capitalization'),
-            ('contractions', 'Accept contractions'),
-            ('short_common_words', 'Accept short/common words'),
-            ('date_ordinals', 'Accept ordinal suffix changes'),
-            ('off_record', 'Filter off-record discussion'),
-        ):
-            action = automated_edits.addAction(label)
-            action.setCheckable(True)
-            enabled = self._load_setting(f'auto_accept/{rule}', True)
-            action.setChecked(enabled)
-            if not enabled:
-                self.disabled_auto_accept_rules.add(rule)
-            action.toggled.connect(lambda checked, key=rule: self.set_auto_accept_rule(key, checked))
-        trailing_whitespace = automated_edits.addMenu('Trailing whitespaces')
-        whitespace_group = QActionGroup(trailing_whitespace)
-        whitespace_group.setExclusive(True)
-        delete_whitespace = self._load_setting('auto_accept/trailing_whitespace', True)
-        if not delete_whitespace:
-            self.disabled_auto_accept_rules.add('trailing_whitespace')
-        for label, delete in (('Keep', False), ('Delete', True)):
-            action = trailing_whitespace.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(delete == delete_whitespace)
-            whitespace_group.addAction(action)
-            action.triggered.connect(
-                lambda checked, enabled=delete: self.set_auto_accept_rule('trailing_whitespace', enabled))
-        ai_review = automated_edits.addMenu('AI-assisted review')
-        self.ai_review_enabled = ai_review.addAction('Enabled')
-        self.ai_review_enabled.setCheckable(True)
-        self.ai_review_enabled.setChecked(self._load_setting('ai_review/enabled', True))
-        self.ai_review_enabled.toggled.connect(
-            lambda checked: self._set_setting('ai_review/enabled', checked))
-        review_models = ai_review.addMenu('Model')
-        review_group = QActionGroup(self)
-        review_group.setExclusive(True)
-        self.ai_review_model = self._load_setting('ai_review/model', DEFAULT_REVIEW_MODEL)
-        if self.ai_review_model not in MODELS:
-            self.ai_review_model = DEFAULT_REVIEW_MODEL
-        for model, label in MODELS.items():
-            action = review_models.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(model == self.ai_review_model)
-            review_group.addAction(action)
-            action.triggered.connect(lambda checked, key=model: self.set_ai_review_model(key))
-        processing = settings.addMenu('LLM processing model')
-        group = QActionGroup(self)
-        group.setExclusive(True)
-        self.model_actions = {}
-        for model, label in MODELS.items():
-            action = processing.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda checked, m=model: self.set_processing_model(m))
-            group.addAction(action)
-            self.model_actions[model] = action
-        audio = settings.addMenu('AI transcription model').addAction('Gemini 3.5 Transcribe')
-        audio.setCheckable(True)
-        audio.setChecked(True)
-        audio.triggered.connect(lambda: audio.setChecked(True))
+        self.settings_btn = QToolButton()
+        self.settings_btn.setText('Settings')
+        self.settings_btn.clicked.connect(self.open_settings)
+        row.addWidget(self.settings_btn)
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addWidget(self.status_label, 1)
@@ -217,6 +182,48 @@ class TranscriptEditor(QMainWindow):
                         self.bababui_btn, self.toggle_view_btn, self.progress):
             control.setFixedHeight(header_height)
         self.toolbar.addWidget(container)
+
+    def _build_settings(self):
+        self.settings_page = page = SettingsPage(self.file_actions.values(), self.review_actions)
+        for rule, checkbox in page.auto_accept.items():
+            enabled = self._load_setting(f'auto_accept/{rule}', True)
+            checkbox.setChecked(enabled)
+            if not enabled:
+                self.disabled_auto_accept_rules.add(rule)
+            checkbox.toggled.connect(lambda checked, key=rule: self.set_auto_accept_rule(key, checked))
+
+        trailing = page.trailing_whitespace
+        delete_whitespace = self._load_setting('auto_accept/trailing_whitespace', True)
+        trailing.setCurrentIndex(trailing.findData(delete_whitespace))
+        if not delete_whitespace:
+            self.disabled_auto_accept_rules.add('trailing_whitespace')
+        trailing.currentIndexChanged.connect(
+            lambda _: self.set_auto_accept_rule('trailing_whitespace', trailing.currentData()))
+
+        page.ai_review_enabled.setChecked(self._load_setting('ai_review/enabled', True))
+        page.ai_review_enabled.toggled.connect(lambda checked: self._set_setting('ai_review/enabled', checked))
+        review_model = self._load_setting('ai_review/model', DEFAULT_REVIEW_MODEL)
+        review_model = review_model if review_model in MODELS else DEFAULT_REVIEW_MODEL
+        page.ai_review_model.setCurrentIndex(page.ai_review_model.findData(review_model))
+        page.ai_review_model.currentIndexChanged.connect(
+            lambda _: self._set_setting('ai_review/model', page.ai_review_model.currentData()))
+        page.processing_model.currentIndexChanged.connect(
+            lambda _: self.set_processing_model(page.processing_model.currentData()))
+
+        seconds = self._load_setting('playback/forward_seconds', DEFAULT_FORWARD_SECONDS)
+        if page.forward_seconds.minimum() <= seconds <= page.forward_seconds.maximum():
+            page.forward_seconds.setValue(seconds)
+        page.forward_seconds.valueChanged.connect(self.set_forward_seconds)
+
+    def open_settings(self):
+        index = self.tabs.indexOf(self.settings_page)
+        if index < 0:
+            index = self.tabs.addTab(self.settings_page, 'Settings')
+            self.tabs.tabBar().setTabData(index, {'settings': True})
+        self.tabs.setCurrentIndex(index)
+
+    def _processing_model_view(self):
+        return self.current or self.find_view(self._last_document_id) or next(iter(self.views()), None)
 
     def native_edit_action(self, method):
         editor = self.current.active_editor() if self.current else None
@@ -253,21 +260,28 @@ class TranscriptEditor(QMainWindow):
             document.model, document.transcription_model = DEFAULT_MODEL, AUDIO_MODEL
             document.dirty = True
             document.warnings.append('Unsupported saved model selection was reset to the defaults.')
-        view = (DocumentView(document, disabled_auto_accept_rules=self.disabled_auto_accept_rules)
-                if document.native else ImportView(document))
-        if isinstance(view, ImportView):
-            view.import_requested.connect(lambda v=view: self.choose_zip(self.tabs.indexOf(v)))
-        view.changed.connect(lambda v=view: self.document_changed(v))
+        view = self._create_document_view(document)
         index = self.tabs.addTab(view, document.title)
         self.tabs.setCurrentIndex(index)
         self.document_changed(view)
+        return view
+
+    def _create_document_view(self, document):
+        if document.native:
+            view = DocumentView(document, disabled_auto_accept_rules=self.disabled_auto_accept_rules,
+                                forward_seconds=self.settings_page.forward_seconds.value())
+            view.diff_view.selection_changed.connect(self._update_suggestion_actions)
+        else:
+            view = ImportView(document)
+            view.import_requested.connect(lambda v=view: self.choose_zip(self.tabs.indexOf(v)))
+        view.changed.connect(lambda v=view: self.document_changed(v))
         return view
 
     def new_tab(self):
         return self.add_document(Document())
 
     def duplicate_tab(self, index=None):
-        view = self.tabs.widget(index) if index is not None else self.current
+        view = self.document_tab(index) if index is not None else self.current
         if view:
             view.capture_position()
             return self.add_document(view.document.duplicate())
@@ -295,7 +309,7 @@ class TranscriptEditor(QMainWindow):
             if button:
                 button.setEnabled(not doc.busy)
         self.tabs.tabBar().update()
-        if view is self.current:
+        if self.current in (view, None):
             self.update_controls()
         self.schedule_recovery()
 
@@ -304,36 +318,42 @@ class TranscriptEditor(QMainWindow):
             self._last_view.capture_position()
         self._last_view = self.current
         if self.current:
+            self._last_document_id = self.current.document.id
             self.current.schedule_restore()
-        if hasattr(self, 'bababui_btn'):
+        if hasattr(self, 'settings_page'):
             self.update_controls()
         self.schedule_recovery()
 
     def update_controls(self):
         view = self.current
-        if not view:
-            return
-        doc = view.document
-        self.edit_btn.setEnabled(bool(doc.native) and not doc.busy)
+        doc = view.document if view else None
+        busy = bool(doc and doc.busy)
+        editable = isinstance(view, DocumentView) and not busy
+        self.edit_btn.setEnabled(editable)
         pending_review = isinstance(view, DocumentView) and bool(view.review_model.edits)
         self.undo_review_action.setShortcut(QKeySequence(QKeySequence.Undo) if pending_review else QKeySequence())
-        self.undo_review_action.setEnabled(bool(doc.native) and not doc.busy)
+        self.undo_review_action.setEnabled(editable)
+        self._update_suggestion_actions()
         for action in self.bulk_review_actions:
-            action.setEnabled(pending_review and not doc.busy)
-        self.settings_btn.setEnabled(not doc.busy)
-        self.bababui_btn.setVisible(not doc.busy)
-        self.bababui_btn.setEnabled(not doc.busy and bool(doc.wav_path))
-        self.progress.setVisible(doc.busy)
+            action.setEnabled(pending_review and editable)
+        self.bababui_btn.setVisible(not busy)
+        self.bababui_btn.setEnabled(bool(doc and doc.wav_path) and not busy)
+        self.progress.setVisible(busy)
+        self.toggle_view_btn.setEnabled(isinstance(view, DocumentView))
+        for name in ('Save', 'Save As', 'Export CaseCAT ZIP'):
+            self.file_actions[name].setEnabled(editable)
+        self.file_actions['Close Tab'].setEnabled(not busy)
+        self.file_actions['Import CaseCAT ZIP'].setEnabled(bool(doc) and not busy)
+        self.file_actions['Duplicate Tab'].setEnabled(bool(doc))
+        if not doc:
+            self._update_processing_model_picker()
+            self.toggle_view_btn.setText('Show Incoming')
+            self.show_status('')
+            self.setWindowTitle('Settings - BABABUI')
+            return
         self.progress.setToolTip(doc.status)
         self.progress.setAccessibleDescription(doc.status)
         self.toggle_view_btn.setText('Back to Original' if doc.view else 'Show Incoming')
-        self.model_actions[doc.model].setChecked(True)
-        for name in ('Save', 'Save As', 'Export CaseCAT ZIP'):
-            self.file_actions[name].setEnabled(bool(doc.native) and not doc.busy)
-        self.toggle_view_btn.setEnabled(bool(doc.native))
-        self.file_actions['Close Tab'].setEnabled(not doc.busy)
-        self.file_actions['Import CaseCAT ZIP'].setEnabled(not doc.busy)
-        self.file_actions['Export CaseCAT ZIP'].setEnabled(not doc.busy and bool(doc.native))
         message = doc.status
         visible_warnings = [warning for warning in doc.warnings
                             if not doc.native or warning != doc.native.job.warnings[0]]
@@ -342,6 +362,34 @@ class TranscriptEditor(QMainWindow):
         self.show_status(message)
         self.status_label.setToolTip('\n'.join([doc.status, *doc.warnings]))
         self.setWindowTitle(f'{doc.title}{" *" if doc.dirty else ""} - BABABUI')
+
+    def _active_suggestion_view(self):
+        view = self.current
+        if isinstance(view, DocumentView) and not view.document.busy and view.diff_view.has_current:
+            return view
+
+    def _update_suggestion_actions(self):
+        view = self._active_suggestion_view()
+        accept, reject, replay, forward = self.review_actions
+        accept.setEnabled(view is not None)
+        reject.setEnabled(view is not None)
+        forward.setEnabled(bool(view and view.playback))
+        replay.setEnabled(bool(view and view.playback and view.playback.timing is not None
+                               and view.diff_view.changes[view.diff_view.current].ranges))
+
+    def _run_suggestion_action(self, callback):
+        view = self._active_suggestion_view()
+        if view:
+            callback(view)
+
+    def _update_processing_model_picker(self):
+        view = self._processing_model_view()
+        picker = self.settings_page.processing_model
+        with QSignalBlocker(picker):
+            picker.setCurrentIndex(picker.findData(view.document.model) if view else -1)
+        picker.setEnabled(bool(view and not view.document.busy))
+        context = f'Applies to {view.document.title}.' if view else 'Open a document tab to set its processing model.'
+        self.settings_page.processing_context.setText(context)
 
     def show_status(self, message):
         self.status_label.setText(message)
@@ -362,18 +410,21 @@ class TranscriptEditor(QMainWindow):
             self.disabled_auto_accept_rules.add(rule)
         self._set_setting(f'auto_accept/{rule}', enabled)
 
-    def set_ai_review_model(self, model):
-        self.ai_review_model = model
-        self._set_setting('ai_review/model', model)
+    def set_forward_seconds(self, seconds):
+        self._set_setting('playback/forward_seconds', seconds)
+        for view in self.views():
+            if isinstance(view, DocumentView):
+                view.set_forward_seconds(seconds)
 
     def set_processing_model(self, model):
-        if self.current and not self.current.document.busy and model in MODELS:
-            if self.current.document.model != model:
-                self.current.document.model = model
-                self.current.edited()
+        view = self._processing_model_view()
+        if view and not view.document.busy and model in MODELS:
+            if view.document.model != model:
+                view.document.model = model
+                view.edited()
 
     def choose_wav(self, index):
-        view = self.tabs.widget(index)
+        view = self.document_tab(index)
         if not view or view.document.busy:
             return
         path, _ = QFileDialog.getOpenFileName(self, 'Choose WAV recording',
@@ -382,7 +433,7 @@ class TranscriptEditor(QMainWindow):
             self.attach_wav(index, path)
 
     def choose_zip(self, index):
-        view = self.tabs.widget(index)
+        view = self.document_tab(index)
         if not view or view.document.busy:
             return
         path, _ = QFileDialog.getOpenFileName(self, 'Import CaseCAT ZIP', '', 'CaseCAT archives (*.zip *.ZIP)')
@@ -401,7 +452,7 @@ class TranscriptEditor(QMainWindow):
         return 'save' if box.clickedButton() is save else 'replace' if box.clickedButton() is replace else 'cancel'
 
     def import_zip(self, index, path):
-        view = self.tabs.widget(index)
+        view = self.document_tab(index)
         if not view or view.document.busy:
             return False
         try:
@@ -419,8 +470,7 @@ class TranscriptEditor(QMainWindow):
                     return False
             candidate.model = view.document.model
             candidate.transcription_model = view.document.transcription_model
-            replacement = DocumentView(candidate, disabled_auto_accept_rules=self.disabled_auto_accept_rules)
-            replacement.changed.connect(lambda v=replacement: self.document_changed(v))
+            replacement = self._create_document_view(candidate)
             self._last_view = None
             self.tabs.removeTab(index)
             self.tabs.insertTab(index, replacement, candidate.title)
@@ -472,7 +522,7 @@ class TranscriptEditor(QMainWindow):
             return False
 
     def attach_wav(self, index, path):
-        view = self.tabs.widget(index)
+        view = self.document_tab(index)
         if not view or not view.document.native or view.document.busy:
             return
         path = Path(path).resolve()
@@ -539,7 +589,14 @@ class TranscriptEditor(QMainWindow):
             return False
 
     def close_tab(self, index):
-        view = self.tabs.widget(index)
+        if self.tabs.widget(index) is self.settings_page:
+            if self.tabs.currentWidget() is self.settings_page:
+                target = self._processing_model_view()
+                if target:
+                    self.tabs.setCurrentWidget(target)
+            self.tabs.removeTab(index)
+            return
+        view = self.document_tab(index)
         if not view:
             return
         if view.document.busy:
@@ -553,8 +610,10 @@ class TranscriptEditor(QMainWindow):
         self._last_view = None
         self.tabs.removeTab(index)
         view.deleteLater()
-        if not self.tabs.count():
+        if not self.views():
             self.new_tab()
+        elif self.current is None:
+            self.update_controls()
         self.persist_session()
 
     def toggle_view(self):
@@ -574,7 +633,8 @@ class TranscriptEditor(QMainWindow):
             request = Request(doc.id, doc.wav_path, doc.model, doc.transcription_model,
                               PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()),
                               original=doc.native.original,
-                              review_model=self.ai_review_model if self.ai_review_enabled.isChecked() else None,
+                              review_model=(self.settings_page.ai_review_model.currentData()
+                                            if self.settings_page.ai_review_enabled.isChecked() else None),
                               disabled_rules=frozenset(self.disabled_auto_accept_rules),
                               bundle=doc.native.bundle, job=doc.native.job)
             view.set_busy(True)
@@ -625,10 +685,12 @@ class TranscriptEditor(QMainWindow):
             return False
         self._recovery_timer.stop()
         try:
-            for view in self.views():
+            views = self.views()
+            for view in views:
                 view.capture_position()
-            save_session(self.session_path, [v.document for v in self.views()],
-                         self.current.document.id if self.current else None, settings=self.settings)
+            active = self._processing_model_view()
+            save_session(self.session_path, [view.document for view in views],
+                         active.document.id if active else None, settings=self.settings)
             return True
         except (OSError, ValueError) as exc:
             self.show_status(f'Could not save recovery: {exc}')

@@ -21,7 +21,7 @@ the system temp folder under `bababui-transcriptions`. The default is `FALSE`.
 
 ## Audio workflow
 
-The fixed toolbar contains File, Manual, and Settings on the left, and BABABUI
+The fixed toolbar contains File, Edit, and Settings on the left, and BABABUI
 and Show Incoming on the right. These controls act on the selected tab.
 
 Create a tab with **Ctrl+T** or **+**. A tab without audio has a dotted outline:
@@ -92,6 +92,11 @@ speaker turns are matched in order. Changed words are highlighted inside
 paired passages. Accept and Reject apply to those passages. Numbered documents
 are wrapped and numbered again after each decision. Formatting alone does not
 create a pending change.
+
+Open the Settings tab for automated edits, AI models, and the Hotkeys reference.
+While reviewing a suggestion, **A** accepts it and **D** rejects it. With audio
+timing, **W** starts playback one second before the edit. **S** skips forward
+five seconds by default. Change the skip interval under Hotkeys.
 
 - **Ctrl+S** saves the reviewed Original text to `.txt`, even when viewing
   Incoming. The companion `<filename>.txt.bababui.json` keeps pending Incoming

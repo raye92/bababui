@@ -31,6 +31,14 @@ def source_zip(tmp_path, *, audio=True):
     return source
 
 
+def settings_page(window):
+    previous = window.tabs.currentWidget()
+    window.settings_btn.click()
+    page = window.tabs.currentWidget()
+    window.tabs.setCurrentWidget(previous)
+    return page
+
+
 def test_review_card_click_and_space_playback(native_window, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QLabel
     native_window.import_zip(0, source_zip(tmp_path))
@@ -444,25 +452,16 @@ def test_native_speaker_override_undo_and_project_reopen(native_window,tmp_path)
     project_bytes(view.document.native,{})
 
 
-def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_path):
-    def actions(window):
-        automated = next(action.menu() for action in window.settings_btn.menu().actions()
-                         if action.text() == 'Automated edits')
-        return {action.text(): action for action in automated.actions() if action.isCheckable()}
-
-    toggles = actions(native_window)
-    assert list(toggles) == ['Accept punctuation', 'Accept capitalization',
-                             'Accept contractions', 'Accept short/common words',
-                             'Accept ordinal suffix changes',
-                             'Filter off-record discussion']
-    assert all(action.isChecked() for action in toggles.values())
+def test_auto_accept_settings_defaults_persistence_and_review(native_window, tmp_path):
+    toggles = settings_page(native_window).auto_accept
+    assert all(checkbox.isChecked() for checkbox in toggles.values())
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     before = view.document.original
     incoming = before.replace('Hello', 'HELLO').replace('.', '?')
     assert incoming != before.replace('Hello', 'HELLO') != before
 
-    toggles['Accept punctuation'].trigger()
+    toggles['punctuation'].click()
     view.receive(incoming, [])
     assert view.document.original == before.replace('Hello', 'HELLO')
     assert view.document.incoming == incoming
@@ -470,7 +469,7 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
 
     state = view.document.native
     state.original = state.incoming = state.original.revise('The 3rd floor.')
-    toggles['Accept ordinal suffix changes'].trigger()
+    toggles['date_ordinals'].click()
     view.receive('The 3 floor.', [])
     assert state.original.text == 'The 3rd floor.'
     assert len(view.diff_view.changes) == 1
@@ -478,23 +477,16 @@ def test_auto_accept_menu_defaults_persistence_and_review(native_window, tmp_pat
     assert native_window.persist_session()
     reopened = TranscriptEditor(session_path=native_window.session_path, legacy_dir=tmp_path)
     try:
-        assert {label for label, action in actions(reopened).items()
-                if not action.isChecked()} == {'Accept punctuation', 'Accept ordinal suffix changes'}
+        toggles = settings_page(reopened).auto_accept
+        assert {rule for rule, checkbox in toggles.items()
+                if not checkbox.isChecked()} == {'punctuation', 'date_ordinals'}
     finally:
         reopened.close()
 
 
-def test_trailing_whitespace_menu_defaults_to_delete_and_remembers_keep(native_window, tmp_path):
-    def actions(window):
-        automated = next(action.menu() for action in window.settings_btn.menu().actions()
-                         if action.text() == 'Automated edits')
-        submenu = next(action.menu() for action in automated.actions()
-                       if action.text() == 'Trailing whitespaces')
-        return {action.text(): action for action in submenu.actions()}
-
-    choices = actions(native_window)
-    assert list(choices) == ['Keep', 'Delete']
-    assert choices['Delete'].isChecked()
+def test_trailing_whitespace_setting_defaults_to_delete_and_remembers_keep(native_window, tmp_path):
+    choices = settings_page(native_window).trailing_whitespace
+    assert choices.currentText() == 'Delete'
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     state = view.document.native
@@ -506,15 +498,14 @@ def test_trailing_whitespace_menu_defaults_to_delete_and_remembers_keep(native_w
     view.undo_review()
     assert state.original.text == state.incoming.text == '     A    Yes. '
 
-    choices['Keep'].trigger()
-    assert not choices['Delete'].isChecked()
+    choices.setCurrentIndex(choices.findText('Keep'))
     view.receive('A Yes.', [])
     assert state.original.text == state.incoming.text == '     A    Yes. '
     assert not view.diff_view.changes
     assert native_window.persist_session()
     reopened = TranscriptEditor(session_path=native_window.session_path, legacy_dir=tmp_path)
     try:
-        assert actions(reopened)['Keep'].isChecked()
+        assert settings_page(reopened).trailing_whitespace.currentText() == 'Keep'
     finally:
         reopened.close()
 
@@ -564,13 +555,11 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
     state.original = state.incoming = state.original.revise('I saw a red car.\nI saw a big dog.')
     view.refresh()
 
-    settings = native_window.settings_btn.menu()
-    automated = next(action.menu() for action in settings.actions() if action.text() == 'Automated edits')
-    assisted = next(action.menu() for action in automated.actions() if action.text() == 'AI-assisted review')
-    enabled, model = assisted.actions()
-    assert enabled.isChecked()
-    assert [action.text() for action in model.menu().actions() if action.isChecked()] == ['Gemini 3.8 Flash']
-    next(action for action in model.menu().actions() if action.text() == 'DeepSeek V4 Pro').trigger()
+    settings = settings_page(native_window)
+    assert settings.ai_review_enabled.isChecked()
+    model = settings.ai_review_model
+    assert model.currentText() == 'Gemini 3.8 Flash'
+    model.setCurrentIndex(model.findText('DeepSeek V4 Pro'))
     native_window.run_bababui()
     deadline = time.monotonic() + 5
     while view.document.busy and time.monotonic() < deadline:
@@ -647,14 +636,12 @@ def test_off_record_batch_undo_reopen_and_native_export(native_window, tmp_path)
         original = original.insert_field(start, 'EZ SPEAKER 01', 'MS. SIEMENS')
     state.original = state.incoming = original
     view.refresh()
-    automated = next(action.menu() for action in native_window.settings_btn.menu().actions()
-                     if action.text() == 'Automated edits')
-    off_record = next(action for action in automated.actions() if action.text() == 'Filter off-record discussion')
-    off_record.trigger()
+    off_record = settings_page(native_window).auto_accept['off_record']
+    off_record.click()
     view.receive(INCOMING, [])
     assert 'review the transcripts' in state.incoming.text
     assert not state.review.get('off_record_changes')
-    off_record.trigger()
+    off_record.click()
     view.receive(INCOMING, [])
     assert 'review the transcripts' not in state.incoming.text
     assert NOTE in state.incoming.text

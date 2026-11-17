@@ -78,6 +78,29 @@ def test_speaker_dropdown_keeps_automatic_match_when_scrolling_and_lists_actual_
     view.close()
 
 
+def test_speaker_dropdown_can_type_a_name_without_rejecting_an_edit(native_window, tmp_path):
+    from app.tests.test_native_editor import source_zip
+
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('The car is red.\n' + speakers(['MS. LIN'] * 3 + ['DR. DAWSON']).text)
+    original = view.document.original
+    view.receive(original.replace('red', 'blue').replace('MS. LIN:', 'SPEAKER 1:'), [])
+    combo = view.diff_view.speaker_scroll.widget().findChild(QComboBox)
+    native_window.activateWindow()
+    combo.setFocus()
+    QApplication.processEvents()
+    assert combo.hasFocus() and combo.currentText() == 'MS. LIN'
+    assert view.diff_view.has_current
+
+    QTest.keyClick(combo, Qt.Key_D)
+    if view._review_worker is not None:
+        assert view._review_worker.wait(5000)
+        QApplication.processEvents()
+    assert view.document.native.review['overrides'] == {'SPEAKER 1': 'DR. DAWSON'}
+    assert view.document.incoming.startswith('The car is blue.')
+
+
 def test_review_skips_new_turns_for_known_speaker_and_keeps_sidebar_diff_colors():
     from types import SimpleNamespace
     from app.src.suggestion_filter import begin_review

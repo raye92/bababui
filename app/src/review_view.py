@@ -2,7 +2,7 @@
 from bisect import bisect_right
 from collections import Counter
 from html import escape
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QEvent, Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
@@ -72,6 +72,14 @@ class ReviewCard(QWidget):
 
 
 class SpeakerCombo(QComboBox):
+    def event(self, event):
+        if (event.type() == QEvent.ShortcutOverride and event.modifiers() == Qt.NoModifier
+                and event.text().isalpha()):
+            # Keep letter keys for speaker lookup while this control has focus.
+            event.accept()
+            return True
+        return super().event(event)
+
     def wheelEvent(self, event):
         # Wheel motion over the closed control scrolls the speaker list.
         event.ignore()
@@ -119,6 +127,7 @@ def _attribution_edits(model, locations, needs_check):
 class ReviewView(QWidget):
     requested = Signal(int, bool)
     selected = Signal(int)
+    selection_changed = Signal()
     navigated = Signal()
     mapping_requested = Signal(str, object)
 
@@ -159,11 +168,12 @@ class ReviewView(QWidget):
         self.layout.addWidget(self.scroll, 1)
         decisions = QHBoxLayout()
         self.decision_buttons = []
-        for caption, accept in (('Accept', True), ('Reject', False)):
+        for caption, accept, key in (('Accept', True, 'A'), ('Reject', False, 'D')):
             button = QPushButton(caption)
             button.setEnabled(False)
-            button.clicked.connect(lambda _, accepted=accept: self._request_current(accepted))
-            button.setToolTip('Apply the proposed change.' if accept else 'Keep the original for this change.')
+            button.clicked.connect(lambda _, accepted=accept: self.request_current(accepted))
+            description = 'Apply the proposed change' if accept else 'Keep the original for this change'
+            button.setToolTip(f'{description} ({key}).')
             color = '#1f883d' if accept else '#cf222e'
             button.setStyleSheet('QPushButton { padding: 4px; border-radius: 3px; } '
                                  f'QPushButton:enabled {{ background: {color}; color: white; }}')
@@ -183,6 +193,10 @@ class ReviewView(QWidget):
     @property
     def has_changes(self):
         return bool(self.changes)
+
+    @property
+    def has_current(self):
+        return self.current in self.visible_indices
 
     def set_revisions(self, original, incoming, *, review=None, page_lines=()):
         """Compatibility entry point for isolated review previews."""
@@ -380,16 +394,17 @@ class ReviewView(QWidget):
 
     def _mark_selected(self):
         for button in self.decision_buttons:
-            button.setEnabled(self.current in self.visible_indices)
+            button.setEnabled(self.has_current)
         for button in self.navigation_buttons:
             button.setEnabled(len(self.visible_indices) > 1)
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
         self._size_comparison()
+        self.selection_changed.emit()
 
-    def _request_current(self, accept):
-        if self.current in self.visible_indices:
+    def request_current(self, accept):
+        if self.isEnabled() and self.has_current:
             self.requested.emit(self.current, accept)
 
     def show_next_pending(self, index):

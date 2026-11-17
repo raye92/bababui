@@ -95,6 +95,36 @@ def test_tabs_duplicate_settings_and_save(window, tmp_path, monkeypatch):
     assert window.tabs.count() == 2 and window.current is second
 
 
+def test_settings_tab_keeps_the_active_document_and_is_not_recovered(window):
+    from app.src.documents import load_session
+
+    first = window.current
+    second = window.duplicate_tab()
+    window.set_processing_model('deepseek-v4-pro')
+    window.settings_btn.click()
+    page = window.tabs.currentWidget()
+    index = window.tabs.currentIndex()
+    assert window.tabs.tabText(index) == 'Settings'
+    assert not window.tabs.tabBar().is_empty(index)
+    assert not window.file_actions['Save'].isEnabled()
+    window.settings_btn.click()
+    assert window.tabs.count() == 3 and window.tabs.currentWidget() is page
+
+    model = page.processing_model
+    assert model.currentData() == 'deepseek-v4-pro'
+    model.setCurrentIndex(model.findData('deepseek-flash'))
+    assert second.document.model == 'deepseek-flash'
+    assert first.document.model == 'gemini-3.8-flash'
+    assert window.persist_session()
+    documents, active = load_session(window.session_path)
+    assert [doc.id for doc in documents] == [first.document.id, second.document.id]
+    assert active == second.document.id
+
+    window.tabs.tabBar().moveTab(index, 0)
+    QTest.keyClick(window, Qt.Key_W, Qt.ControlModifier)
+    assert window.tabs.count() == 2 and window.current is second
+
+
 def test_background_results_route_by_id_and_lock_only_one_tab(window, tmp_path, monkeypatch):
     wav = tmp_path/'test.wav'
     wav.write_bytes(b'wav')
@@ -275,19 +305,25 @@ def test_session_starts_with_defaults_and_remembers_settings(tmp_path):
 
     window = main.TranscriptEditor(session_path=session, legacy_dir=tmp_path)
     assert 'punctuation' not in window.disabled_auto_accept_rules
-    window.set_auto_accept_rule('punctuation', False)
-    window.ai_review_enabled.setChecked(False)
-    window.set_ai_review_model('deepseek-v4-pro')
+    window.settings_btn.click()
+    page = window.tabs.currentWidget()
+    page.auto_accept['punctuation'].click()
+    page.ai_review_enabled.setChecked(False)
+    page.ai_review_model.setCurrentIndex(page.ai_review_model.findData('deepseek-v4-pro'))
+    page.forward_seconds.setValue(8)
     assert window.close()
     settings = json.loads(session.read_text(encoding='utf-8'))['settings']
     assert settings == {'auto_accept/punctuation': False, 'ai_review/enabled': False,
-                        'ai_review/model': 'deepseek-v4-pro'}
+                        'ai_review/model': 'deepseek-v4-pro', 'playback/forward_seconds': 8}
 
     reopened = main.TranscriptEditor(session_path=session, legacy_dir=tmp_path)
     try:
         assert 'punctuation' in reopened.disabled_auto_accept_rules
-        assert not reopened.ai_review_enabled.isChecked()
-        assert reopened.ai_review_model == 'deepseek-v4-pro'
+        reopened.settings_btn.click()
+        page = reopened.tabs.currentWidget()
+        assert not page.ai_review_enabled.isChecked()
+        assert page.ai_review_model.currentData() == 'deepseek-v4-pro'
+        assert page.forward_seconds.value() == 8
     finally:
         reopened.close()
 

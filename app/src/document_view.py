@@ -10,6 +10,7 @@ from app.src.review_model import build_review
 from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
+from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, PlaybackBar
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
@@ -65,12 +66,13 @@ class ReviewPreviewWorker(QThread):
 class DocumentView(QWidget):
     changed = Signal()
 
-    def __init__(self, document, *, disabled_auto_accept_rules=frozenset()):
+    def __init__(self, document, *, disabled_auto_accept_rules=frozenset(), forward_seconds=DEFAULT_FORWARD_SECONDS):
         super().__init__()
         if document.native is None:
             raise ValueError('An editor requires an imported CaseCAT job.')
         self.document = document
         self.disabled_auto_accept_rules = disabled_auto_accept_rules
+        self.forward_seconds = forward_seconds
         automatic_before = None
         from app.src.suggestion_filter import LABEL, GENERIC
         if (document.native.review is None and document.native.original != document.native.incoming
@@ -134,24 +136,44 @@ class DocumentView(QWidget):
         self.schedule_restore()
 
     def setup_playback(self, layout):
-        from app.src.playback import PlaybackBar
         doc = self.document
         self._validate_alignment(doc.warnings)
-        self.playback = PlaybackBar(doc.wav_path, self._playback_timing(), self._playback_context, self)
+        self.playback = PlaybackBar(doc.wav_path, self._playback_timing(), self._playback_context, self,
+                                    forward_seconds=self.forward_seconds)
         layout.addWidget(self.playback)
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
-            shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
-            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-            shortcut.setAutoRepeat(False)
-            shortcut.activated.connect(lambda: self.playback.toggle())
             self.stack.currentChanged.connect(lambda _: self.playback.stop())
             for editor in (self.editor, self.incoming_editor):
                 editor.transcript_clicked.connect(lambda: self.playback.seek_from_cursor())
-            for key, method in (('Shift+F9', 'seek_from_cursor'), ('Ctrl+F9', 'stop')):
+            for _, key, method in PLAYBACK_SHORTCUTS:
                 shortcut = QShortcut(QKeySequence(key), self)
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.setAutoRepeat(method != 'toggle')
                 shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
+
+    def set_forward_seconds(self, seconds):
+        self.forward_seconds = seconds
+        if self.playback:
+            self.playback.set_forward_seconds(seconds)
+
+    def replay_current_edit(self):
+        if not self.playback or not self.diff_view.has_current:
+            return
+        ranges = self.diff_view.changes[self.diff_view.current].ranges
+        if not ranges:
+            return
+        a, b, c, d = ranges[0]
+        state = self.document.native
+        targets = ((state.original, a), (state.incoming, c))
+        # Start on the displayed side when it contains the edit. An insertion
+        # or deletion can use its other side, or fall back to the source anchor.
+        if a == b or (self.stack.currentIndex() and c != d):
+            targets = targets[::-1]
+        for revision, offset in targets:
+            if self.playback.seek_passage(revision, offset):
+                self.playback.player.play()
+                return
 
     def _validate_alignment(self, warnings):
         doc = self.document

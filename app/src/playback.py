@@ -11,6 +11,12 @@ from app.src.casecat.anchors import utf16_index
 
 
 SEEK_LEAD_IN_MS = 1000
+DEFAULT_FORWARD_SECONDS = 5
+PLAYBACK_SHORTCUTS = (
+    ('Play / pause', 'Space', 'toggle'),
+    ('Seek to the cursor', 'Shift+F9', 'seek_from_cursor'),
+    ('Stop playback', 'Ctrl+F9', 'stop'),
+)
 
 
 def timestamp(milliseconds):
@@ -67,7 +73,7 @@ class SeekSlider(QSlider):
 
 
 class PlaybackBar(QWidget):
-    def __init__(self, wav_path, timing, context, parent=None):
+    def __init__(self, wav_path, timing, context, parent=None, *, forward_seconds=DEFAULT_FORWARD_SECONDS):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.timing, self.context = timing, context
@@ -80,9 +86,8 @@ class PlaybackBar(QWidget):
         self.back_button = QPushButton('−5 s')
         self.back_button.setAccessibleName('Back 5 seconds')
         self.back_button.setToolTip('Back 5 seconds')
-        self.forward_button = QPushButton('+5 s')
-        self.forward_button.setAccessibleName('Forward 5 seconds')
-        self.forward_button.setToolTip('Forward 5 seconds')
+        self.forward_button = QPushButton()
+        self.set_forward_seconds(forward_seconds)
         self.slider = SeekSlider(Qt.Horizontal)
         self.slider.setAccessibleName('Audio position')
         self.slider.setToolTip('Click here or in the transcript to seek one second early. Drag to seek precisely.')
@@ -93,7 +98,7 @@ class PlaybackBar(QWidget):
             row.addWidget(widget)
         self.play_button.clicked.connect(self.toggle)
         self.back_button.clicked.connect(lambda: self.seek(self.player.position() - 5000))
-        self.forward_button.clicked.connect(lambda: self.seek(self.player.position() + 5000))
+        self.forward_button.clicked.connect(self.skip_forward)
         self.slider.valueChanged.connect(self.seek)
         self.player.positionChanged.connect(self.show_position)
         self.player.durationChanged.connect(self._duration)
@@ -130,12 +135,23 @@ class PlaybackBar(QWidget):
         self._seek_with_lead_in(self.cursor_position_ms())
 
     def seek_passage(self, revision, position):
-        if self.timing is not None:
-            self._seek_with_lead_in(self.timing.position_ms(revision, position))
+        return self.timing is not None and self._seek_with_lead_in(self.timing.position_ms(revision, position))
 
     def _seek_with_lead_in(self, position):
-        if position is not None:
-            self.seek(position - SEEK_LEAD_IN_MS)
+        if position is None:
+            return False
+        self.seek(position - SEEK_LEAD_IN_MS)
+        return True
+
+    def set_forward_seconds(self, seconds):
+        self.forward_seconds = seconds
+        self.forward_button.setText(f'+{seconds} s')
+        description = f'Forward {seconds} {"second" if seconds == 1 else "seconds"}'
+        self.forward_button.setAccessibleName(description)
+        self.forward_button.setToolTip(description)
+
+    def skip_forward(self):
+        self.seek(self.player.position() + self.forward_seconds * 1000)
 
     def seek(self, position):
         """Move the playback head without changing playing/paused state."""
