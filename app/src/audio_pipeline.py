@@ -203,7 +203,7 @@ class AudioPipeline:
         self.cache = Path(cache)
         self.testing = testing
 
-    def transcribe_segment(self, path):
+    def transcribe_segment(self, path, progress=lambda message: None):
         sdk = self.client.client()
         uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav'})
         deadline = time.monotonic()+300
@@ -218,10 +218,20 @@ class AudioPipeline:
             mode = {'type': 'verbatim', 'diarization_mode': 'speaker'}
             if timestamps:
                 mode['timestamp_granularities'] = ['word']
-            response = sdk.interactions.create(model=AUDIO_MODEL,
-                input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
-                generation_config={'max_output_tokens': 16384, 'transcription_config': {'mode': mode}},
-                automatic_continuation=False, timeout=1800)
+            for attempt in range(2):
+                try:
+                    response = sdk.interactions.create(model=AUDIO_MODEL,
+                        input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
+                        generation_config={'max_output_tokens': 16384, 'transcription_config': {'mode': mode}},
+                        automatic_continuation=False, timeout=1800)
+                    break
+                except Exception as exc:
+                    status_code = getattr(exc, 'status_code', getattr(exc, 'code', None))
+                    if status_code != 429 or attempt:
+                        raise
+                    progress('Transcription rate limit reached (429). Waiting 60 seconds before retrying this chunk...')
+                    time.sleep(60)
+                    progress('Retrying transcription for this chunk...')
             if self.testing:
                 self._save_response(response)
             status = getattr(response.status, 'value', response.status)
@@ -271,7 +281,7 @@ class AudioPipeline:
                 with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
                     prepared = Path(temporary) / 'segment.wav'
                     media.prepare(path, {'start': start, 'end': end}, prepared)
-                    words = self.transcribe_segment(prepared)
+                    words = self.transcribe_segment(prepared, progress)
                 _check_wav(path, digest)
                 save_json(cached, [asdict(w) for w in words])
             chunks.append([w if (w.start is not None and w.end is not None

@@ -172,6 +172,62 @@ def test_missing_annotations_and_bad_timestamps_are_rejected():
         parse_words(NS(steps=[NS(type='model_output', content=[NS(type='text', text='Hello', annotations=[])])]))
 
 
+@pytest.mark.parametrize('statuses', [(429, 200), (429, 429), (403,)])
+def test_second_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeypatch, statuses):
+    import json
+    import httpx
+    from google import genai
+    from app.src.audio_pipeline import AudioPipeline, media
+
+    requests, uploads, waits, progress = [], [], [], []
+    remaining = iter((200, *statuses))
+
+    def transport(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        status = next(remaining)
+        if status != 200:
+            return httpx.Response(status, json={'error': {'code': status, 'message': 'Request failed'}})
+        text = 'First.' if len(uploads) == 1 else 'Second.'
+        return httpx.Response(200, json={'status': 'completed', 'steps': [
+            {'type': 'model_output', 'content': [{'type': 'text', 'text': text, 'annotations': [
+                {'type': 'word_info', 'speaker': 's1', 'start_index': 0, 'end_index': len(text),
+                 'start_offset': '40s', 'end_offset': '41s'}]}]}]})
+
+    def upload(**kwargs):
+        uploads.append(kwargs['file'])
+        return NS(uri=f'files/chunk-{len(uploads)}', state='ACTIVE')
+
+    wav = tmp_path / 'source.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: 3540)
+    monkeypatch.setattr(media, 'prepare', lambda *args: None)
+    monkeypatch.setattr('app.src.audio_pipeline.time.sleep', waits.append)
+    # Isolate the app's fallback from the SDK's short built-in retries.
+    with genai.Client(api_key='fake', http_options={'retry_options': {
+            'attempts': 1, 'http_status_codes': [503]},
+            'client_args': {'transport': httpx.MockTransport(transport)}}) as sdk:
+        pipeline = AudioPipeline('fake', tmp_path / 'cache',
+                                 NS(files=NS(upload=upload), interactions=sdk.interactions))
+        if statuses[-1] == 200:
+            result = pipeline.run(wav, progress.append)
+            assert result.text == 'Speaker 1: First.\nSpeaker 2: Second.'
+            assert pipeline.run(wav) == result
+        else:
+            with pytest.raises(Exception) as caught:
+                pipeline.run(wav, progress.append)
+            assert getattr(caught.value, 'status_code', getattr(caught.value, 'code', None)) == statuses[-1]
+        assert len(list(pipeline.cache.rglob('chunk-0.json'))) == 1
+        assert len(list(pipeline.cache.rglob('chunk-1.json'))) == (statuses[-1] == 200)
+
+    assert len(uploads) == 2
+    assert len(requests) == 1 + len(statuses)
+    assert waits == ([60] if statuses[0] == 429 else [])
+    if statuses[0] == 429:
+        assert requests[1] == requests[2]
+        assert any('60 seconds' in message and '429' in message for message in progress)
+
+
 def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(tmp_path, monkeypatch):
     from app.src.audio_pipeline import AudioPipeline, media
 
@@ -261,7 +317,7 @@ def test_partial_run_reuses_first_chunk(tmp_path, monkeypatch):
     monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(segment))
     pipeline = AudioPipeline('fake', tmp_path/'cache')
     attempts = []
-    def transcribe(path):
+    def transcribe(path, progress=lambda message: None):
         attempts.append(path)
         if len(attempts) == 2:
             raise ValueError('temporary failure')
@@ -307,7 +363,7 @@ def test_replaced_wav_cannot_populate_the_old_recording_cache(tmp_path, monkeypa
     monkeypatch.setattr(media, 'prepare', lambda *args: None)
     pipeline = AudioPipeline('fake', tmp_path / 'cache')
 
-    def transcribe(path):
+    def transcribe(path, progress=lambda message: None):
         wav.write_bytes(b'different audio')
         return [Word('Word', 'a', 0, .1)]
 
