@@ -25,6 +25,8 @@
      insert/delete such words or the closed set {and, the}. Never alter negation.
    - Ordinal suffixes: add or remove st/nd/rd/th on an unchanged number.
      The suggestion must contain only the suffix change.
+   - Positive confirmations: equivalent uses of right, true and correct.
+   - Number forms: digits and the matching whole number in words.
    Check whole words, not changed character fragments. These rules may combine
    within one card, but every part must qualify. Preserve speaker/Q/A labels,
    native fields/symbols, numbers, hard spaces, indentation and paragraph breaks.
@@ -42,6 +44,7 @@ import re
 
 from app.src.casecat.elements import NativeElement
 from app.src.casecat.fields import field_values
+from app.src.number_forms import equivalent_integer
 
 
 LABEL = re.compile(r'^(?P<prefix>[ \t]*(?:BY[ \t]+)?)(?P<name>SPEAKER\s+\d+|(?:MS|MR|MRS|DR)\. [^:\n]+|THE [^:\n]+):', re.I)
@@ -60,6 +63,11 @@ IRREGULAR_NEGATIVES = {'ca': 'cannot', 'wo': 'will not', 'sha': 'shall not'}
 TRAILING_WHITESPACE = re.compile(r'[ \t\u00a0]+$', re.M)
 TRAILING_CHARS = ' \t\u00a0'
 ORDINAL_NUMBER = re.compile(r'([0-9]+)(?:st|nd|rd|th)', re.I)
+FORM_TOKEN = re.compile(r"[A-Za-z]+(?:['’‐‑-][A-Za-z]+)*|[0-9]+(?:,[0-9]+)*|[^\s]")
+CONFIRMATION = re.compile(r'\b(?:right|true|correct)\b', re.I)
+CONFIRMING_PREFIX = re.compile(r"\b(?:(?:is|was) (?:that|this|it)|(?:that|this|it)(?: (?:is|was)|['’]s))$", re.I)
+CONFIRMING_FOLLOWUP = re.compile(r"(?:that|this|it)(?:['’]s| (?:is|was))\b", re.I)
+QA_PREFIX = re.compile(r'^[ \t]*[QA][ \t]+')
 
 
 def _ordinal_suffix_change(left, right, a, b, c, d):
@@ -101,6 +109,69 @@ def _words(text, disabled_rules):
             if 'punctuation' in disabled_rules or m[0] not in PUNCTUATION]
 
 
+def _is_confirmation(text, token):
+    if not CONFIRMATION.fullmatch(token[0]):
+        return False
+    line_start = text.rfind('\n', 0, token.start()) + 1
+    before = text[line_start:token.start()]
+    label = LABEL.match(before) or QA_PREFIX.match(before)
+    before = (before[label.end():] if label else before).strip()
+    _, end = token.span()
+    after = text[end:end+32].split('\n', 1)[0].lstrip()
+    if CONFIRMING_PREFIX.search(before):
+        return not after or after[0] in '.!?'
+    if before.endswith((',', ';')):
+        return after.startswith('?')
+    return not before and (not after or after[0] in '.!?'
+                           or bool(CONFIRMING_FOLLOWUP.match(after.lstrip(', '))))
+
+
+def _number_replacement(left, right, old, new):
+    first_word = old[0][0]
+    if len(old) == 1 and first_word[0].isdigit():
+        left, right, old, new = right, left, new, old
+    if len(new) != 1:
+        return False
+    return equivalent_integer(left, old[0].start(), old[-1].end(), right, *new[0].span())
+
+
+def _equivalent_wording(left, right, span, disabled_rules):
+    a, b, c, d = span
+    before, after = left[a:b], right[c:d]
+    number = ('number_forms' not in disabled_rules
+              and any(ch.isdigit() for ch in before + after))
+    confirmation = ('positive_confirmations' not in disabled_rules
+                    and CONFIRMATION.search(before) and CONFIRMATION.search(after))
+    if not number and not confirmation:
+        return None
+    # Preserve dashes that could be a sign or range, even in spaced notation.
+    punctuation = PUNCTUATION - set('-–—') if 'punctuation' not in disabled_rules else ()
+    old = [token for token in FORM_TOKEN.finditer(left, a, b) if token[0] not in punctuation]
+    new = [token for token in FORM_TOKEN.finditer(right, c, d) if token[0] not in punctuation]
+    old_keys = [token[0].casefold() for token in old]
+    new_keys = [token[0].casefold() for token in new]
+    reasons = set()
+    for tag, i, j, k, l in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            # Leave other numeric notation alone even if dropping punctuation
+            # would make its tokens look the same.
+            if any(ch.isdigit() for word in old_keys[i:j] for ch in word):
+                return None
+            if ('capitalization' in disabled_rules
+                    and [token[0] for token in old[i:j]] != [token[0] for token in new[k:l]]):
+                return None
+        elif tag != 'replace':
+            return None
+        elif (confirmation and j-i == l-k == 1
+              and _is_confirmation(left, old[i]) and _is_confirmation(right, new[k])):
+            reasons.add('positive confirmation')
+        elif number and _number_replacement(left, right, old[i:j], new[k:l]):
+            reasons.add('number form')
+        else:
+            return None
+    return ' / '.join(sorted(reasons)) or None
+
+
 def automatic_reason(change, *, disabled_rules=frozenset()):
     """Classify whole review decisions; never hide an unqualified part of a card."""
     if change.kind != 'text' or change.field or len(change.ranges) != 1:
@@ -117,7 +188,7 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     for text, start, end in ((left, a, b), (right, c, d)):
         line_start = text.rfind('\n', 0, start)+1
         line = text[line_start:text.find('\n', start) if '\n' in text[start:] else len(text)]
-        prefix = LABEL.match(line) or re.match(r'^[ \t]*[QA][ \t]+', line)
+        prefix = LABEL.match(line) or QA_PREFIX.match(line)
         if prefix and start < line_start+prefix.end():
             return None
     # Token diffs may start inside contractions or words. Extend BOTH ranges by
@@ -141,9 +212,8 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
             return None
     if 'date_ordinals' not in disabled_rules and _ordinal_suffix_change(left, right, a, b, c, d):
         return 'ordinal suffix'
-    before_words, after_words = _words(left[a:b], disabled_rules), _words(right[c:d], disabled_rules)
-    aa = [word.casefold() for word in before_words]
-    bb = [word.casefold() for word in after_words]
+    if reason := _equivalent_wording(left, right, (a, b, c, d), disabled_rules):
+        return reason
     # Numeric and unsupported punctuation tokens must match exactly, including
     # their punctuation. Do not turn decimal/date changes into cosmetic edits.
     if any(ch.isdigit() for ch in left[a:b]+right[c:d]) and left[a:b] != right[c:d]:
@@ -151,6 +221,9 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     if ('punctuation' not in disabled_rules and before != after
             and before.translate(DROP_APOSTROPHES) == after.translate(DROP_APOSTROPHES)):
         return 'punctuation'
+    before_words, after_words = _words(left[a:b], disabled_rules), _words(right[c:d], disabled_rules)
+    aa = [word.casefold() for word in before_words]
+    bb = [word.casefold() for word in after_words]
     short = lambda word: word.isascii() and word.isalpha() and len(word) <= 2 and word != 'no'
     common = lambda word: short(word) or word in COMMON_WORDS
     for tag, i, j, k, l in SequenceMatcher(None, aa, bb, autojunk=False).get_opcodes():

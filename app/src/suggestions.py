@@ -1,4 +1,5 @@
 """Review decisions over exact structured revision ranges, independent of Qt."""
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 import re
 from unicodedata import category
@@ -45,9 +46,13 @@ def word_context(text, start, end):
 
 def preview_ranges(change):
     """Include shared letters in replacement highlights without changing the decision."""
-    if len(change.ranges) != 1:
+    if change.kind == 'word_join':
+        a, _, c, _ = change.ranges[0]
+        _, b, _, d = change.ranges[-1]
+    elif len(change.ranges) == 1:
+        (a, b, c, d), = change.ranges
+    else:
         return change.ranges
-    (a, b, c, d), = change.ranges
     original, incoming = change.original.text, change.incoming.text
     left_a, right_a = word_context(original, a, b)
     left_b, right_b = word_context(incoming, c, d)
@@ -181,6 +186,220 @@ def _attribution_span(text, start, end):
     return None
 
 
+_DOUBLE_QUOTES = tuple(re.compile(pattern) for pattern in (
+    r'(?<!\w)"(?=[^\s"])[^"\r\n]+(?<!\s)"(?!\w)',
+    r'“(?=[^\s”])[^“”\r\n]+(?<!\s)”',
+))
+_SINGLE_QUOTES = ((re.compile("['\r\n]"), "'", "'"), (re.compile('[‘’\r\n]'), '‘', '’'))
+_LEADING_APOSTROPHE = re.compile(r"(?:\d{2}s|bout|cause|em|round|til|tis|twas)\b(?!['’])", re.I)
+
+
+def _change_owner(changes, side):
+    spans = sorted((span[side], span[side + 1], index)
+                   for index, change in enumerate(changes) if change.kind == 'text'
+                   for span in change.ranges if span[side] < span[side + 1])
+    starts = [start for start, _, _ in spans]
+
+    def owner(position):
+        index = bisect_right(starts, position) - 1
+        if index >= 0 and position < spans[index][1]:
+            return spans[index][2]
+
+    return owner
+
+
+def _quotation_pairs(text, owner):
+    for pattern in _DOUBLE_QUOTES:
+        for quote in pattern.finditer(text):
+            yield quote.start(), quote.end() - 1
+    for pattern, opening_mark, closing_mark in _SINGLE_QUOTES:
+        if opening_mark not in text:
+            continue
+        opening = None
+        for match in pattern.finditer(text):
+            mark = match[0]
+            position = match.start()
+            if mark in '\r\n':
+                opening = None
+                continue
+            before = text[position-1:position] if position else ''
+            after = text[position+1:position+2]
+            if (mark == opening_mark and not before.isalnum() and after
+                    and not after.isspace() and after != closing_mark):
+                if not _LEADING_APOSTROPHE.match(text, position+1):
+                    opening = position
+            elif (mark == closing_mark and opening is not None and before
+                  and not before.isspace() and not after.isalnum()):
+                # An unchanged possessive inside a newly quoted phrase is not
+                # its closing delimiter when there is a changed one later.
+                if before.lower() == 's' and owner(opening) is not None and owner(position) is None:
+                    continue
+                yield opening, position
+                opening = None
+
+
+def _split_at_unchanged(change, start, end, new_start, new_end):
+    """Separate two edits on either side of an exact, intact separator."""
+    (a, b, c, d), = change.ranges
+    left, right = change.original.text, change.incoming.text
+    if (not (a <= start < end <= b and c <= new_start < new_end <= d)
+            or left[start:end] != right[new_start:new_end]):
+        return (change,)
+    for revision, first, last in ((change.original, a, b), (change.incoming, c, d)):
+        if any(first < element.end and last > element.start for element in revision.elements):
+            return (change,)
+    return tuple(replace(change, ranges=(span,))
+                 for span in ((a, start, c, new_start), (end, b, new_end, d))
+                 if left[span[0]:span[1]] != right[span[2]:span[3]])
+
+
+def _separate_adjacent_quotes(changes, left_pairs, right_pairs):
+    """Keep a shared gap between a closing quote and the next opening quote."""
+    if not left_pairs and not right_pairs:
+        return changes
+    left_starts, left_ends = zip(*left_pairs) if left_pairs else ((), ())
+    right_starts, right_ends = zip(*right_pairs) if right_pairs else ((), ())
+    left_starts, left_ends = set(left_starts), set(left_ends)
+    right_starts, right_ends = set(right_starts), set(right_ends)
+    result = []
+    for change in changes:
+        if change.kind != 'text':
+            result.append(change)
+            continue
+        (a, b, c, d), = change.ranges
+        left_quotes = a in left_ends and b-1 in left_starts
+        right_quotes = c in right_ends and d-1 in right_starts
+        if left_quotes or right_quotes:
+            start, end = (a+1, b-1) if left_quotes else (a, b)
+            new_start, new_end = (c+1, d-1) if right_quotes else (c, d)
+            separator = change.original.text[start:end]
+            if separator and not separator.strip(' ,;:'):
+                result.extend(_split_at_unchanged(change, start, end, new_start, new_end))
+                continue
+        result.append(change)
+    return result
+
+
+def _split_word_bounds(split, start, end, joined, point):
+    """Identify a space edit between two fragments of a single resulting word."""
+    if (start == end or split[start:end].strip(' ')
+            or not (0 < start < end < len(split) and 0 < point < len(joined))
+            or not (split[start-1] + split[end] + joined[point-1:point+1]).isalpha()):
+        return None
+    head, _ = word_context(split, start-1, start)
+    _, tail = word_context(split, end, end+1)
+    left, right = word_context(joined, point, point)
+    x, y = start-1-head, end+1+tail
+    z, w = point-left, point+right
+    if split[x:start].isalpha() and split[end:y].isalpha() and joined[z:w].isalpha():
+        return (x, y), (z, w)
+
+
+def _word_join_bounds(left, right, change):
+    if change.kind != 'text':
+        return None
+    (a, b, c, d), = change.ranges
+    if c == d:
+        return _split_word_bounds(left, a, b, right, c)
+    if a == b:
+        reverse = _split_word_bounds(right, c, d, left, a)
+        if reverse:
+            return reverse[::-1]
+
+
+def _separate_edits_after_join(left, right, changes):
+    result = []
+    for change in changes:
+        bounds = _word_join_bounds(left, right, result[-1]) if result else None
+        if bounds and change.kind == 'text':
+            (a, b, c, d), = change.ranges
+            (first, end), (new_first, new_end) = bounds
+            if first <= a <= end < b and new_first <= c <= new_end < d:
+                # The engine can absorb a short shared separator into a larger
+                # replacement. Split only at the same space or punctuation on
+                # both sides, between the joined word and the following text.
+                gap = re.match(r'[.!?,;:]? +', left[end:b])
+                if gap and left[a:end] != right[c:new_end]:
+                    size = len(gap[0])
+                    result.extend(_split_at_unchanged(change, end, end+size, new_end, new_end+size))
+                    continue
+        result.append(change)
+    return result
+
+
+def _word_join_links(left, right, changes):
+    def within_word(text, start, end, bounds):
+        first, last = bounds
+        if not first <= start <= last:
+            return False
+        # A letter correction at the end may already include punctuation.
+        return end <= last or (end == last + 1 and text[last:end] in ',.;:!?')
+
+    for index, change in enumerate(changes):
+        bounds = _word_join_bounds(left, right, change)
+        if bounds is None:
+            continue
+        for step in (-1, 1):
+            neighbor = index + step
+            while 0 <= neighbor < len(changes) and changes[neighbor].kind == 'text':
+                (x, y, z, w), = changes[neighbor].ranges
+                if not (within_word(left, x, y, bounds[0]) and within_word(right, z, w, bounds[1])):
+                    break
+                old_letters = [ch for ch in left[x:y] if ch.isalpha()]
+                new_letters = [ch for ch in right[z:w] if ch.isalpha()]
+                if old_letters == new_letters:
+                    break
+                yield index, neighbor
+                neighbor += step
+
+
+def _group_decisions(left, right, changes):
+    """Group dependent edits while preserving the original native ranges."""
+    if not any(change.kind == 'text' for change in changes):
+        return changes
+    changes = _separate_edits_after_join(left, right, changes)
+    left_pairs = tuple(_quotation_pairs(left, _change_owner(changes, 0)))
+    right_pairs = tuple(_quotation_pairs(right, _change_owner(changes, 2)))
+    changes = _separate_adjacent_quotes(changes, left_pairs, right_pairs)
+    parents = list(range(len(changes)))
+
+    def root(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    grouped = False
+    for a, b in _word_join_links(left, right, changes):
+        parents[root(b)] = root(a)
+        grouped = True
+    quotations = set()
+    for pairs, side in ((left_pairs, 0), (right_pairs, 2)):
+        if not pairs:
+            continue
+        owner = _change_owner(changes, side)
+        for start, end in pairs:
+            a, b = owner(start), owner(end)
+            if a is not None and b is not None:
+                quotations.update((a, b))
+                parents[root(b)] = root(a)
+    if not grouped and not quotations:
+        return changes
+
+    groups = {}
+    for index in range(len(changes)):
+        groups.setdefault(root(index), []).append(index)
+    result = []
+    for indices in groups.values():
+        change = changes[indices[0]]
+        if len(indices) > 1 or indices[0] in quotations:
+            ranges = tuple(span for index in indices for span in changes[index].ranges)
+            kind = 'word_join' if quotations.isdisjoint(indices) else 'quotation'
+            change = replace(change, kind=kind, ranges=ranges)
+        result.append(change)
+    return result
+
+
 def suggestions(original, incoming):
     if original == incoming:
         return []
@@ -236,7 +455,8 @@ def suggestions(original, incoming):
     result += [Suggestion(original, incoming, tuple(ranges), 'field', name) for name, ranges in fields.items()]
     if not result and (original.elements != incoming.elements or original.definitions != incoming.definitions):
         result.append(Suggestion(original, incoming, (), 'metadata'))
-    return sorted(result, key=lambda s: s.ranges[0][0] if s.ranges else 0)
+    result.sort(key=lambda s: s.ranges[0][0] if s.ranges else 0)
+    return _group_decisions(a, b, result)
 
 
 def resolve(original, incoming, change, accept):

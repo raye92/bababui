@@ -15,6 +15,8 @@ AUTO_ACCEPT_OPTIONS = (
     ('contractions', 'Accept contractions'),
     ('short_common_words', 'Accept short/common words'),
     ('date_ordinals', 'Accept ordinal suffix changes'),
+    ('positive_confirmations', 'Accept equivalent confirmations'),
+    ('number_forms', 'Accept equivalent number forms'),
     ('off_record', 'Filter off-record discussion'),
 )
 

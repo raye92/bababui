@@ -175,3 +175,50 @@ def test_ordinal_suffix_rule_leaves_other_edits_pending(before, after):
     changes = suggestions(original, original.revise(after))
     assert changes
     assert all(not filters.automatic_reason(change) for change in changes)
+
+
+@pytest.mark.parametrize('before,after,rule', [
+    ("     A    Correct that's an outline.", "     A    Right.  That's an outline.", 'positive_confirmations'),
+    ('     Q    Is that correct?', '     Q    Is that true?', 'positive_confirmations'),
+    ('The report is dated May 4, right?', 'The report is dated May 4, correct?', 'positive_confirmations'),
+    ('He rated it a five out of five it did help.', 'He rated it a 5 out of 5.  It did help.', 'number_forms'),
+    ('There were 25 people.', 'There were twenty-five people.', 'number_forms'),
+    ('There were one hundred and five people.', 'There were 105 people.', 'number_forms'),
+    ('It came to a hundred.', 'It came to 100.', 'number_forms'),
+    ('It came to one thousand.', 'It came to 1,000.', 'number_forms'),
+])
+def test_auto_accept_preserves_equivalent_confirmations_and_numbers(before, after, rule):
+    original = revision(before)
+    incoming = original.revise(after)
+    disabled = SimpleNamespace(original=original, incoming=incoming, review=None)
+    assert not filters.auto_accept(disabled, disabled_rules={rule})
+
+    state = SimpleNamespace(original=original, incoming=incoming, review=None)
+    assert filters.auto_accept(state)
+    assert state.original.text == state.incoming.text == after
+
+
+@pytest.mark.parametrize('before,after', [
+    ('The right arm hurts.', 'The correct arm hurts.'),
+    ('Which way did you turn? Was it right, left, or straight?',
+     'Which way did you turn? Was it true, left, or straight?'),
+    ('Correct that error.', 'Right that error.'),
+    ("That's not right.", "That's true."),
+    ('There were five people.', 'There were 6 people.'),
+    ('There were fifty people.', 'There were 15 people.'),
+    ('I picked a seven.', 'I picked 7.'),
+    ('I called Mr. Four about it.', 'I called Mr. 4 about it.'),
+    ('It was five.', 'It was -5.'),
+    ('It was five.', 'It was 5.0.'),
+    ('It was one .5.', 'It was 1.5.'),
+    ('It was five out of six.', 'It was 5/6.'),
+    ('It was twenty - five.', 'It was 25.'),
+    ('It was twenty five.', 'It was twenty 5.'),
+    ('It was five point five.', 'It was 5 point five.'),
+    ('It was five.', 'It was 05.'),
+])
+def test_confirmation_and_number_filters_leave_meaningful_edits_pending(before, after):
+    original = revision(before)
+    state = SimpleNamespace(original=original, incoming=original.revise(after), review=None)
+    assert not filters.auto_accept(state)
+    assert state.original.text == before

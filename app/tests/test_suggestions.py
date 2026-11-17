@@ -102,6 +102,113 @@ def test_preview_highlights_both_words_when_an_edit_joins_or_splits_them(separat
     assert (old.text[a:b], new.text[c:d]) == (before, after)
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+def test_join_with_a_spelling_correction_is_one_decision(reverse):
+    separated = 'His sleep was not rest full and he kept the red report.'
+    joined = 'His sleep was not restful, and he kept the blue report.'
+    before, after = (joined, separated) if reverse else (separated, joined)
+    original = revision(before)
+    incoming = original.revise(after)
+
+    joined_word, color = suggestions(original, incoming)
+    a, b, c, d = preview_ranges(joined_word)[0]
+    assert (before[a:b], after[c:d]) == (('restful,', 'rest full') if reverse else ('rest full', 'restful,'))
+    accepted, _ = resolve(original, incoming, joined_word, True)
+    _, rejected = resolve(original, incoming, joined_word, False)
+    assert accepted.text == (separated.replace('red', 'blue') if reverse else joined.replace('blue', 'red'))
+    assert rejected.text == (joined.replace('blue', 'red') if reverse else separated.replace('red', 'blue'))
+    assert len(color.ranges) == 1
+
+
+def test_join_with_a_correction_leaves_the_next_sentence_independent():
+    original = revision('His sleep was not rest full. Word.')
+    incoming = original.revise('His sleep was not restful. Back.')
+    joined_word, next_sentence = suggestions(original, incoming)
+    accepted, _ = resolve(original, incoming, joined_word, True)
+    assert accepted.text == 'His sleep was not restful. Word.'
+    accepted, _ = resolve(original, incoming, next_sentence, True)
+    assert accepted.text == 'His sleep was not rest full. Back.'
+
+
+@pytest.mark.parametrize('opening,closing', [('"', '"'), ('“', '”'), ('‘', '’'), ("'", "'")])
+@pytest.mark.parametrize('remove', [False, True])
+def test_quote_marks_are_one_decision_and_keep_nearby_wording_independent(opening, closing, remove):
+    plain = "They called it activities of Daily Living, then filed it under red."
+    quoted = f"They called it {opening}Activities of Daily Living,{closing} then filed it under blue."
+    before, after = (quoted, plain) if remove else (plain, quoted)
+    original = revision(before)
+    incoming = original.revise(after)
+
+    quotation, color = suggestions(original, incoming)
+    assert len(quotation.ranges) == 2
+    accepted, _ = resolve(original, incoming, quotation, True)
+    _, rejected = resolve(original, incoming, quotation, False)
+    assert accepted.text == (plain.replace('red.', 'blue.') if remove else quoted.replace('blue.', 'red.'))
+    assert rejected.text == (quoted.replace('blue.', 'red.') if remove else plain.replace('red.', 'blue.'))
+    assert len(color.ranges) == 1
+
+
+def test_adjacent_quotations_remain_separate():
+    original = revision('The labels were blue green and rough paper on the box.')
+    incoming = original.revise('The labels were "blue green" and "rough paper" on the box.')
+    first_quote, second_quote = suggestions(original, incoming)
+    accepted, _ = resolve(original, incoming, first_quote, True)
+    assert accepted.text == 'The labels were "blue green" and rough paper on the box.'
+    accepted, _ = resolve(original, incoming, second_quote, True)
+    assert accepted.text == 'The labels were blue green and "rough paper" on the box.'
+
+
+def test_quote_pairs_separated_by_one_space_can_be_accepted_individually():
+    original = revision('He said alpha beta, then left.')
+    incoming = original.revise('He said "alpha" "beta", then left.')
+    first, second = suggestions(original, incoming)
+    first_accepted, _ = resolve(original, incoming, first, True)
+    second_accepted, _ = resolve(original, incoming, second, True)
+    assert first_accepted.text == 'He said "alpha" beta, then left.'
+    assert second_accepted.text == 'He said alpha "beta", then left.'
+
+
+def test_single_quotation_keeps_an_internal_possessive_apostrophe():
+    from app.src.suggestion_filter import automatic_reason
+
+    original = revision("He mentioned the witnesses' lawyers in the notes.")
+    incoming = original.revise("He mentioned 'the witnesses' lawyers' in the notes.")
+    quotation, = suggestions(original, incoming)
+    assert not automatic_reason(quotation)
+    _, rejected = resolve(original, incoming, quotation, False)
+    assert rejected.text == original.text
+
+
+def test_accepting_quotation_keeps_unrelated_wording_and_the_existing_audio_span():
+    shared = AnchoredSpan('middle', (1,), (), 'red bottle had ')
+    original = Revision((AnchoredSpan('start', (0,), (), 'He said the '), shared,
+                         AnchoredSpan('end', (2,), (), 'cracked inside.')))
+    incoming = original.revise('He said the "red bottle had leaked inside."')
+
+    quotation, wording = suggestions(original, incoming)
+    accepted, _ = resolve(original, incoming, quotation, True)
+    assert accepted.text == 'He said the "red bottle had cracked inside."'
+    assert shared in accepted.spans
+    accepted, _ = resolve(original, incoming, wording, True)
+    assert accepted.text == 'He said the red bottle had leaked inside.'
+
+
+def test_inch_marks_are_not_grouped_as_quotations():
+    original = revision('The box measured 5" by 6".')
+    incoming = original.revise('The box measured 5 by 6.')
+    first, _ = suggestions(original, incoming)
+    accepted, _ = resolve(original, incoming, first, True)
+    assert accepted.text == 'The box measured 5 by 6".'
+
+
+def test_leading_elision_and_possessive_are_independent_apostrophe_edits():
+    original = revision("It was 'cause the witnesses' names changed.")
+    incoming = original.revise('It was cause the witnesses names changed.')
+    first, _ = suggestions(original, incoming)
+    accepted, _ = resolve(original, incoming, first, True)
+    assert accepted.text == "It was cause the witnesses' names changed."
+
+
 def test_linked_fields_are_one_decision():
     old = revision('Said: ').insert_field(6, 'SPEAKER', 'Jane')
     old = old.replace(len(old.text), len(old.text), ' and ')
