@@ -9,12 +9,13 @@ import re
 import tempfile
 from uuid import uuid4
 
+from app.src.processing import DEFAULT_MODEL
 from app.src.suggestion_filter import LABEL, PUNCTUATION, track_decision
 from app.src.suggestions import preview_context, resolve, suggestions, word_context
 from shared.storage import atomic_bytes
 
 
-DEFAULT_REVIEW_MODEL = 'gemini-3.8-flash'
+DEFAULT_REVIEW_MODEL = DEFAULT_MODEL
 PROMPT = (
     'Accept the proposed wording if it fits the context and does not significantly change the meaning. '
     'Abstain if the edit significantly changes the meaning. '

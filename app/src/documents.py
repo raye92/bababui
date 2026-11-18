@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import uuid
 
+from app.src.processing import DEFAULT_MODEL
 from shared.storage import atomic_bytes, file_lock
 from app.src.casecat import archive, codec, project
 
@@ -18,7 +19,7 @@ class Document:
     wav_path: str | None = None
     audio_override: str | None = None
     save_path: str | None = None
-    model: str = 'gemini-3.8-flash'
+    model: str = DEFAULT_MODEL
     transcription_model: str = 'gemini-3.5-transcribe'
     dirty: bool = False
     busy: bool = False

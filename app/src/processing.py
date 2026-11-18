@@ -13,7 +13,7 @@ MODELS = {
     'gemini-3.8-flash': 'Gemini 3.8 Flash',
     'gemini-4-argon': 'Gemini 4 Argon',
 }
-DEFAULT_MODEL = 'gemini-3.8-flash'
+DEFAULT_MODEL = 'gemini-4-argon'
 APP_DIR = Path(__file__).resolve().parents[1]
 PROMPT_FILE = Path(__file__).with_name('bababui_prompt.md')
 

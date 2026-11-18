@@ -54,8 +54,8 @@ If alignment is uncertain and both chunks have timestamps, the app joins them
 at the midpoint of the overlap. Review the warnings and resulting transcript.
 Timestamps are used internally and do not appear in Incoming.
 
-Each tab remembers its processing model: Gemini 3.8 Flash (default), Gemini 4
-Argon, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model
+Each tab remembers its processing model: Gemini 4 Argon (default), Gemini 3.8
+Flash, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model
 is Gemini 3.5 Transcribe. Manual contains Strip Formatting, Apply Standards,
 Insert Sample, and Batch Strip.
 Batch Strip lets you choose a folder and writes results into its `stripped`

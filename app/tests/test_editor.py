@@ -35,6 +35,36 @@ def window(tmp_path, monkeypatch):
     w.close()
 
 
+def test_model_preferences_survive_restart_and_apply_to_new_tabs(window):
+    window.open_settings()
+    page = window.settings_page
+    assert page.processing_model.currentData() == page.ai_review_model.currentData() == 'gemini-4-argon'
+    page.processing_model.setCurrentIndex(page.processing_model.findData('gemini-3.8-flash'))
+    page.ai_review_model.setCurrentIndex(page.ai_review_model.findData('deepseek-v4-pro'))
+    assert window.close()
+    restored = main.TranscriptEditor(session_path=window.session_path)
+    try:
+        assert restored.current.document.model == 'gemini-3.8-flash'
+        assert restored.new_tab().document.model == 'gemini-3.8-flash'
+        assert restored.settings_page.ai_review_model.currentData() == 'deepseek-v4-pro'
+    finally:
+        restored.close()
+
+
+def test_bababui_button_plays_bundled_sound(window, tmp_path, monkeypatch):
+    wav = tmp_path / 'meeting.wav'
+    wav.write_bytes(b'wav')
+    window.attach_wav(0, str(wav))
+    requests = []
+    monkeypatch.setattr(window.jobs, 'start', requests.append)
+    player = window.button_sound
+    assert Path(player.source().toLocalFile()).is_file()
+    player.audioOutput().setMuted(True)
+    window.bababui_btn.click()
+    assert player.isPlaying()
+    assert len(requests) == 1
+
+
 def test_toolbar_tabs_shortcuts_and_dirty_dot(window):
     assert not window.toolbar.isMovable() and not window.toolbar.isFloatable()
     assert window.tabs.count() == 1 and window.current.document.dirty
@@ -114,7 +144,7 @@ def test_settings_tab_keeps_the_active_document_and_is_not_recovered(window):
     assert model.currentData() == 'deepseek-v4-pro'
     model.setCurrentIndex(model.findData('deepseek-flash'))
     assert second.document.model == 'deepseek-flash'
-    assert first.document.model == 'gemini-3.8-flash'
+    assert first.document.model == 'gemini-4-argon'
     assert window.persist_session()
     documents, active = load_session(window.session_path)
     assert [doc.id for doc in documents] == [first.document.id, second.document.id]
@@ -354,7 +384,7 @@ def test_replacing_wav_is_tab_local(window, tmp_path):
     assert first.document.wav_path is None
     second.set_busy(True)
     window.set_processing_model('deepseek-v4-pro')
-    assert second.document.model == 'gemini-3.8-flash'
+    assert second.document.model == 'gemini-4-argon'
     second.set_busy(False)
 
 

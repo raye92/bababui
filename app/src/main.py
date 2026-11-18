@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QUrl
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QWidget, QHBoxLayout, QPushButton, QToolButton, QMenu, QProgressBar,
@@ -170,6 +171,10 @@ class TranscriptEditor(QMainWindow):
         self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addWidget(self.status_label, 1)
         self.bababui_btn = QPushButton('BABABUI')
+        self.button_sound = QMediaPlayer(self)
+        self.button_sound.setAudioOutput(QAudioOutput(self.button_sound))
+        self.button_sound.setSource(QUrl.fromLocalFile(str(APP_DIR / 'assets' / 'BABABUI.mp3')))
+        self.bababui_btn.clicked.connect(self._play_button_sound)
         self.bababui_btn.clicked.connect(self.run_bababui)
         row.addWidget(self.bababui_btn)
         self.progress = QProgressBar()
@@ -186,6 +191,10 @@ class TranscriptEditor(QMainWindow):
                         self.bababui_btn, self.toggle_view_btn, self.progress):
             control.setFixedHeight(header_height)
         self.toolbar.addWidget(container)
+
+    def _play_button_sound(self):
+        self.button_sound.setPosition(0)
+        self.button_sound.play()
 
     def _build_settings(self):
         self.settings_page = page = SettingsPage(self.file_actions.values(), self.review_actions)
@@ -254,7 +263,7 @@ class TranscriptEditor(QMainWindow):
         for document in documents:
             self.add_document(document)
         if not documents:
-            self.add_document(Document(status=notice, warnings=[notice] if notice else []))
+            self.new_tab(status=notice, warnings=[notice] if notice else [])
         target = self.find_view(active)
         if target:
             self.tabs.setCurrentWidget(target)
@@ -281,8 +290,9 @@ class TranscriptEditor(QMainWindow):
         view.changed.connect(lambda v=view: self.document_changed(v))
         return view
 
-    def new_tab(self):
-        return self.add_document(Document())
+    def new_tab(self, **document_fields):
+        model = self._load_setting('processing/model', DEFAULT_MODEL)
+        return self.add_document(Document(model=model if model in MODELS else DEFAULT_MODEL, **document_fields))
 
     def duplicate_tab(self, index=None):
         view = self.document_tab(index) if index is not None else self.current
@@ -395,7 +405,7 @@ class TranscriptEditor(QMainWindow):
         with QSignalBlocker(picker):
             picker.setCurrentIndex(picker.findData(view.document.model) if view else -1)
         picker.setEnabled(bool(view and not view.document.busy))
-        context = f'Applies to {view.document.title}.' if view else 'Open a document tab to set its processing model.'
+        context = f'Applies to {view.document.title} and new tabs.' if view else 'Open a document tab to set its processing model.'
         self.settings_page.processing_context.setText(context)
 
     def show_status(self, message):
@@ -426,6 +436,7 @@ class TranscriptEditor(QMainWindow):
     def set_processing_model(self, model):
         view = self._processing_model_view()
         if view and not view.document.busy and model in MODELS:
+            self._set_setting('processing/model', model)
             if view.document.model != model:
                 view.document.model = model
                 view.edited()
