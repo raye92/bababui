@@ -187,9 +187,10 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch, testing):
         'type': 'verbatim', 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}
 
 
-def test_missing_annotations_and_bad_timestamps_are_rejected():
-    with pytest.raises(ValueError, match='timestamps'):
-        parse_words(NS(steps=[NS(type='model_output', content=[NS(type='text', text='Hello', annotations=[])])]))
+def test_completed_text_without_annotations_is_kept_for_timing_recovery():
+    block = NS(type='text', text='Hello there.', annotations=[])
+    assert parse_words(NS(steps=[NS(type='model_output', content=[block])])) == [
+        Word('Hello', None, None, None), Word('there.', None, None, None)]
 
 
 @pytest.mark.parametrize('statuses', [(429, 200), (429, 429), (403,)])
@@ -253,11 +254,11 @@ def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(t
     from app.src.audio_pipeline import AudioPipeline, media
 
     overlap = 'Please read the signed agreement to the witness again.'
-    untimed = f'Opening remarks. {overlap}'
-    requests, uploads = [], []
+    untimed = f'We started today. {overlap}'
+    requests, uploads, prepared = [], [], []
 
     def upload(**kwargs):
-        uploads.append(kwargs['file'])
+        uploads.append(prepared[-1])
         return NS(uri=f'files/chunk-{len(uploads)}', state='ACTIVE')
 
     def create(**kwargs):
@@ -268,10 +269,19 @@ def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(t
             text = untimed
             annotations = [NS(type='word_info', start_index=0, end_index=len(text), speaker='first')]
         else:
-            text = f'{overlap} We can adjourn.'
+            clip = uploads[-1]
+            if clip['start'] == 1740:
+                text = f'{overlap} We can adjourn.'
+                times = [i + 27 if i < len(overlap.split()) else i + 62 for i in range(len(text.split()))]
+            elif clip['start'] == 1500:
+                text = overlap
+                times = range(267, 267 + len(text.split()))
+            elif clip['start'] == 0:
+                text, times = 'We started today.', (1, 2, 3)
+            else:
+                text, times = 'Other testimony.', (10, 11)
             annotations, offset = [], 0
-            for i, token in enumerate(text.split()):
-                start = i + 27 if i < len(overlap.split()) else i + 62
+            for token, start in zip(text.split(), times):
                 annotations.append(NS(type='word_info', start_index=offset, end_index=offset+len(token),
                                       speaker='second', start_offset=f'{start}s', end_offset=f'{start+0.5}s'))
                 offset += len(token) + 1
@@ -281,23 +291,23 @@ def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(t
     wav = tmp_path/'source.wav'
     wav.write_bytes(b'wav')
     monkeypatch.setattr(media, 'probe', lambda _: 2942)
-    monkeypatch.setattr(media, 'prepare', lambda *args: None)
+    monkeypatch.setattr(media, 'prepare', lambda path, clip, destination: prepared.append(clip))
     sdk = NS(files=NS(upload=upload), interactions=NS(create=create))
     pipeline = AudioPipeline('fake', tmp_path/'cache', sdk)
 
     result = pipeline.run(wav)
 
     assert result.text == f'Speaker 1: {untimed} We can adjourn.'
-    assert result.words[0].start is None
+    assert result.words[0].start == 1
     assert next(w.start for w in result.words if w.text == 'Please') == 1767
-    assert any('chunk 1' in warning for warning in result.warnings)
+    assert not result.warnings
     assert pipeline.run(wav) == result
-    assert len(uploads) == 2
-    assert [request['input'][0]['uri'] for request in requests] == ['files/chunk-1', 'files/chunk-1', 'files/chunk-2']
+    assert [clip['start'] for clip in uploads] == [0, 0, 300, 600, 900, 1200, 1500, 1740]
+    assert requests[0]['input'] == requests[1]['input']
     configs = [request['generation_config'] for request in requests]
-    assert [config['max_output_tokens'] for config in configs] == [16384, 16384, 16384]
+    assert all(config['max_output_tokens'] == 16384 for config in configs)
     modes = [config['transcription_config']['mode'] for config in configs]
-    assert [mode.get('timestamp_granularities') for mode in modes] == [['word'], None, ['word']]
+    assert [mode.get('timestamp_granularities') for mode in modes] == [['word'], None] + [['word']] * 7
     assert all(mode['diarization_mode'] == 'speaker' for mode in modes)
 
 
@@ -307,6 +317,40 @@ def test_unmatched_untimed_overlap_keeps_text_from_both_chunks():
     words, warnings = stitch([a, b])
     assert render(words) == 'Speaker 1: Keep the first chunk.\nSpeaker 2: Keep the second chunk.'
     assert any('Both chunks' in warning for warning in warnings)
+
+
+@pytest.mark.parametrize('whole_turns', [False, True], ids=['words', 'speaker-turns'])
+def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_path, monkeypatch, whole_turns):
+    from dataclasses import asdict
+    from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, media, save_json
+
+    wav = tmp_path / 'old.wav'
+    wav.write_bytes(b'recording')
+    cache = tmp_path / 'cache'
+    digest = hashlib.sha256(wav.read_bytes()).hexdigest()
+    directory = cache / AUDIO_MODEL / 'overlap-v1' / digest
+    original = [Word(word, speaker, None, None)
+                for speaker, passage in [('a', 'Bring the papers.'), ('b', 'Yes, I will.')]
+                for word in ([passage] if whole_turns else passage.split())]
+    save_json(directory / 'chunk-0.json', [asdict(w) for w in original])
+    clips = []
+    monkeypatch.setattr(media, 'probe', lambda _: 360)
+    monkeypatch.setattr(media, 'prepare', lambda path, segment, dest: clips.append(segment))
+    pipeline = AudioPipeline('fake', cache)
+
+    def transcribe(path, progress, *, timing_only):
+        assert timing_only
+        passage = 'bring the papers' if clips[-1]['start'] == 0 else 'yes I will'
+        return [Word(word, 'different label', i + 2, i + 2.5) for i, word in enumerate(passage.split())]
+
+    monkeypatch.setattr(pipeline, 'transcribe_segment', transcribe)
+    result = pipeline.run(wav)
+
+    assert result.text == 'Speaker 1: Bring the papers.\nSpeaker 2: Yes, I will.'
+    assert [w.start for w in result.words] == [2, 3, 4, 182, 183, 184]
+    assert not result.warnings
+    assert pipeline.run(wav) == result
+    assert clips == [{'start': 0, 'end': 180}, {'start': 180, 'end': 360}]
 
 
 def test_ambiguous_speakers_are_not_merged():

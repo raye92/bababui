@@ -13,7 +13,7 @@ from app.src.audio_pipeline import AudioPipeline
 from app.src.ai_review import AssistedReview, review_edits
 from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
-from app.src.speech_alignment import UNAVAILABLE, align_speech
+from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept, begin_review
 from shared.storage import atomic_bytes
 
@@ -113,9 +113,12 @@ class ProcessingWorker(QThread):
             alignment = None
             if request.job is not None:
                 report('Aligning transcript with audio...')
-                alignment = self._align(transcription)
-                if alignment is None:
-                    warnings.append(UNAVAILABLE)
+                if any(w.start is not None for w in transcription.words):
+                    alignment = self._align(transcription)
+                    if alignment is None:
+                        warnings.append(UNAVAILABLE)
+                else:
+                    warnings.append(NO_TIMESTAMPS)
             report('Applying transcript standards...')
             if request.review_model is None:
                 self.succeeded.emit(request.document_id, result, warnings, alignment)

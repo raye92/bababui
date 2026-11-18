@@ -106,7 +106,7 @@ def retime_export(bundle, job, native, metadata, alignment):
     if metadata is None:
         raise AudioExportError('The ZIP contains no CaseCAT recording metadata.')
     try:
-        if len(alignment.stroke_ms) != len(job.stroke_clocks):
+        if not alignment.stroke_ms or len(alignment.stroke_ms) != len(job.stroke_clocks):
             raise AudioExportError('The alignment does not cover this job’s stroke records.')
         _check_recording(native, metadata, job.audio_member)
         events = recording_events(metadata)

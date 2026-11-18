@@ -1,7 +1,7 @@
 """Align editable passages to timestamped speech without changing native records."""
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import file_digest
 import math
 from pathlib import Path
@@ -11,7 +11,8 @@ from statistics import median
 from app.src.suggestion_filter import LABEL
 
 
-UNAVAILABLE = 'Audio alignment unavailable: too little speech matched the imported text.'
+UNAVAILABLE = 'Too little timestamped speech matched the imported text to align this transcription.'
+NO_TIMESTAMPS = 'The transcription had no usable word timestamps for audio alignment.'
 WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)*")
 QA = re.compile(r'^[ \t]*[QA](?:\s{2,}|[.:][ \t]+)')
 SHA256 = re.compile(r'[0-9a-f]{64}')
@@ -75,7 +76,7 @@ def _increasing(values, *, allow_equal=False):
     return reversed(ordered)
 
 
-def _matches(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
+def _matching_pairs(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
     matches = {}
     for phrase, text_index in _unique_phrases(keys).items():
         audio_index = audio_phrases.get(phrase)
@@ -95,8 +96,30 @@ def _matches(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
     pairs = [(i, j) for i, j in pairs if expected[i] is None
              or abs(expected[i] - audio_times[j] - center) <= window]
     ordered = [pairs[k] for k in _increasing([j for _, j in pairs])]
-    return {ordered[k][0]: audio_times[ordered[k][1]]
-            for k in _increasing([audio_times[j] for _, j in ordered], allow_equal=True)}
+    return [ordered[k] for k in _increasing([audio_times[j] for _, j in ordered], allow_equal=True)]
+
+
+def _matches(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
+    pairs = _matching_pairs(keys, audio_phrases, audio_times, expected, learn_offset=learn_offset)
+    return {i: audio_times[j] for i, j in pairs}
+
+
+def recover_word_times(words, observations):
+    """Copy measured times from matching phrases onto the original transcription."""
+    if not observations:
+        return words
+
+    def keys(items):
+        return [''.join(key for _, key in _tokens(word.text)) for word in items]
+
+    # A cached untimed annotation can contain an entire speaker turn.
+    recovered = [replace(w, text=token) for w in words for token in w.text.split()]
+    times = [round(w.start * 1000) if w.start is not None else None for w in observations]
+    pairs = _matching_pairs(keys(recovered), _unique_phrases(keys(observations)), times, [None] * len(recovered))
+    for i, j in pairs:
+        observed = observations[j]
+        recovered[i] = replace(recovered[i], start=observed.start, end=observed.end)
+    return recovered if pairs else words
 
 
 def _lerp(left, right, fraction):
@@ -171,7 +194,7 @@ class SpeechAlignment:
         def valid(time):
             return type(time) is int and 0 <= time <= duration
 
-        if (not isinstance(strokes, (list, tuple)) or len(strokes) != stroke_count
+        if (not isinstance(strokes, (list, tuple)) or len(strokes) not in (0, stroke_count)
                 or any(not valid(t) for t in strokes)
                 or any(a > b for a, b in zip(strokes, strokes[1:]))
                 or not isinstance(words, (list, tuple)) or not words
@@ -194,6 +217,8 @@ class SpeechAlignment:
 
     def export_strokes(self, revision):
         """Use the final wording at the source groups CaseCAT actually serializes."""
+        if not self.stroke_ms:
+            return ()
         _, keys, refs = _passages(revision)
         matches = _matches(keys, _unique_phrases([key for key, _ in self.words]),
                            [time for _, time in self.words], _at_strokes(refs, self.stroke_ms))
@@ -204,7 +229,7 @@ class SpeechAlignment:
 
 
 def _at_strokes(refs, times):
-    return [times[ref] if ref is not None else None for ref in refs]
+    return [times[ref] if times and ref is not None else None for ref in refs]
 
 
 def _stroke_anchors(refs, matches):
@@ -233,12 +258,12 @@ def align_speech(revision, native_times, words, duration_ms, wav_sha256):
     matches = _matches(keys, _unique_phrases([key for key, _ in audio]),
                        [time for _, time in audio], _at_strokes(refs, native_times), learn_offset=True)
     # A short match in a long job is weak evidence for retiming the entire job.
-    if len(matches) < max(3, math.ceil(len(keys) / 10)):
+    if len(matches) < max(3, math.ceil(len(keys) / 10)) or len(set(matches.values())) < 2:
         return None
     anchors = _stroke_anchors(refs, matches)
-    if len(set(anchors.values())) < 2:
-        return None
-    return SpeechAlignment(wav_sha256, duration_ms, _timeline(native_times, anchors, duration_ms), tuple(audio))
+    # Spoken words can cover a whole passage even if it has only one stroke.
+    stroke_ms = _timeline(native_times, anchors, duration_ms) if len(set(anchors.values())) >= 2 else ()
+    return SpeechAlignment(wav_sha256, duration_ms, stroke_ms, tuple(audio))
 
 
 class SpeechPlayback:
@@ -255,7 +280,7 @@ class SpeechPlayback:
             positions, keys, refs = _passages(revision)
             raw = _at_strokes(refs, self.alignment.stroke_ms)
             matches = _matches(keys, self._phrases, self._times, raw)
-            if not keys:
+            if not keys and self.alignment.stroke_ms:
                 position = 0
                 for span in revision.spans:
                     if span.content:
@@ -263,6 +288,8 @@ class SpeechPlayback:
                         ref = max(span.stroke_refs, default=None)
                         raw.append(self.alignment.stroke_ms[ref] if ref is not None else None)
                         position += len(span.content)
+            if not matches and all(time is None for time in raw):
+                positions, raw = [], []
             times = _timeline(raw, matches, self.alignment.duration_ms)
             ranges = tuple(zip(positions, [*positions[1:], len(revision.text)], times))
             self._cache[key] = revision, positions, times, ranges

@@ -204,6 +204,44 @@ def test_native_clock_removes_pauses_and_corrects_pcm_drift(tmp_path):
     assert times.duration_ms == 40000
 
 
+def test_attached_second_recording_does_not_use_the_bundled_recording_clock(audio_view, tmp_path):
+    from app.src.document_view import DocumentView
+
+    doc = audio_view.document
+    external = tmp_path / 'second-recorder.wav'
+    with wave.open(str(external), 'wb') as out:
+        out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        out.writeframes(b'\x01\x00' * (16000 * 40))
+    doc.audio_override = doc.wav_path = str(external)
+    view = DocumentView(doc)
+    try:
+        assert view.playback is not None
+        assert view.playback.timing is None
+    finally:
+        view.close()
+
+
+@pytest.mark.parametrize('previous_alignment', [False, True], ids=['use-native-timing', 'keep-speech-timing'])
+def test_untimed_rerun_keeps_working_playback_on_original(audio_view, previous_alignment):
+    from hashlib import sha256
+    from pathlib import Path
+    from app.src.speech_alignment import NO_TIMESTAMPS, SpeechAlignment
+
+    doc = audio_view.document
+    if previous_alignment:
+        digest = sha256(Path(doc.wav_path).read_bytes()).hexdigest()
+        alignment = SpeechAlignment(digest, 40000, (4000, 10000, 16000),
+                                    (('alpha', 4000), ('beta', 10000), ('gamma', 16000)))
+        audio_view.receive(doc.original, [], alignment)
+
+    audio_view.receive(doc.original, [NO_TIMESTAMPS])
+
+    expected = 10000 if previous_alignment else 11940
+    assert audio_view.playback.timing.position_ms(doc.native.original, doc.original.index('beta')) == expected
+    source = 'saved speech timing' if previous_alignment else 'CaseCAT recording times'
+    assert any(source in warning for warning in doc.warnings)
+
+
 @pytest.mark.parametrize('resume_clock', [10997, 11000])
 def test_overlapping_pause_and_resume_keep_transcript_in_sync(tmp_path, resume_clock):
     times, revision = timing_source(

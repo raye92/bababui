@@ -149,24 +149,40 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
     assert alignment is None
 
 
-def test_worker_delivers_timing_with_incoming_review(tmp_path):
+@pytest.mark.parametrize('recording', ['timed original', 'untimed original', 'untimed attachment', 'no timestamps'])
+def test_worker_delivers_timing_with_incoming_review(tmp_path, monkeypatch, recording):
+    import wave
+    from app.src.audio_pipeline import AudioPipeline, media
     from app.src.casecat import codec
     from app.src.jobs import ProcessingWorker, Request
+    from app.src.speech_alignment import NO_TIMESTAMPS
     from app.tests.test_native_audio import audio_archive
 
     bundle = audio_archive(tmp_path)
     job = codec.load_job(bundle, bundle.jobs[0])
     wav = tmp_path / 'sample.wav'
-    digest = sha256(wav.read_bytes()).hexdigest()
+    duration, seconds = 40, (4, 10, 16)
+    if recording == 'untimed attachment':
+        duration, seconds = 60, (24, 30, 36)
+        wav = tmp_path / 'another recorder.wav'
+        with wave.open(str(wav), 'wb') as out:
+            out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            out.writeframes(bytes(32000 * duration))
+    clips = []
+    monkeypatch.setattr(media, 'probe', lambda path: duration)
+    monkeypatch.setattr(media, 'prepare', lambda path, segment, dest: clips.append(segment))
 
-    class Pipeline:
+    class Pipeline(AudioPipeline):
         def __init__(self, *args, testing=False):
-            pass
+            super().__init__('fake', tmp_path / 'cache')
 
-        def run(self, path, progress):
-            words = tuple(Word(word, 'Speaker 1', start, start + .1)
-                          for word, start in zip(('Alpha', 'beta', 'gamma.'), (4, 10, 16)))
-            return Transcription('Speaker 1: Alpha beta gamma.', words, (), 40000, digest)
+        def transcribe_segment(self, path, progress, *, timing_only=False):
+            words = ('Alpha', 'beta', 'gamma.')
+            if recording == 'no timestamps' or (not timing_only and recording != 'timed original'):
+                return [Word(word, 'first', None, None) for word in words]
+            start, end = clips[-1]['start'], clips[-1]['end']
+            return [Word(word, 'first', second - start, second - start + .1)
+                    for word, second in zip(words, seconds) if start <= second < end]
 
     class Processor:
         def __init__(self, *args):
@@ -187,5 +203,12 @@ def test_worker_delivers_timing_with_incoming_review(tmp_path):
     worker.run()
     _, incoming, warnings, alignment = results[0]
     assert incoming == 'Alpha New beta gamma.'
-    assert not warnings
-    assert alignment.stroke_ms == (4000, 10000, 16000)
+    assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == 'Speaker 1: Alpha beta gamma.'
+    if recording == 'no timestamps':
+        assert warnings == ['No word timestamps for chunk 1.', NO_TIMESTAMPS]
+        assert alignment is None
+    else:
+        assert not warnings
+        assert alignment.matches_wav(wav)
+        assert alignment.stroke_ms == tuple(s * 1000 for s in seconds)
+        assert alignment.playback().position_ms(job.baseline, job.text.index('beta')) == seconds[1] * 1000

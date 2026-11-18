@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 
+from app.src.speech_alignment import recover_word_times
 from shared import media
 from shared.transcription import GeminiTranscriber
 from shared.storage import file_lock
@@ -21,6 +22,7 @@ CHUNK_SECONDS = 30 * 60
 OVERLAP_SECONDS = 60
 CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
 MAX_CHUNKS = 3
+TIMING_CLIP_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -66,8 +68,6 @@ def parse_words(response, *, timestamps=True):
             annotations = [a for a in (getattr(block, 'annotations', None) or [])
                            if getattr(a, 'type', None) == 'word_info']
             if raw.strip() and not annotations:
-                if timestamps:
-                    raise ValueError('Transcription is missing word timestamps or speaker tags.')
                 words.extend(Word(token, None, None, None) for token in block.text.split())
             for i, a in enumerate(annotations):
                 start, end = a.start_index, a.end_index
@@ -225,7 +225,7 @@ class AudioPipeline:
         self.cache = Path(cache)
         self.testing = testing
 
-    def transcribe_segment(self, path, progress=lambda message: None):
+    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False):
         sdk = self.client.client()
         uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav'})
         deadline = time.monotonic()+300
@@ -236,7 +236,7 @@ class AudioPipeline:
             uploaded = sdk.files.get(name=uploaded.name)
         if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
             raise ValueError('Audio upload processing failed.')
-        for timestamps in (True, False):
+        for timestamps in ((True,) if timing_only else (True, False)):
             mode = {'type': 'verbatim', 'diarization_mode': 'speaker'}
             if timestamps:
                 mode['timestamp_granularities'] = ['word']
@@ -258,7 +258,14 @@ class AudioPipeline:
                 self._save_response(response)
             status = getattr(response.status, 'value', response.status)
             if status == 'completed':
-                return parse_words(response, timestamps=timestamps)
+                try:
+                    return parse_words(response, timestamps=timestamps)
+                except ValueError:
+                    if timing_only:
+                        return []  # A short clip can be silent or have unusable annotations.
+                    raise
+            if timing_only and status == 'incomplete':
+                return []
             if status != 'incomplete':
                 break
         raise ValueError('Transcription did not complete; existing text was preserved.')
@@ -292,24 +299,52 @@ class AudioPipeline:
         with file_lock(directory / 'cache.lock'):
             return self._run_locked(path, plan, directory, progress, digest)
 
+    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False):
+        if cached.exists():
+            words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
+        else:
+            with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
+                prepared = Path(temporary) / 'segment.wav'
+                media.prepare(path, {'start': start, 'end': end}, prepared)
+                if timing_only:
+                    try:
+                        words = self.transcribe_segment(prepared, progress, timing_only=True)
+                    except Exception:
+                        # A failed optional API call must leave the completed transcript usable.
+                        progress('Word timing request failed. Keeping the completed transcription.')
+                        return None
+                else:
+                    words = self.transcribe_segment(prepared, progress)
+            _check_wav(path, digest)
+        words = [w if (w.start is not None and w.end is not None and 0 <= w.start <= w.end <= end - start)
+                 else replace(w, start=None, end=None) for w in words]
+        if not cached.exists() and (not timing_only or any(w.start is not None for w in words)):
+            save_json(cached, [asdict(w) for w in words])
+        return words
+
+    def _recover_timing(self, path, start, end, words, directory, progress, digest):
+        observations = []
+        step = min(TIMING_CLIP_SECONDS, math.ceil((end - start) / 2))
+        for offset in range(0, math.ceil(end - start), step):
+            clip_start, clip_end = start + offset, min(start + offset + step, end)
+            cached = directory / 'word-timing' / f'{clip_start}-{clip_end}.json'
+            clip = self._segment_words(path, clip_start, clip_end, cached, progress, digest, timing_only=True)
+            if clip is None:
+                break
+            observations.extend(replace(w, start=w.start + offset, end=w.end + offset)
+                                if w.start is not None else w for w in clip)
+        return recover_word_times(words, observations)
+
     def _run_locked(self, path, plan, directory, progress, digest):
         chunks, timing_warnings = [], []
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing chunk {i+1} of {len(plan)}...')
-            cached = directory / f'chunk-{i}.json'
-            if cached.exists():
-                words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
-            else:
-                with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
-                    prepared = Path(temporary) / 'segment.wav'
-                    media.prepare(path, {'start': start, 'end': end}, prepared)
-                    words = self.transcribe_segment(prepared, progress)
-                _check_wav(path, digest)
-                save_json(cached, [asdict(w) for w in words])
-            chunks.append([w if (w.start is not None and w.end is not None
-                                 and 0 <= w.start <= w.end <= end - start)
-                           else replace(w, start=None, end=None) for w in words])
-            if not any(w.start is not None for w in chunks[-1]):
+            words = self._segment_words(path, start, end, directory / f'chunk-{i}.json', progress, digest)
+            if not any(w.start is not None for w in words):
+                progress(f'Recovering word timestamps for chunk {i+1} from shorter audio clips...')
+                words = self._recover_timing(path, start, end, words, directory, progress, digest)
+            chunks.append(words)
+            if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
         words, warnings = stitch(chunks)

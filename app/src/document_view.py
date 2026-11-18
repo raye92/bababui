@@ -16,7 +16,7 @@ from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
 from app.src.suggestion_filter import begin_review, override_speaker, track_decisions, auto_accept, questionable_speaker_defaults
-from app.src.speech_alignment import WAV_CHANGED
+from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
 
 
 class ImportView(QWidget):
@@ -208,7 +208,9 @@ class DocumentView(QWidget):
         if doc.native.alignment:
             return doc.native.alignment.playback()
         try:
-            return AudioMap.from_job(doc.native.bundle, doc.native.job, doc.wav_path)
+            timing = AudioMap.from_job(doc.native.bundle, doc.native.job, doc.wav_path,
+                                       bundled=doc.audio_override is None)
+            return timing if any(time is not None for time in timing.stroke_ms) else None
         except (ValueError, OSError, wave.Error, EOFError):
             return None
 
@@ -780,10 +782,14 @@ class DocumentView(QWidget):
 
     def _finish_receive(self, warnings, alignment):
         warnings = list(warnings)
-        self.document.native.alignment = alignment
+        if alignment is not None:
+            self.document.native.alignment = alignment
         self._validate_alignment(warnings)
         if self.playback:
             self.playback.timing = self._playback_timing()
+            if self.playback.timing and any(w in (NO_TIMESTAMPS, UNAVAILABLE) for w in warnings):
+                source = 'saved speech timing for this WAV' if self.document.native.alignment else 'CaseCAT recording times'
+                warnings.append(f'Playback uses {source}.')
         self.document.update_warnings(warnings)
         self.refresh()
         if self.playback:

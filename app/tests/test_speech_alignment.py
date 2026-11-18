@@ -135,3 +135,17 @@ def test_untimed_transcript_leaves_native_stroke_timing():
     source = revision('One ', 'two ', 'three ', 'four ', 'five ', 'six.')
     words = tuple(Word(word, 'speaker', None, None) for word in source.text.split())
     assert align(source, (1000, 2000, 3000, 4000, 5000, 6000), words) is None
+
+
+@pytest.mark.parametrize('refs', [(), (0,)])
+def test_speech_playback_survives_reopen_without_distinct_stroke_anchors(refs):
+    from app.src.speech_alignment import SpeechAlignment
+
+    source = Revision((AnchoredSpan('source', refs, (), 'Read the first page. Then sign here.'),))
+    words = audio(*zip(source.text.split(), (2, 3, 4, 5, 60, 61, 62)))
+    alignment = align(source, (None,) * len(refs), words, duration=70000)
+
+    assert alignment is not None
+    playback = SpeechAlignment.restore(vars(alignment), len(refs)).playback()
+    assert playback.position_ms(source, 0) == 2000
+    assert playback.position_ms(source, source.text.index('sign')) == 61000

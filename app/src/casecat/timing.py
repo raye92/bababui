@@ -5,12 +5,27 @@ The conversion was checked against CaseCAT 22.1's audio API on local copies.
 """
 from bisect import bisect_right
 from dataclasses import dataclass
+from io import BytesIO
 import struct
 import wave
 import xml.etree.ElementTree as ET
+from zipfile import ZipFile
 
 
 MAX_PAUSE_OVERLAP_CS = 3
+
+
+def _same_recording(bundle, member, source):
+    """Compare PCM frames so a renamed copy can still use the recording clock."""
+    if not member:
+        return False
+    with ZipFile(BytesIO(bundle.data)) as archive, archive.open(member) as stream, wave.open(stream) as bundled:
+        if bundled.getparams() != source.getparams():
+            return False
+        while frames := bundled.readframes(65536):
+            if frames != source.readframes(65536):
+                return False
+        return source.tell() == source.getnframes()
 
 
 def raw_recording_events(xml):
@@ -78,8 +93,10 @@ class AudioMap:
         return None if paused else elapsed + clock - start
 
     @classmethod
-    def from_job(cls, bundle, job, wav_path):
+    def from_job(cls, bundle, job, wav_path, *, bundled=False):
         with wave.open(str(wav_path), 'rb') as source:
+            if not bundled and not _same_recording(bundle, job.audio_member, source):
+                raise ValueError('The native recording clock belongs to a different WAV.')
             return cls.from_recording(bundle, job, source)
 
     @classmethod
