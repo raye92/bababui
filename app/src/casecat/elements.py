@@ -19,6 +19,8 @@ class NativeElement:
     name: str = ''
     source: int | None = None
     value: str | None = None
+    wrap_caption: bool = False
+    uppercase: bool = False
 
 
 def field_name(raw):

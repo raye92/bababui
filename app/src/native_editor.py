@@ -5,7 +5,8 @@ from difflib import SequenceMatcher
 
 from PySide6.QtGui import (QKeySequence, QTextCursor,
                           QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
-                          QTextBlockFormat, QTextFormat, QTextOption, QPainter)
+                          QTextBlockFormat, QTextFormat, QTextOption, QPainter,
+                          QTextTableFormat, QTextLength)
 from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
@@ -573,6 +574,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         fmt.setTopMargin(self._top)
         fmt.setBottomMargin(self._bottom)
         frame.setFrameFormat(fmt)
+        self._apply_caption_tables()
         cursor.select(QTextCursor.Document)
         block = QTextBlockFormat()
         block.setLineHeight(self._line_height, QTextBlockFormat.FixedHeight.value)
@@ -602,6 +604,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     cursor.setPosition(offset + width, QTextCursor.KeepAnchor)
                     cursor.insertText(wanted)
                 offset += width
+            self._apply_caption_tables()
             self._apply_paragraph_styles()
             self._align_page_top()
             cursor.endEditBlock()
@@ -620,6 +623,29 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     cursor.setPosition(len(old[:b].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
                     cursor.insertText(text[c:d])
             cursor.endEditBlock()
+
+    def _apply_caption_tables(self):
+        document = self.document()
+        raw = document.toRawText().replace('\u2029', '\n')
+        for table in reversed(getattr(self._paragraph_styles, 'caption_tables', ())):
+            start, middle, end = table.start, table.separator, table.end
+            if (end >= len(raw) or raw[start] != '\n' or raw[middle] != '\n' or raw[end] != '\n'):
+                continue
+            cursor = QTextCursor(document)
+            cursor.setPosition(start)
+            cursor.setPosition(end + 1, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            fmt = QTextTableFormat()
+            fmt.setBorder(0)
+            fmt.setCellPadding(0)
+            fmt.setCellSpacing(0)
+            fmt.setBorderCollapse(True)
+            widths = [width * self._twip_scale for width in table.widths]
+            fmt.setWidth(sum(widths))
+            fmt.setColumnWidthConstraints([QTextLength(QTextLength.FixedLength, width) for width in widths])
+            qt_table = cursor.insertTable(1, 2, fmt)
+            for column, text in enumerate((raw[start + 1:middle], raw[middle + 1:end])):
+                qt_table.cellAt(0, column).firstCursorPosition().insertText(text)
 
     def _apply_paragraph_styles(self):
         cursor = QTextCursor(self.document())
@@ -680,6 +706,29 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         fmt.setBottomMargin(self._bottom + leading)
         if fmt != frame.frameFormat():
             frame.setFrameFormat(fmt)
+        doc_layout = self.document().documentLayout()
+        for page, table in enumerate(getattr(self._paragraph_styles, 'caption_tables', ())):
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(table.start + 1)
+            qt_table = cursor.currentTable()
+            if qt_table is None:
+                continue
+            doc_layout.documentSize()
+            block = cursor.block()
+            if not block.layout().lineCount():
+                continue
+            y = doc_layout.blockBoundingRect(block).top() + block.layout().lineAt(0).y()
+            target = self._top + page * self._page_height + 3 * self._line_height
+            fmt = qt_table.format()
+            if abs(target - y) >= 0.5:
+                fmt.setTopMargin(max(0, fmt.topMargin() + target - y))
+                qt_table.setFormat(fmt)
+
+    def number_at_y(self, page, y, sequential):
+        if getattr(self._paragraph_styles, 'caption_tables', ()):
+            return max(1, min(self.lines_per_page,
+                              round((y - page * self._page_height - self._top) / self._line_height) + 1))
+        return sequential
 
     def page_lines(self):
         # Force layout before reading QTextLine coordinates, including offscreen
@@ -687,6 +736,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         self.document().documentLayout().documentSize()
         result = []
         page_numbers = {}
+        doc_layout = self.document().documentLayout()
         block = self.document().begin()
         while block.isValid():
             layout = block.layout()
@@ -694,11 +744,11 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 raw = block.text().encode('utf-16-le')
                 for index in range(layout.lineCount()):
                     line = layout.lineAt(index)
-                    y = layout.position().y() + line.y()
+                    y = doc_layout.blockBoundingRect(block).top() + line.y()
                     page = int(y // self._page_height)
                     # Number physical lines, not rounded glyph coordinates:
                     # font ascent and paragraph spacing vary independently.
-                    number = page_numbers.get(page, 0) + 1
+                    number = self.number_at_y(page, y, page_numbers.get(page, 0) + 1)
                     page_numbers[page] = number
                     text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le').replace('\u2011', '-')
                     result.append(PageLine(page + 1, number, block.position() + line.textStart(), text.rstrip(), y))
@@ -764,7 +814,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     painter.drawText(QPointF(x, y+line.ascent()), '-')
             block = block.next()
         painter.setPen(QColor('#8a8f98'))
-        lines = self.page_lines()
+        fixed_gutter = bool(getattr(self._paragraph_styles, 'caption_tables', ()))
+        lines = [] if fixed_gutter else self.page_lines()
         for line in lines:
             if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():
                 painter.drawText(self.line_number_rect(line.y),

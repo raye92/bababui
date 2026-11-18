@@ -70,7 +70,13 @@ class Revision:
             if not inside:
                 continue
             if element.kind == 'field' and (content or start != element.start or end != element.end):
-                value = (self.text[element.start:start] + content + self.text[end:element.end])
+                if element.wrap_caption and element.value:
+                    from .caption import caption_offsets
+                    offsets = caption_offsets(element.name, element.value)
+                    first, last = offsets[start - element.start], offsets[end - element.start]
+                    value = element.value[:first] + content + element.value[last:]
+                else:
+                    value = self.text[element.start:start] + content + self.text[end:element.end]
                 return self.set_field(element.name, value)
             if element.kind == 'symbol':
                 label = content.strip()
@@ -99,7 +105,9 @@ class Revision:
             updated = replace(element, value=value)
             result = replace(result, elements=tuple(updated if e is element else e for e in result.elements))
             result = result._replace(element.start, element.end,
-                                     rendered_value(result.text[:element.start], value, name, all_caps=self.all_caps),
+                                     rendered_value(result.text[:element.start], value, name,
+                                                    all_caps=self.all_caps or element.uppercase,
+                                                    wrap_caption=element.wrap_caption),
                                      preserve=updated)
         return result
 
@@ -127,10 +135,11 @@ class Revision:
             value = existing.value if existing.value is not None else self.text[existing.start:existing.end]
         elif name in dict(self.definitions):
             value = dict(self.definitions)[name]
-        display = rendered_value(self.text[:position], value, name, all_caps=self.all_caps)
+        wrap = bool(existing and existing.wrap_caption)
+        display = rendered_value(self.text[:position], value, name, all_caps=self.all_caps, wrap_caption=wrap)
         result = self._replace(position, position, display)
         element = NativeElement(position, position + len(display), 'field', raw.hex(), name,
-                                existing.source if existing else None, value)
+                                existing.source if existing else None, value, wrap)
         definitions = dict(result.definitions)
         definitions[name] = value
         return replace(result, elements=tuple(sorted((*result.elements, element), key=lambda e: (e.start, e.end))),

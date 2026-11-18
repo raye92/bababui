@@ -5,7 +5,7 @@ from time import monotonic
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QPlainTextEdit, QPushButton
-from PySide6.QtCore import Qt, QMimeData, QUrl
+from PySide6.QtCore import Qt, QEvent, QMimeData, QUrl
 from PySide6.QtGui import QDropEvent, QFontDatabase, QFont
 from PySide6.QtTest import QTest
 import pytest
@@ -33,6 +33,8 @@ def window(tmp_path, monkeypatch):
         if view.document.native:
             view.set_busy(False)
     w.close()
+    w.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def test_model_preferences_survive_restart_and_apply_to_new_tabs(window):
@@ -81,6 +83,53 @@ def test_import_screen_and_no_manual_menu(window):
     assert not hasattr(window.current, 'editor')
     assert not hasattr(window, 'manual_btn')
     assert not window.file_actions['Save'].isEnabled()
+    assert not window.notice_action.isEnabled()
+
+
+def test_notice_can_be_skipped_and_attached_later(window, monkeypatch):
+    view = window.current
+    assert view.notice_offer.isVisible()
+    skip = next(b for b in view.notice_offer.findChildren(QPushButton) if b.text() == 'Skip')
+    skip.click()
+    assert view.notice_offer.isHidden() and window.notice_action.isEnabled()
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *args: ('', ''))
+    window.notice_action.trigger()
+    assert window.current is view and view.document.native.notice is None
+    view.set_busy(True)
+    window.update_controls()
+    assert not window.notice_action.isEnabled()
+    view.set_busy(False)
+
+
+def test_notice_upload_button_applies_reviewed_pdf_and_updates_request(window, tmp_path, monkeypatch):
+    from app.tests.test_native_fields import field_files
+    from app.tests.test_native_casecat import zip_bytes
+    from app.tests.test_notice_pdf import sample
+    from app.src.notice_dialog import NoticeWizard
+    source = tmp_path / 'recording.zip'
+    source.write_bytes(zip_bytes(field_files()))
+    pdf = tmp_path / '261110thaler 1757905.pdf'
+    pdf.write_bytes(sample())
+    view = window.new_tab()
+    assert window.import_zip(window.tabs.indexOf(view), source)
+    window.settings_page.recognize_file_number.setChecked(True)
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *args: (str(pdf), ''))
+    def confirm(wizard):
+        assert wizard.sides['Defendant'].isChecked()
+        assert wizard.details().file_number == '1757905'
+        wizard.entries['file_number'].setText('J100')
+        return NoticeWizard.Accepted
+    monkeypatch.setattr(NoticeWizard, 'exec', confirm)
+    upload = next(b for b in window.current.notice_offer.findChildren(QPushButton) if b.text() == 'Upload notice PDF')
+    upload.click()
+    doc = window.current.document
+    assert doc.native.notice.pdf == pdf.read_bytes()
+    assert 'FILE NO.:  J100' in doc.native.original.text
+    requests = []
+    monkeypatch.setattr(window.jobs, 'start', requests.append)
+    window.run_bababui()
+    assert {'FRANCIS LAKE', 'Taylor Reed', 'River Law LLP', 'Jordan Ames'} <= set(requests[0].vocabulary)
+    assert requests[0].body_start == doc.native.notice.body_start > 0
 
 
 def test_click_and_drop_tab_zip(window, tmp_path, monkeypatch):

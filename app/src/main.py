@@ -26,6 +26,8 @@ from app.src.playback import DEFAULT_FORWARD_SECONDS
 from app.src.settings_page import SettingsPage
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
+from app.src.notice_dialog import NoticeWizard, read_notice
+from app.src.notice_model import NoticeDetails
 
 
 class TranscriptEditor(QMainWindow):
@@ -134,6 +136,7 @@ class TranscriptEditor(QMainWindow):
         self.accept_all_preview_action.triggered.connect(self.toggle_accept_all_preview)
         self.edit_btn, edit = self._menu_button('Edit', row)
         edit.addAction('Attach WAV...', lambda: self.choose_wav(self.tabs.currentIndex()))
+        self.notice_action = edit.addAction('Attach or replace notice PDF…', lambda: self.attach_notice(self.current))
         self.undo_review_action = edit.addAction('Undo review', lambda: self.current.undo_review())
         self.addAction(self.undo_review_action)
         edit.addAction('Redo review', lambda: self.current.redo_review())
@@ -215,6 +218,8 @@ class TranscriptEditor(QMainWindow):
 
         page.ai_review_enabled.setChecked(self._load_setting('ai_review/enabled', True))
         page.ai_review_enabled.toggled.connect(lambda checked: self._set_setting('ai_review/enabled', checked))
+        page.recognize_file_number.setChecked(self._load_setting('notice/recognize_file_number', False))
+        page.recognize_file_number.toggled.connect(lambda checked: self._set_setting('notice/recognize_file_number', checked))
         review_model = self._load_setting('ai_review/model', DEFAULT_REVIEW_MODEL)
         review_model = review_model if review_model in MODELS else DEFAULT_REVIEW_MODEL
         page.ai_review_model.setCurrentIndex(page.ai_review_model.findData(review_model))
@@ -283,6 +288,7 @@ class TranscriptEditor(QMainWindow):
         if document.native:
             view = DocumentView(document, disabled_auto_accept_rules=self.disabled_auto_accept_rules,
                                 forward_seconds=self.settings_page.forward_seconds.value())
+            view.notice_requested.connect(self._attach_requested_notice)
             view.diff_view.selection_changed.connect(self._update_suggestion_actions)
         else:
             view = ImportView(document)
@@ -310,6 +316,8 @@ class TranscriptEditor(QMainWindow):
         tooltip = f'Project: {doc.save_path or "Unsaved"}\nWAV: {doc.wav_path or "No audio"}'
         if doc.native:
             tooltip += f'\nCaseCAT job: {doc.native.job.key}'
+            if doc.native.notice:
+                tooltip += f'\nNotice: {doc.native.notice.filename}'
         else:
             tooltip += '\nClick or drop a CaseCAT ZIP to import.'
         if doc.status:
@@ -344,6 +352,7 @@ class TranscriptEditor(QMainWindow):
         busy = bool(doc and doc.busy)
         editable = isinstance(view, DocumentView) and not busy
         self.edit_btn.setEnabled(editable)
+        self.notice_action.setEnabled(editable)
         pending_review = isinstance(view, DocumentView) and bool(view.review_model.edits)
         self.undo_review_action.setShortcut(QKeySequence(QKeySequence.Undo) if pending_review else QKeySequence())
         self.undo_review_action.setEnabled(editable)
@@ -495,10 +504,57 @@ class TranscriptEditor(QMainWindow):
             self.tabs.setCurrentIndex(index)
             view.deleteLater()
             self.document_changed(replacement)
+            replacement.offer_notice()
             self.persist_session()
             return True
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, 'Could not import CaseCAT ZIP', str(exc))
+            return False
+
+    def _attach_requested_notice(self):
+        self.attach_notice(self.sender())
+
+    def attach_notice(self, view):
+        if not isinstance(view, DocumentView) or view.document.busy:
+            return False
+        doc, state = view.document, view.document.native
+        folder = Path(state.bundle.source_path).parent if state.bundle.source_path else ''
+        filename, _ = QFileDialog.getOpenFileName(self, 'Attach notice PDF', str(folder), 'PDF documents (*.pdf *.PDF)')
+        if not filename:
+            return False
+        try:
+            from app.src.casecat.cover import existing_cover
+            pdf, extracted = read_notice(filename, self)
+            bundle, job = state.edited_job(state.original)
+            known, pages, _ = existing_cover(bundle, job)
+            # The native text supplies manual changes made since the last notice.
+            prior = state.notice.details.to_dict() if state.notice else {}
+            existing = NoticeDetails.from_dict({**prior, **known})
+            wizard = NoticeWizard(filename, extracted, existing, state.recording,
+                                  self.settings_page.recognize_file_number.isChecked(), self,
+                                  previously_attached=state.notice is not None)
+            try:
+                if not wizard.exec():
+                    return False
+                details = wizard.details()
+            finally:
+                wizard.deleteLater()
+            native = state.with_notice(filename, pdf, details, pages)
+            from dataclasses import replace
+            view.capture_position()
+            candidate = replace(doc, native=native, dirty=True, status='Notice applied.')
+            replacement = self._create_document_view(candidate)
+            index = self.tabs.indexOf(view)
+            self._last_view = None
+            self.tabs.removeTab(index)
+            self.tabs.insertTab(index, replacement, candidate.title)
+            self.tabs.setCurrentIndex(index)
+            view.deleteLater()
+            self.document_changed(replacement)
+            self.persist_session()
+            return True
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not apply notice PDF', str(exc))
             return False
 
     def export_casecat(self):
@@ -658,7 +714,10 @@ class TranscriptEditor(QMainWindow):
                               review_model=(self.settings_page.ai_review_model.currentData()
                                             if self.settings_page.ai_review_enabled.isChecked() else None),
                               disabled_rules=frozenset(self.disabled_auto_accept_rules),
-                              bundle=doc.native.bundle, job=doc.native.job)
+                              bundle=doc.native.bundle, job=doc.native.job,
+                              body_start=doc.native.body_position(doc.native.original),
+                              vocabulary=(doc.native.notice.details.with_current_names(doc.native.original).vocabulary()
+                                          if doc.native.notice else ()))
             view.set_busy(True)
             doc.status = 'Starting...'
             doc.update_warnings()

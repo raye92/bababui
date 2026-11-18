@@ -9,7 +9,8 @@ import wave
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from app.src.audio_pipeline import AudioPipeline
+from app.src.audio_pipeline import AudioPipeline, check_wav_digest
+from app.src.vocabulary_reconciliation import normalized_vocabulary
 from app.src.ai_review import AssistedReview, review_edits
 from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
@@ -36,25 +37,37 @@ class TranscriptionCoordinator:
         self._lock = Lock()
         self._active = {}
 
-    def run(self, path, model, pipeline, progress):
+    def run(self, path, model, pipeline, progress, *, vocabulary=()):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != '.wav':
             raise ValueError('Choose an existing .wav file.')
         with path.open('rb') as stream:
             key = (hashlib.file_digest(stream, 'sha256').hexdigest(), model)
+        vocabulary = normalized_vocabulary(vocabulary)
         with self._lock:
-            future = self._active.get(key)
+            if key not in self._active:
+                self._active[key] = Lock(), {}
+            recording_lock, contexts = self._active[key]
+            sharing = bool(contexts)
+            future = contexts.get(vocabulary)
             leader = future is None
             if leader:
-                future = Future()
-                self._active[key] = future
-        if not leader:
+                contexts[vocabulary] = future = Future()
+        if sharing:
             progress('Waiting for shared transcription...')
-            return future.result()
+        if not leader:
+            result = future.result()
+            check_wav_digest(path, key[0])
+            return result
         try:
-            result = pipeline.run(path, progress)
-            if result.wav_sha256 != key[0]:
-                raise ValueError('The WAV changed during transcription. Run BABABUI again.')
+            # Another tab may use the same base cache with different names.
+            with recording_lock:
+                if sharing:
+                    check_wav_digest(path, key[0])
+                kwargs = {'vocabulary': vocabulary} if vocabulary else {}
+                result = pipeline.run(path, progress, **kwargs)
+                if result.wav_sha256 != key[0]:
+                    raise ValueError('The WAV changed during transcription. Run BABABUI again.')
             future.set_result(result)
             return result
         except Exception as exc:
@@ -62,7 +75,9 @@ class TranscriptionCoordinator:
             raise
         finally:
             with self._lock:
-                self._active.pop(key, None)
+                del contexts[vocabulary]
+                if not contexts:
+                    del self._active[key]
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,8 @@ class Request:
     disabled_rules: frozenset[str] = frozenset()
     bundle: object = None
     job: object = None
+    vocabulary: tuple[str, ...] = ()
+    body_start: int = 0
 
 
 class ProcessingWorker(QThread):
@@ -104,7 +121,8 @@ class ProcessingWorker(QThread):
                                              testing=request.config.get('testing', False))
             report = lambda message: self.progress.emit(request.document_id, message)
             report('Checking WAV...')
-            transcription = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report)
+            transcription = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report,
+                                                 vocabulary=request.vocabulary)
             text, warnings = transcription.text, list(transcription.warnings)
             report('Saving raw transcription...')
             save_raw_transcription(request.wav_path, text)
@@ -139,13 +157,25 @@ class ProcessingWorker(QThread):
             times = timing.stroke_ms
         except (ValueError, OSError, wave.Error, EOFError):
             times = (None,) * len(request.job.stroke_clocks)
-        return align_speech(request.original or request.job.baseline, times, transcription.words,
+        original = request.original or request.job.baseline
+        if request.body_start:
+            from app.src.notice_review import split_revision
+            _, original = split_revision(original, request.body_start)
+        return align_speech(original, times, transcription.words,
                             transcription.duration_ms, transcription.wav_sha256)
 
     def _review(self, text, report):
         request = self.request
-        state = SimpleNamespace(original=request.original)
-        off_record_undo = begin_review(state, text, exclude_off_record='off_record' not in request.disabled_rules)
+        from app.src.notice_review import split_revision, joined_snapshot, response_body
+        from app.src.suggestion_filter import index_speaker_fields
+        head = None
+        original = request.original
+        if request.body_start:
+            head, original = split_revision(original, request.body_start)
+            text = response_body(head.text, text)
+        state = SimpleNamespace(original=original)
+        off_record_undo = begin_review(state, text, exclude_off_record='off_record' not in request.disabled_rules,
+                                       index_fields=index_speaker_fields(head) if head is not None else None)
         before_rules = state.original, state.incoming, state.review
         auto_accept(state, disabled_rules=request.disabled_rules)
         after_rules = state.original, state.incoming, state.review
@@ -163,6 +193,9 @@ class ProcessingWorker(QThread):
         except (OSError, ValueError):
             after_ai = after_rules
             summary = 'AI-assisted review could not be applied and recorded. Edits remain pending.'
+        if head is not None:
+            off_record_undo, before_rules, after_rules, after_ai = (
+                joined_snapshot(head, head, snapshot) for snapshot in (off_record_undo, before_rules, after_rules, after_ai))
         return AssistedReview(request.original, off_record_undo, before_rules, after_rules, after_ai, summary)
 
 

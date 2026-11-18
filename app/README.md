@@ -24,11 +24,10 @@ the system temp folder under `bababui-transcriptions`. The default is `FALSE`.
 The fixed toolbar contains File, Edit, and Settings on the left, and BABABUI
 and Show Incoming on the right. These controls act on the selected tab.
 
-Create a tab with **Ctrl+T** or **+**. A tab without audio has a dotted outline:
-click its header to open File Explorer, or drop one WAV onto it. Its title becomes
-the WAV filename until saved. Right-click a tab to duplicate it, replace its WAV,
-or close it. Duplicates keep the text, pending revisions, WAV, and model settings,
-but start as unsaved versions with no running request.
+Create a tab with **Ctrl+T** or **+**. Click the empty tab or drop a Case CATalyst
+ZIP onto it. The editor uses the WAV in the job. You can also attach a WAV after
+import. Duplicating a tab keeps its transcript, pending revisions, audio, notice,
+and model settings.
 
 BABABUI validates the WAV, transcribes it with Gemini 3.5 Transcribe and speaker
 tags, and automatically saves the raw speaker-labeled text beside the WAV as
@@ -45,14 +44,32 @@ for identical audio share transcription, then format independently. Background
 results and warnings stay in their own tabs. Wait for a tab to finish before
 closing it, and for all requests to finish before exiting.
 
-WAVs must be no longer than 1 hour 28 minutes. The app uses up to three
-30-minute chunks that start at 0:00, 29:00, and 58:00, with a one-minute overlap.
+WAVs can be up to 1 hour 57 minutes long. Speaker labels and word timing use up
+to four 30-minute chunks starting at minutes 0, 29, 58, and 87. With confirmed
+notice names, custom vocabulary uses up to two independent 60-minute chunks,
+starting at minutes 0 and 59. A 60-minute recording needs one vocabulary
+request. Both schedules overlap by one minute.
 If a transcription request returns HTTP 429, the app waits 60 seconds and retries
 that chunk once. Word timestamps and tolerant text alignment match speakers and
 remove repeated words at each join. An unmatched speaker receives a new label.
 If alignment is uncertain and both chunks have timestamps, the app joins them
 at the midpoint of the overlap. Review the warnings and resulting transcript.
 Timestamps are used internally and do not appear in Incoming.
+
+## Notice PDFs
+
+After importing a Case CATalyst ZIP, choose **Upload notice PDF** or **Skip**.
+Use **Edit > Attach or replace notice PDF** to add a notice later. The editor
+reads text, annotations, and scanned pages locally. Review the caption and file
+number, taking side and recording time, appearances, and examiner names.
+Settings can prefill the file number from a filename such as
+`261110thaler 1757905.pdf`. This setting is off by default.
+
+Applying a notice fills the native cover and keeps manual examination page
+numbers and exhibit entries. Testimony begins on page 5, line 11. The working
+project and session recovery retain the notice. Confirmed names help the audio model recognize
+the participants, firms, witness and caption parties. The speaker-labeled raw
+export and formatting use the reconciled spellings.
 
 Each tab remembers its processing model: Gemini 4 Argon (default), Gemini 3.8
 Flash, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model

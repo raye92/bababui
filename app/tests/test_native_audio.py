@@ -369,6 +369,24 @@ def set_playback_state(player, state):
     return player.playbackState()
 
 
+def test_replacing_notice_view_while_audio_is_loading_does_not_stop_the_decoder():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from PySide6.QtMultimedia import QMediaPlayer
+    from app.src.playback import PlaybackBar
+    player = Mock()
+    player.playbackState.return_value = QMediaPlayer.StoppedState
+    player.position.return_value = 0
+    bar = SimpleNamespace(player=player, clear_highlight=Mock(), _pending_seek=2200)
+    PlaybackBar.stop(bar)
+    player.stop.assert_not_called()
+    assert bar._pending_seek is None
+    bar.clear_highlight.assert_called_once()
+    player.position.return_value = 2200
+    PlaybackBar.stop(bar)
+    player.stop.assert_called_once()
+
+
 @pytest.mark.parametrize('decision', ['Accept', 'Reject'])
 @pytest.mark.parametrize('state', ['paused', 'playing'])
 @pytest.mark.parametrize('remaining', [True, False])

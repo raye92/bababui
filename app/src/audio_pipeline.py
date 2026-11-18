@@ -3,7 +3,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher
 import hashlib
-from itertools import count
+from itertools import chain, count
 import json
 import math
 from pathlib import Path
@@ -12,6 +12,7 @@ import tempfile
 import time
 
 from app.src.speech_alignment import recover_word_times
+from app.src.vocabulary_reconciliation import normalized_vocabulary, reconcile_vocabulary
 from shared import media
 from shared.transcription import GeminiTranscriber
 from shared.storage import file_lock
@@ -21,7 +22,8 @@ AUDIO_MODEL = 'gemini-3.5-transcribe'
 CHUNK_SECONDS = 30 * 60
 OVERLAP_SECONDS = 60
 CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
-MAX_CHUNKS = 3
+MAX_DURATION = CHUNK_SECONDS + 3 * CHUNK_STEP
+VOCABULARY_SECONDS = 60 * 60
 TIMING_CLIP_SECONDS = 5 * 60
 
 
@@ -42,18 +44,18 @@ class Transcription:
     wav_sha256: str
 
 
-def segments(duration):
-    max_duration = CHUNK_SECONDS + (MAX_CHUNKS - 1) * CHUNK_STEP
-    if not math.isfinite(duration) or not 0 < duration <= max_duration:
-        raise ValueError('Choose a WAV recording longer than 0 seconds and at most 1 hour 28 minutes.')
+def segments(duration, *, vocabulary=False):
+    if not math.isfinite(duration) or not 0 < duration <= MAX_DURATION:
+        raise ValueError('Choose a WAV recording longer than 0 seconds and at most 1 hour 57 minutes.')
+    length = VOCABULARY_SECONDS if vocabulary else CHUNK_SECONDS
     plan = []
-    for index in range(MAX_CHUNKS):
-        start = index * CHUNK_STEP
-        end = min(start + CHUNK_SECONDS, duration)
+    start = 0
+    while True:
+        end = min(start + length, duration)
         plan.append((start, end))
         if end == duration:
-            break
-    return plan
+            return plan
+        start = end - OVERLAP_SECONDS
 
 
 def parse_words(response, *, timestamps=True):
@@ -99,7 +101,7 @@ def parse_words(response, *, timestamps=True):
     return words
 
 
-def _check_wav(path, digest):
+def check_wav_digest(path, digest):
     with path.open('rb') as stream:
         if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
             raise ValueError('The WAV changed during transcription. Run BABABUI again.')
@@ -127,6 +129,11 @@ def _seam_positions(words, default):
 
 
 def stitch(chunks):
+    kept, warnings = _stitched_chunks(chunks)
+    return tuple(chain.from_iterable(kept)), warnings
+
+
+def _stitched_chunks(chunks):
     speakers = dict.fromkeys(w.speaker for w in chunks[0] if w.speaker is not None)
     labels = {speaker: f'Speaker {i}' for i, speaker in enumerate(speakers, 1)}
     next_label = count(len(labels) + 1)
@@ -138,10 +145,10 @@ def stitch(chunks):
                     for w in chunk]
         # Only the previous chunk participates in the next overlap.
         kept, tail, seam_warnings = _join_overlap(tail, incoming, index + 1, start, next_label)
-        combined.extend(kept)
+        combined.append(kept)
         warnings.extend(seam_warnings)
-    combined.extend(tail)
-    return tuple(combined), warnings
+    combined.append(tail)
+    return combined, warnings
 
 
 def _join_overlap(a, b, chunk_number, start, next_label):
@@ -221,11 +228,13 @@ def save_json(path, data):
 
 class AudioPipeline:
     def __init__(self, key, cache, sdk=None, *, testing=False):
-        self.client = GeminiTranscriber(key, sdk)
+        # Interactions retries 429 internally even with attempts=1 unless it is excluded.
+        self.client = GeminiTranscriber(key, sdk, retry_options={
+            'attempts': 1, 'http_status_codes': [408, 409, 500, 502, 503, 504]})
         self.cache = Path(cache)
         self.testing = testing
 
-    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False):
+    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False, vocabulary=()):
         sdk = self.client.client()
         uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav'})
         deadline = time.monotonic()+300
@@ -236,15 +245,19 @@ class AudioPipeline:
             uploaded = sdk.files.get(name=uploaded.name)
         if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
             raise ValueError('Audio upload processing failed.')
-        for timestamps in ((True,) if timing_only else (True, False)):
-            mode = {'type': 'verbatim', 'diarization_mode': 'speaker'}
-            if timestamps:
-                mode['timestamp_granularities'] = ['word']
+        if vocabulary:
+            configs = [{'mode': {'type': 'verbatim'}, 'custom_vocabulary': list(vocabulary)}]
+        else:
+            speaker = {'type': 'verbatim', 'diarization_mode': 'speaker'}
+            configs = [{'mode': {**speaker, 'timestamp_granularities': ['word']}}]
+            if not timing_only:
+                configs.append({'mode': speaker})
+        for config in configs:
             for attempt in range(2):
                 try:
                     response = sdk.interactions.create(model=AUDIO_MODEL,
                         input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
-                        generation_config={'max_output_tokens': 16384, 'transcription_config': {'mode': mode}},
+                        generation_config={'max_output_tokens': 16384, 'transcription_config': config},
                         automatic_continuation=False, timeout=1800)
                     break
                 except Exception as exc:
@@ -259,7 +272,7 @@ class AudioPipeline:
             status = getattr(response.status, 'value', response.status)
             if status == 'completed':
                 try:
-                    return parse_words(response, timestamps=timestamps)
+                    return parse_words(response, timestamps='timestamp_granularities' in config['mode'])
                 except ValueError:
                     if timing_only:
                         return []  # A short clip can be silent or have unusable annotations.
@@ -286,7 +299,7 @@ class AudioPipeline:
             for block in getattr(step, 'content', None) or []
             if getattr(block, 'type', None) == 'text'), encoding='utf-8')
 
-    def run(self, path, progress=lambda message: None):
+    def run(self, path, progress=lambda message: None, *, vocabulary=()):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != '.wav':
             raise ValueError('Choose an existing .wav file.')
@@ -297,9 +310,9 @@ class AudioPipeline:
         plan = segments(duration)
         directory = self.cache / AUDIO_MODEL / 'overlap-v1' / digest
         with file_lock(directory / 'cache.lock'):
-            return self._run_locked(path, plan, directory, progress, digest)
+            return self._run_locked(path, plan, directory, progress, digest, normalized_vocabulary(vocabulary))
 
-    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False):
+    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False, vocabulary=()):
         if cached.exists():
             words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
         else:
@@ -313,9 +326,11 @@ class AudioPipeline:
                         # A failed optional API call must leave the completed transcript usable.
                         progress('Word timing request failed. Keeping the completed transcription.')
                         return None
+                elif vocabulary:
+                    words = self.transcribe_segment(prepared, progress, vocabulary=vocabulary)
                 else:
                     words = self.transcribe_segment(prepared, progress)
-            _check_wav(path, digest)
+            check_wav_digest(path, digest)
         words = [w if (w.start is not None and w.end is not None and 0 <= w.start <= w.end <= end - start)
                  else replace(w, start=None, end=None) for w in words]
         if not cached.exists() and (not timing_only or any(w.start is not None for w in words)):
@@ -335,10 +350,29 @@ class AudioPipeline:
                                 if w.start is not None else w for w in clip)
         return recover_word_times(words, observations)
 
-    def _run_locked(self, path, plan, directory, progress, digest):
+    def _vocabulary_windows(self, path, duration, progress, digest, vocabulary):
+        key = hashlib.sha256(json.dumps((digest, vocabulary), ensure_ascii=False).encode('utf-8')).hexdigest()
+        directory = self.cache / AUDIO_MODEL / 'vocabulary-v1' / key
+        plan = segments(duration, vocabulary=True)
+        windows, warnings = [], []
+        for i, (start, end) in enumerate(plan, 1):
+            progress(f'Transcribing vocabulary window {i} of {len(plan)}...')
+            try:
+                words = self._segment_words(path, start, end, directory / f'window-{i}.json',
+                                            progress, digest, vocabulary=vocabulary)
+            except Exception:
+                check_wav_digest(path, digest)
+                warning = f'Vocabulary window {i} of {len(plan)} failed. Kept the speaker transcription for this window.'
+                progress(warning)
+                warnings.append(warning)
+                continue
+            windows.append((start, end, ' '.join(w.text for w in words)))
+        return windows, warnings
+
+    def _run_locked(self, path, plan, directory, progress, digest, vocabulary):
         chunks, timing_warnings = [], []
         for i, (start, end) in enumerate(plan):
-            progress(f'Transcribing chunk {i+1} of {len(plan)}...')
+            progress(f'Transcribing speaker and timing chunk {i+1} of {len(plan)}...')
             words = self._segment_words(path, start, end, directory / f'chunk-{i}.json', progress, digest)
             if not any(w.start is not None for w in words):
                 progress(f'Recovering word timestamps for chunk {i+1} from shorter audio clips...')
@@ -347,9 +381,17 @@ class AudioPipeline:
             if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
-        words, warnings = stitch(chunks)
+        retained, warnings = _stitched_chunks(chunks)
+        words = tuple(chain.from_iterable(retained))
+        if vocabulary:
+            windows, vocabulary_warnings = self._vocabulary_windows(path, plan[-1][1], progress, digest, vocabulary)
+            warnings.extend(vocabulary_warnings)
+            if windows:
+                progress('Matching names and firms to the speaker transcription...')
+                ranges = [interval for chunk, interval in zip(retained, plan) for _ in chunk]
+                words = reconcile_vocabulary(words, ranges, windows, vocabulary)
         text = render(words)
         if not text.strip():
             raise ValueError('Transcription returned no usable text.')
-        _check_wav(path, digest)
+        check_wav_digest(path, digest)
         return Transcription(text, words, tuple(timing_warnings + warnings), int(plan[-1][1] * 1000), digest)

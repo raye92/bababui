@@ -1,7 +1,7 @@
 """Local WAV playback with native passage timing and non-editing highlighting."""
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, QSignalBlocker
+from PySide6.QtCore import Qt, QUrl, QSignalBlocker, Slot
 from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QPushButton, QLabel, QSlider,
@@ -104,7 +104,7 @@ class PlaybackBar(QWidget):
         self.player.durationChanged.connect(self._duration)
         self.player.playbackStateChanged.connect(self._state)
         self.player.mediaStatusChanged.connect(self._loaded)
-        self.player.errorOccurred.connect(lambda _error, message: self._error(message))
+        self.player.errorOccurred.connect(self._error, Qt.QueuedConnection)
         self.player.setSource(QUrl.fromLocalFile(str(Path(wav_path).resolve())))
 
     def _duration(self, duration):
@@ -119,7 +119,8 @@ class PlaybackBar(QWidget):
             position, self._pending_seek = self._pending_seek, None
             self.player.setPosition(position)
 
-    def _error(self, message):
+    @Slot(QMediaPlayer.Error, str)
+    def _error(self, _error, message):
         print(f'Audio playback: {message}')
         self.clock.setText('Audio unavailable')
         self.clock.setToolTip(message)
@@ -171,7 +172,9 @@ class PlaybackBar(QWidget):
 
     def stop(self):
         self._pending_seek = None
-        self.player.stop()
+        # Hiding or replacing a tab can happen while its WAV is still loading.
+        if self.player.playbackState() != QMediaPlayer.StoppedState or self.player.position():
+            self.player.stop()
         self.clear_highlight()
 
     def clear_highlight(self):

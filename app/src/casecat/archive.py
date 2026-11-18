@@ -1,5 +1,5 @@
 """Immutable ZIP assets and atomic, validated export."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from copy import copy
 from functools import cached_property
 import hashlib
@@ -37,6 +37,7 @@ class Archive:
     source_path: str | None
     members: tuple[str, ...]
     jobs: tuple[str, ...]
+    overrides: tuple[tuple[str, bytes], ...] = ()
 
     @cached_property
     def digest(self):
@@ -51,8 +52,23 @@ class Archive:
         return next((name for name in self.members if name.casefold() == requested.casefold()), None)
 
     def read(self, name):
+        for member, payload in self.overrides:
+            if member == name:
+                return payload
         with zipfile.ZipFile(io.BytesIO(self.data)) as source:
             return source.read(name)
+
+    def with_job_bytes(self, key, native, metadata):
+        if key not in self.jobs:
+            raise ValueError('Unknown CaseCAT job.')
+        overrides = dict(self.overrides)
+        overrides[self.member(key + '.sgngl')] = native
+        xml = self.member(key + '.sgxml')
+        if xml and metadata is not None:
+            overrides[xml] = metadata
+        result = replace(self, overrides=tuple(overrides.items()))
+        result.__dict__['digest'] = self.digest
+        return result
 
 
 def inspect_archive(source, *, name='CaseCAT.zip', source_path=None):
@@ -173,7 +189,7 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False, alignment
     if alignment is not None:
         from .retiming import retime_export
         serialized, notes, expected_stroke_ms = retime_export(bundle, job, serialized, metadata, alignment)
-    changed = {}
+    changed = dict(bundle.overrides)
     if serialized != job.native_bytes:
         changed[native_member] = serialized
     if metadata_member and metadata != bundle.read(metadata_member):

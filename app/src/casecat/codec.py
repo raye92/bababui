@@ -4,8 +4,9 @@ import struct
 import xml.etree.ElementTree as ET
 
 from .anchors import AnchoredSpan, Revision
-from .rendering import TextRenderer
+from .rendering import TextRenderer, render_record
 from .elements import NativeElement, field_name
+from .caption import CAPTION_NAMES, cover_end, is_cell
 
 
 RENDERING_NOTICE = ('CaseCAT native editing. New wording uses source passage timing until audio is aligned. '
@@ -106,21 +107,26 @@ def load_job(bundle, key):
     stroke = 0
     original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
     stroke_clocks = []
-    renderer = TextRenderer(all_caps=all_caps)
+    end_cover = cover_end(native)
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover))
     from .field_table import field_texts
     has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
     try:
         definitions = field_texts(native)
+        field_display = field_texts(native, display=True)
     except ValueError:
         if has_fields:
             raise
         definitions = {}  # Retain an unknown section when no field uses it.
+        field_display = {}
 
     def flush():
         if refs or content or audio or formatting:
             spans.append(AnchoredSpan(f'source-{len(spans)}', refs, tuple(audio), ''.join(content), tuple(formatting)))
 
     for offset, raw in records(native, start, start + length):
+        if renderer.cover_tables and offset >= end_cover:
+            renderer.cover_tables = False
         before, part_count = content_length, len(content)
         op = raw[0]
         if op == 0x13:
@@ -164,11 +170,14 @@ def load_job(bundle, key):
             formatting.append(raw.hex())
         elif op == 0x15 and raw[1] == 8:
             audio.append(raw.hex())
+        elif renderer.cover_tables and (is_cell(raw) or op in (9, 10)):
+            content.append(render_record(renderer, raw, {}))
+            formatting.append(raw.hex())
         elif op == 0x15 and raw[1] == 7:
             label = raw[10:].rstrip(b'\0').decode('cp1252')
             if label in definitions:
                 value = definitions[label]
-                content.append(renderer.literal(value or f'[!{label}]'))
+                content.append(renderer.literal(field_display[label] or f'[!{label}]'))
             elif label.startswith('EZ SPEAKER '):
                 number = str(int(label.removeprefix('EZ SPEAKER ')))
                 value = speakers.get(number, f'[{label}]')
@@ -186,7 +195,8 @@ def load_job(bundle, key):
         content_length = after
         if op == 0x15 and raw[1] == 7:
             elements.append(NativeElement(position + before, position + after, 'field',
-                                          raw.hex(), field_name(raw), offset, value))
+                                          raw.hex(), field_name(raw), offset, value,
+                                          bool(end_cover) and label in CAPTION_NAMES, renderer.uppercase))
         elif op == 0x16 and int.from_bytes(raw[1:], 'little') in (2, 3):
             prefix = content[-1]
             elements.append(NativeElement(position + before + int(prefix.startswith('\n')),

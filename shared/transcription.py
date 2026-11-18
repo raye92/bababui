@@ -48,8 +48,9 @@ def speaker_text(response):
 
 
 class GeminiTranscriber:
-    def __init__(self, key, sdk=None):
+    def __init__(self, key, sdk=None, *, retry_options=None):
         self.key, self.sdk = key, sdk
+        self.retry_options = {"attempts": 1} if retry_options is None else retry_options
         self.api_seconds = 0.0
 
     def client(self):
@@ -58,7 +59,7 @@ class GeminiTranscriber:
         if self.sdk is None:
             from google import genai
             self.sdk = genai.Client(api_key=self.key, http_options={"timeout": 1800000,
-                                       "retry_options": {"attempts": 1}})
+                                       "retry_options": self.retry_options})
         return self.sdk
 
     def delete(self, name):

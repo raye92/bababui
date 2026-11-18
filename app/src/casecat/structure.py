@@ -19,6 +19,7 @@ from app.src.suggestion_filter import LABEL
 from .codec import records, u32, validate_job
 from .layout import read_layouts
 from .rendering import TextRenderer, render_record
+from .caption import caption_display, caption_value, cover_end
 
 
 @dataclass(frozen=True)
@@ -39,16 +40,19 @@ def rendering_settings(job, bundle):
                        for node in root.iter())
     if any(e.kind == 'field' for e in job.baseline.elements):
         from .field_table import field_texts
-        speakers.update(field_texts(job.native_bytes))
+        speakers.update(field_texts(job.native_bytes, display=True))
     return speakers, all_caps
 
 
 def projected_groups(job, bundle):
     speakers, all_caps = rendering_settings(job, bundle)
-    renderer = TextRenderer(all_caps=all_caps)
+    end_cover = cover_end(job.native_bytes)
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover))
     start, length = u32(job.native_bytes, 532), u32(job.native_bytes, 536)
     groups, group = [], []
     for offset, raw in records(job.native_bytes, start, start + length):
+        if renderer.cover_tables and offset >= end_cover:
+            renderer.cover_tables = False
         op = raw[0]
         if op == 0x13 and group:
             groups.append(group)
@@ -132,7 +136,7 @@ def group_targets(job):
 
 def encode_text(text, *, paragraph_start=False, atoms=None):
     """Encode editable wording and supported paragraph starts in Windows-1252."""
-    if any(ord(c) < 32 and c != '\n' for c in text):
+    if any(ord(c) < 32 and c not in '\n\t' for c in text):
         raise ValueError('Native text contains an unsupported control character.')
     result = bytearray()
     atoms = atoms or {}
@@ -406,7 +410,10 @@ def serialize_candidate(job, bundle):
     from .fields import field_values
     values = field_values(job.revision)
     baseline_values = field_values(job.baseline)
-    speakers.update(values)
+    end_cover = cover_end(job.native_bytes)
+    wrapped = bool(end_cover)
+    speakers.update({name: caption_display(caption_value(name, value)) if wrapped else value for name, value in values.items()
+                     if value != baseline_values.get(name)})
     # Match native elements by identity, not by the letters displayed inside
     # them. A field value edit must never turn its reference into literal text.
     original_elements = {e.source: e for e in job.baseline.elements}
@@ -424,7 +431,7 @@ def serialize_candidate(job, bundle):
     colloquy_indents = (_colloquy_indents(text, elements, element_starts)
                        if layouts and len(layouts[0].paragraphs) >= 4 else {})
     indent_end = 0
-    renderer, visible = TextRenderer(all_caps=all_caps), 0
+    renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
     for group, target in zip(groups, targets):
         stop = cursor + len(target)
         first = bisect_left(element_starts, cursor)
@@ -443,6 +450,8 @@ def serialize_candidate(job, bundle):
             masked.append(token)
         cursor = stop
         for token, generated, retained in rewrite_group(masked, target, paragraph_start=visible == 0, atoms=atoms):
+            if renderer.cover_tables and token.offset >= end_cover:
+                renderer.cover_tables = False
             encoded = bytearray()
             rewritten = generated + retained
             for record_start, raw in records(rewritten, 0, len(rewritten)):
@@ -489,4 +498,4 @@ def serialize_candidate(job, bundle):
             raise ValueError('Native serialization changed original stroke or audio records.')
     from .field_table import rewrite_fields
     return rewrite_fields(result, {name: value for name, value in values.items()
-                                  if value != baseline_values.get(name)})
+                                  if value != baseline_values.get(name)}, wrap_captions=wrapped)

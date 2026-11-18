@@ -558,7 +558,8 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
     settings = settings_page(native_window)
     assert settings.ai_review_enabled.isChecked()
     model = settings.ai_review_model
-    assert model.currentText() == 'Gemini 3.8 Flash'
+    from app.src.ai_review import DEFAULT_REVIEW_MODEL
+    assert model.currentData() == DEFAULT_REVIEW_MODEL
     model.setCurrentIndex(model.findText('DeepSeek V4 Pro'))
     native_window.run_bababui()
     deadline = time.monotonic() + 5

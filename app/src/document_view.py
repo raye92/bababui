@@ -3,7 +3,7 @@ from bisect import bisect_right
 from copy import deepcopy
 from PySide6.QtCore import Signal, Slot, QThread, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit, QMessageBox
 from app.src.accept_all_preview import AcceptAllPreviewEditor, AcceptAllPreviewTask, PreviewSignals
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
@@ -15,7 +15,8 @@ from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, Playba
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
-from app.src.suggestion_filter import begin_review, override_speaker, track_decisions, auto_accept, questionable_speaker_defaults
+from app.src.suggestion_filter import override_speaker, track_decisions, questionable_speaker_defaults
+from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
 
 
@@ -64,6 +65,7 @@ class ReviewPreviewWorker(QThread):
 
 class DocumentView(QWidget):
     changed = Signal()
+    notice_requested = Signal()
 
     def __init__(self, document, *, disabled_auto_accept_rules=frozenset(), forward_seconds=DEFAULT_FORWARD_SECONDS):
         super().__init__()
@@ -76,7 +78,7 @@ class DocumentView(QWidget):
         from app.src.suggestion_filter import LABEL, GENERIC
         if (document.native.review is None and document.native.original != document.native.incoming
                 and any((m := LABEL.match(p)) and GENERIC.fullmatch(m['name']) for p in document.incoming.split('\n'))):
-            automatic_before = begin_review(document.native, document.native.incoming.text,
+            automatic_before = begin_document_review(document.native, document.native.incoming.text, full_document=True,
                                             exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
         self._updating = False
         self._position_pending = True
@@ -154,6 +156,20 @@ class DocumentView(QWidget):
         self.refresh()
         self.stack.setCurrentIndex(document.view)
         self.schedule_restore()
+
+    def offer_notice(self):
+        self.notice_offer = banner = QWidget(self)
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(8, 3, 8, 3)
+        row.addWidget(QLabel('Add a notice PDF to fill the cover?'))
+        upload, skip = QPushButton('Upload notice PDF'), QPushButton('Skip')
+        row.addWidget(upload)
+        row.addWidget(skip)
+        row.addStretch()
+        upload.clicked.connect(self.notice_requested)
+        skip.clicked.connect(banner.hide)
+        self.layout().insertWidget(0, banner)
+        banner.show()
 
     def setup_playback(self, layout):
         doc = self.document
@@ -749,7 +765,7 @@ class DocumentView(QWidget):
     def receive(self, text, warnings, alignment=None):
         self.capture_position()
         try:
-            automatic_before = begin_review(self.document.native, text,
+            automatic_before = begin_document_review(self.document.native, text,
                                             exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
         except ValueError as exc:
             self.document.status = str(exc)
@@ -801,7 +817,7 @@ class DocumentView(QWidget):
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
         original, incoming = state.original, state.incoming
-        records = auto_accept(state, disabled_rules=self.disabled_auto_accept_rules)
+        records = auto_accept_document(state, disabled_rules=self.disabled_auto_accept_rules)
         self._record_automatic_review(automatic_before, original, incoming, records)
 
     def _record_automatic_review(self, automatic_before, original, incoming, records):
@@ -819,6 +835,8 @@ class DocumentView(QWidget):
 
     def set_busy(self, busy):
         self.document.busy = busy
+        if hasattr(self, 'notice_offer'):
+            self.notice_offer.setEnabled(not busy)
         pending = self.document.native.original != self.document.native.incoming
         self.editor.setReadOnly(busy or pending)
         self.incoming_editor.setReadOnly(True)

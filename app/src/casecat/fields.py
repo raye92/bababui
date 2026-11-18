@@ -23,8 +23,9 @@ def speaker_values(revision):
             if speaker_number(name) is not None}
 
 
-def rendered_value(prefix, value, name='', *, all_caps=False):
+def rendered_value(prefix, value, name='', *, all_caps=False, wrap_caption=False):
     from .rendering import TextRenderer
+    from .caption import caption_value, caption_display
     renderer = TextRenderer(all_caps=all_caps)
     for index, paragraph in enumerate(prefix.split('\n')):
         if index:
@@ -32,7 +33,8 @@ def rendered_value(prefix, value, name='', *, all_caps=False):
         if paragraph.startswith(('     Q    ', '     A    ')):
             paragraph = paragraph[10:]
         renderer.literal(paragraph)
-    return renderer.literal(value or f'[!{name}]')
+    display = caption_display(caption_value(name, value)) if wrap_caption else value
+    return renderer.literal(display or f'[!{name}]')
 
 
 def serialize_metadata(job, bundle):
@@ -41,6 +43,10 @@ def serialize_metadata(job, bundle):
     values = speaker_values(job.revision)
     baseline = speaker_values(job.baseline)
     changes = {key: value for key, value in values.items() if value != baseline.get(key)}
+    return update_speaker_xml(original, changes)
+
+
+def update_speaker_xml(original, changes):
     if not changes or original is None:
         return original
     # CATalyst writes UTF-8 XML. Patch only values, retaining comments, spacing,

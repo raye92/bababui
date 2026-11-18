@@ -39,6 +39,38 @@ def test_shared_transcription_one_call_and_same_outcome(tmp_path, fails):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('other_names', [(), ('Other',)])
+def test_changed_waiting_tab_does_not_receive_or_upload_a_different_recording(tmp_path, other_names):
+    first_wav, other_wav = (tmp_path / name for name in ('first.wav', 'other.wav'))
+    for wav in (first_wav, other_wav):
+        wav.write_bytes(b'first recording')
+    started, release, waiting = Event(), Event(), Event()
+    paths = []
+
+    class Pipeline:
+        def run(self, path, progress, **kwargs):
+            paths.append(path)
+            started.set()
+            assert release.wait(5)
+            return Transcription('Speech', (), (), 5000, sha256(path.read_bytes()).hexdigest())
+
+    coordinator = TranscriptionCoordinator()
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(coordinator.run, first_wav, 'model', Pipeline(), lambda _: None)
+        assert started.wait(5)
+        other = pool.submit(coordinator.run, other_wav, 'model', Pipeline(), lambda _: waiting.set(),
+                            vocabulary=other_names)
+        try:
+            assert waiting.wait(5)
+            other_wav.write_bytes(b'replacement')
+        finally:
+            release.set()
+        assert first.result(5).text == 'Speech'
+        with pytest.raises(ValueError, match='WAV changed'):
+            other.result(5)
+    assert paths == [first_wav]
+
+
 def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     import os
     import time

@@ -42,12 +42,14 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import re
 
-from app.src.casecat.elements import NativeElement
+from app.src.casecat.elements import NativeElement, speaker_number
 from app.src.casecat.fields import field_values
 from app.src.number_forms import equivalent_integer
 
 
-LABEL = re.compile(r'^(?P<prefix>[ \t]*(?:BY[ \t]+)?)(?P<name>SPEAKER\s+\d+|(?:MS|MR|MRS|DR)\. [^:\n]+|THE [^:\n]+):', re.I)
+_NAME_PATTERN = r'SPEAKER\s+\d+|(?:MS|MR|MRS|DR)\. [^:\n]+|THE [^:\n]+'
+_LABEL_PATTERN = r'^(?P<prefix>[ \t]*(?:BY[ \t]+)?)(?P<name>%s):'
+LABEL = re.compile(_LABEL_PATTERN % _NAME_PATTERN, re.I)
 GENERIC = re.compile(r'SPEAKER\s+(\d+)', re.I)
 
 PUNCTUATION = frozenset(',;:.?!-\u2013\u2014')
@@ -295,11 +297,11 @@ def auto_accept(state, *, disabled_rules=frozenset()):
     return review['automatic_changes']
 
 
-def _paragraphs(text, *, byline_context=True):
+def _paragraphs(text, *, byline_context=True, labels=LABEL):
     result, offset = [], 0
     parts = text.split('\n')
     for index, line in enumerate(parts):
-        label = LABEL.match(line)
+        label = labels.match(line)
         body = line[label.end():].strip() if label else re.sub(r'^[ \t]*[QA](?:[ \t]+|$)', '', line).strip()
         if byline_context and label and not body and 'BY' in label['prefix'].upper():
             body = next((re.sub(r'^\s*[QA]\s+', '', p).strip() for p in parts[index+1:] if p.strip()), '')
@@ -308,13 +310,13 @@ def _paragraphs(text, *, byline_context=True):
     return result
 
 
-def aligned_paragraphs(original, incoming):
+def aligned_paragraphs(original, incoming, *, labels=LABEL):
     from app.src.suggestions import _paragraph_ops
-    old, new = _paragraphs(original), _paragraphs(incoming)
+    old, new = _paragraphs(original, labels=labels), _paragraphs(incoming, labels=labels)
     # Borrowed byline wording is evidence for speaker attribution only. Using
     # it as another content anchor duplicates the following question.
-    left = [p[3] for p in _paragraphs(original, byline_context=False)]
-    right = [p[3] for p in _paragraphs(incoming, byline_context=False)]
+    left = [p[3] for p in _paragraphs(original, byline_context=False, labels=labels)]
+    right = [p[3] for p in _paragraphs(incoming, byline_context=False, labels=labels)]
     pairs = []
     for _, a, b, c, d in _paragraph_ops(left, right):
         if b-a == d-c:
@@ -341,7 +343,20 @@ class SpeakerChoice:
         return len(self.references) <= 1
 
 
-def _speaker_choices(paragraphs, fields):
+def index_speaker_fields(revision):
+    """Keep examiner references for reuse even before that lawyer speaks in the body."""
+    start = revision.text.find('I N D E X')
+    end = revision.text.find('E X H I B I T S', start) if start >= 0 else -1
+    return tuple(e for e in revision.elements if start <= e.start < end
+                 and e.kind == 'field' and speaker_number(e.name) and e.value)
+
+
+def _label_pattern(index_fields):
+    names = [re.escape(e.value) for e in index_fields or () if not LABEL.fullmatch(e.value + ':')]
+    return re.compile(_LABEL_PATTERN % '|'.join((_NAME_PATTERN, *names)), re.I) if names else LABEL
+
+
+def _speaker_choices(paragraphs, fields, index_fields=()):
     labels = {}
     for paragraph in paragraphs:
         label = paragraph[2]
@@ -351,6 +366,9 @@ def _speaker_choices(paragraphs, fields):
         _, references = labels.setdefault(speaker_name_key(name), (name, {}))
         if field := fields.get(_label_range(paragraph)):
             references.setdefault(field.name, field)
+    for field in index_fields or ():
+        _, references = labels.setdefault(speaker_name_key(field.value), (field.value, {}))
+        references.setdefault(field.name, field)
     return {key: SpeakerChoice(name, tuple(references.values()))
             for key, (name, references) in labels.items()}
 
@@ -360,9 +378,11 @@ def _field_ranges(revision):
 
 
 def speaker_choices(original):
-    """Offer labels used in the transcript, including literal labels."""
+    """Offer labels used in testimony and the confirmed examiner index."""
+    indexed = index_speaker_fields(original)
+    paragraphs = _paragraphs(original.text, labels=_label_pattern(indexed))
     return {key: choice for key, choice in
-            _speaker_choices(_paragraphs(original.text), _field_ranges(original)).items()
+            _speaker_choices(paragraphs, _field_ranges(original), indexed).items()
             if choice.selectable}
 
 
@@ -375,10 +395,10 @@ def _replace_speaker(revision, start, end, name, reference, values):
         if e.kind == 'field' and e.start == start else e for e in result.elements))
 
 
-def _restore_trailing(original, text):
+def _restore_trailing(original, text, *, labels=LABEL):
     from app.src.suggestions import text_edits
 
-    old, new, pairs = aligned_paragraphs(original.text, text)
+    old, new, pairs = aligned_paragraphs(original.text, text, labels=labels)
     edits = []
     for i, j in pairs:
         a, b = old[i][1], new[j][1]
@@ -399,12 +419,13 @@ def _restore_trailing(original, text):
     return text
 
 
-def prepare(original, text, *, evidence=None, overrides=None):
+def prepare(original, text, *, evidence=None, overrides=None, index_fields=None):
     """Return a structured proposal and JSON-safe, frozen speaker evidence."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    old, new, pairs = aligned_paragraphs(original.text, text)
+    labels = _label_pattern(index_fields)
+    old, new, pairs = aligned_paragraphs(original.text, text, labels=labels)
     fields = _field_ranges(original)
-    choices = _speaker_choices(old, fields)
+    choices = _speaker_choices(old, fields, index_fields)
     paired = {j: i for i, j in pairs}
     if evidence is None:
         counts, occurrences = {}, []
@@ -453,22 +474,28 @@ def prepare(original, text, *, evidence=None, overrides=None):
             edits.append((*_label_range(paragraph), display))
     for a, b, name in reversed(edits):
         text = text[:a] + name + text[b:]
-    text = _restore_trailing(original, text)
+    text = _restore_trailing(original, text, labels=labels)
     # Do not let whole-text revision treat attribution changes as global renames.
-    attribution_paragraphs = [old[i] for i, j in pairs if new[j][2] and (
-        GENERIC.fullmatch(new[j][2]['name']) or (speaker_name_key(new[j][2]['name']) in choices
-        and old[i][2] and old[i][2]['name'] != new[j][2]['name']))]
     if evidence['occurrences']:
         # Unpaired paragraphs can move across token alignment blocks too.
         # No speaker occurrence may be interpreted as a global definition edit
         # while resolving generic AI labels.
         attribution_paragraphs = old
+    elif index_fields is not None:
+        # A changed or unpaired speaker is an attribution to review at this
+        # occurrence. The shared native definition also names a cover examiner.
+        unchanged = {i for i, j in pairs if old[i][2] and new[j][2] and old[i][2]['name'] == new[j][2]['name']}
+        attribution_paragraphs = [paragraph for i, paragraph in enumerate(old) if i not in unchanged]
+    else:
+        attribution_paragraphs = [old[i] for i, j in pairs if new[j][2] and (
+            GENERIC.fullmatch(new[j][2]['name']) or (speaker_name_key(new[j][2]['name']) in choices
+            and old[i][2] and old[i][2]['name'] != new[j][2]['name']))]
     speaker_elements = {fields[_label_range(p)] for p in attribution_paragraphs
                         if p[2] and _label_range(p) in fields}
     base = replace(original, elements=tuple(e for e in original.elements if e not in speaker_elements))
     from app.src.suggestions import propose
     revision = propose(base, text)
-    _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text)
+    _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text, labels=labels)
     aligned_sources = {j: old[i] for i,j in projected_pairs}
     values = field_values(original)
     projected_fields = _field_ranges(revision)
@@ -493,7 +520,7 @@ def prepare(original, text, *, evidence=None, overrides=None):
     return revision, evidence
 
 
-def begin_review(state, text, *, exclude_off_record=True):
+def begin_review(state, text, *, exclude_off_record=True, index_fields=None):
     """Freeze evidence and return an optional pre-exclusion undo snapshot."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     undo, excluded = None, []
@@ -505,17 +532,18 @@ def begin_review(state, text, *, exclude_off_record=True):
             # Build raw speaker evidence only for Undo, never use it to vote in
             # the filtered proposal. It has different paragraph offsets.
             raw = SimpleNamespace(original=state.original)
-            begin_review(raw, text, exclude_off_record=False)
+            begin_review(raw, text, exclude_off_record=False, index_fields=index_fields)
             raw.review.update(automatic_filter=1, automatic_changes=[])
             undo = (state.original, raw.incoming, raw.review)
             text = filtered
-    incoming, evidence = prepare(state.original, text)
+    incoming, evidence = prepare(state.original, text, index_fields=index_fields)
     if (incoming.text == state.original.text and incoming.elements == state.original.elements
             and incoming.definitions == state.original.definitions):
         incoming = state.original
     # Normalization changes label lengths, not paragraph order.
-    raw_paragraphs = _paragraphs(text)
-    new_paragraphs = _paragraphs(incoming.text)
+    labels = _label_pattern(index_fields)
+    raw_paragraphs = _paragraphs(text, labels=labels)
+    new_paragraphs = _paragraphs(incoming.text, labels=labels)
     locations = []
     for occurrence in evidence['occurrences']:
         index = next(i for i, p in enumerate(raw_paragraphs) if p[2] and p[0]+p[2].start('name') == occurrence['start'])

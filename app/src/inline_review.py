@@ -39,6 +39,9 @@ class ReviewRow:
     display_start: int = 0
     display_end: int = 0
     glyph_height: float = 0
+    # The right cell shares a display row with the plaintiff but has its own
+    # native text range, after all text in the caption's left cell.
+    caption_cell: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,9 +151,10 @@ def _native_rows(editor, side):
                 line = layout.lineAt(index)
                 start = block.position() + line.textStart()
                 end = min(offset, start + line.textLength())
-                y = layout.position().y() + line.y()
+                bounds = editor.document().documentLayout().blockBoundingRect(block)
+                y = bounds.top() + line.y()
                 page = int(y // editor._page_height) + 1
-                number = counts.get(page, 0) + 1
+                number = editor.number_at_y(page - 1, y, counts.get(page, 0) + 1)
                 counts[page] = number
                 pitch = block.blockFormat().lineHeight()
                 if block.blockFormat().lineHeightType() != QTextBlockFormat.FixedHeight.value:
@@ -161,13 +165,37 @@ def _native_rows(editor, side):
                 if not font.family():
                     font = editor.font()
                 text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
-                x = layout.position().x() + line.cursorToX(line.textStart())[0]
+                x = bounds.left() + line.cursorToX(line.textStart())[0]
                 rows.append(ReviewRow(side, positions[start], positions[end], text,
                                       page, number, page, number, y,
                                       x, pitch,
                                       line.y() - index*pitch, font, glyph_height=line.height()))
         block = block.next()
     return rows
+
+
+def _combine_caption_cells(rows, source):
+    """Place unchanged cell text on the same physical line in read-only review."""
+    for table in reversed(getattr(source._paragraph_styles, 'caption_tables', ())):
+        selected = [i for i, row in enumerate(rows) if row.kind != 'incoming'
+                    and table.start < row.source_start <= table.end]
+        if not selected:
+            continue
+        first, stop = selected[0], selected[-1] + 1
+        group = rows[first:stop]
+        if any(row.kind != 'equal' for row in group):
+            continue
+        left = [row for row in group if row.source_start <= table.separator]
+        for right in (row for row in group if row.source_start > table.separator):
+            line = next((r for r in left if abs(r.y - right.y) < 1), None)
+            if line is None:
+                left.append(right)
+                continue
+            cell_width = QFontMetricsF(line.font).horizontalAdvance('0')
+            column = max(len(line.text), round((right.x - line.x) / cell_width))
+            line.caption_cell = (column, right.source_start, right.incoming_start, len(right.text))
+            line.text = line.text.ljust(column) + right.text
+        rows[first:stop] = sorted(left, key=lambda row: row.y)
 
 
 class InlineReviewEditor(QTextEdit):
@@ -221,7 +249,7 @@ class InlineReviewEditor(QTextEdit):
         self.rows, self.shared_ranges = [], []
         old_rows, new_rows = _native_rows(original, 'original'), _native_rows(incoming, 'incoming')
         self.shared_ranges = _common_ranges(model)
-        native_geometry = {(row.page, row.number): (row.y, row.pitch) for row in old_rows}
+        native_geometry = {(row.source_start, row.source_end): (row.y, row.pitch) for row in old_rows}
 
         extra = [0.] * max(1, original.document().pageCount())
         old_index, added_height = 0, 0.
@@ -300,7 +328,7 @@ class InlineReviewEditor(QTextEdit):
             cursor_y = top+self._top
             for row in (row for row in self.rows if row.page == page):
                 if row.kind != 'incoming' and row.number:
-                    source_y, source_pitch = native_geometry[page, row.number]
+                    source_y, source_pitch = native_geometry[row.source_start, row.source_end]
                     row.y = top + source_y-(page-1)*self._page_height + shift
                     shift += row.pitch-source_pitch
                 else:
@@ -311,6 +339,7 @@ class InlineReviewEditor(QTextEdit):
                          cursor_y-top+self._bottom)
             self.pages.append(ReviewPage(page, top, height))
             top += height
+        _combine_caption_cells(self.rows, original)
         self._render_document(unmatched_speakers)
         self.boundary_marks = []
         for index, edit in enumerate(model.edits):
@@ -436,6 +465,12 @@ class InlineReviewEditor(QTextEdit):
         if row is None:
             return 'original', 0
         local = min(max(0, position-row.display_start), _qt(row.text))
+        if row.caption_cell:
+            column, original, _, length = row.caption_cell
+            index = utf16_index(row.text, local)
+            if index >= column:
+                return 'original', original + min(length, index - column)
+            return 'original', min(row.source_end, row.source_start + index)
         return ('incoming' if row.kind == 'incoming' else 'original',
                 row.source_start+utf16_index(row.text, local))
 
@@ -445,13 +480,18 @@ class InlineReviewEditor(QTextEdit):
     def display_position(self, side, position):
         candidates = []
         for row in self.rows:
+            if row.caption_cell:
+                column, original, incoming, length = row.caption_cell
+                cell_start = original if side == 'original' else incoming
+                if cell_start <= position <= cell_start + length:
+                    return row.display_start + _qt(row.text[:column + position - cell_start])
             if side == 'incoming' and row.kind == 'equal' and row.incoming_start is not None:
                 start = row.incoming_start
             elif (side == 'incoming') == (row.kind == 'incoming'):
                 start = row.source_start
             else:
                 continue
-            end = start+len(row.text)
+            end = start + (row.source_end - row.source_start if row.caption_cell else len(row.text))
             if start <= position <= end:
                 candidates.append((position == end and start != end,
                                    row.display_start+_qt(row.text[:position-start])))

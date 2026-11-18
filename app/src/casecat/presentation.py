@@ -1,16 +1,31 @@
 """Native presentation attributes projected onto editable logical text."""
 from bisect import bisect_left
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import struct
 import re
 from functools import lru_cache
 
 from .structure import projected_groups, source_groups, group_targets, group_matches
 from .layout import read_layouts, read_deltas, ParagraphStyle
+from .caption import TABLE_END, cover_end, is_cell
 from app.src.suggestion_filter import LABEL
 
 
 QA_PREFIX = re.compile(r'^ *([QA]) {2,}')
+
+
+@dataclass(frozen=True)
+class CaptionTable:
+    start: int
+    separator: int
+    end: int
+    widths: tuple[int, int]
+
+
+class ParagraphStyles(dict):
+    def __init__(self):
+        super().__init__()
+        self.caption_tables = []
 
 
 def prepare_editor_presentation(job, bundle):
@@ -60,11 +75,30 @@ def _presentation(job, groups):
                else group_targets(job))
     layouts = read_layouts(job.native_bytes)
     definitions = layouts[0].paragraphs if layouts else ()
-    result, styles, breaks, cursor = [], {}, set(), 0
+    result, styles, breaks, cursor = [], ParagraphStyles(), set(), 0
+    end_cover = cover_end(job.native_bytes)
+    single_start, singles = None, []
+    cells = []
     for group, target in zip(groups, targets):
         source = ''.join(t.text for t in group)
         hard, paragraphs, page_breaks, offset = set(), {}, [], 0
         for token in group:
+            if end_cover and token.offset < end_cover and source == target:
+                if token.raw == b'\x12\x09' and single_start is None:
+                    single_start = cursor + offset
+                elif token.raw == b'\x12\x89' and single_start is not None:
+                    singles.append((single_start, cursor + offset))
+                    single_start = None
+                if is_cell(token.raw):
+                    left, right = struct.unpack_from('<HH', token.raw, 9)
+                    cells.append((cursor + offset, right - left))
+                elif token.raw == TABLE_END:
+                    if len(cells) == 2 and len(definitions) >= 9:
+                        styles.caption_tables.append(CaptionTable(cells[0][0], cells[1][0], cursor + offset,
+                                                                 (cells[0][1], cells[1][1])))
+                        for pos, _ in cells:
+                            styles[pos + 1] = definitions[8]
+                    cells = []
             if token.raw == b'\x01':
                 hard.add(offset)
             if token.raw == b'\x02':
@@ -141,6 +175,9 @@ def _presentation(job, groups):
                     current = replace(current, first=current.continuation, prefix_length=0)
                 styles[position] = current
             position += len(paragraph) + 1
+        for position, style in styles.items():
+            if isinstance(style, ParagraphStyle) and any(a <= position < b for a, b in singles):
+                styles[position] = replace(style, spacing=1)
     # Page breaks decorate paragraph starts without changing logical offsets.
     starts = [0, *(match.end() for match in re.finditer('\n', text))]
     page_starts = set()

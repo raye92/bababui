@@ -11,7 +11,12 @@ def test_duration_and_chunks():
     assert segments(3540) == [(0, 1800), (1740, 3540)]
     assert segments(3540.1) == [(0, 1800), (1740, 3540), (3480, 3540.1)]
     assert segments(5280) == [(0, 1800), (1740, 3540), (3480, 5280)]
-    for duration in (0, -1, 5280.1, float('nan')):
+    assert segments(5280.1)[-1] == (5220, 5280.1)
+    assert segments(7020) == [(0, 1800), (1740, 3540), (3480, 5280), (5220, 7020)]
+    assert segments(3600, vocabulary=True) == [(0, 3600)]
+    assert segments(3600.1, vocabulary=True) == [(0, 3600), (3540, 3600.1)]
+    assert segments(7020, vocabulary=True) == [(0, 3600), (3540, 7020)]
+    for duration in (0, -1, 7020.1, float('nan')):
         with pytest.raises(ValueError):
             segments(duration)
 

@@ -6,25 +6,32 @@ reporter-provided reference. It is not a title-case or dictionary substitution.
 """
 
 
+from .caption import is_cell
+
+
 class TextRenderer:
-    def __init__(self, *, all_caps=False):
+    def __init__(self, *, all_caps=False, cover_tables=False):
         self.capitalize = True
         self.after_punctuation = False
         self.last = ''
         self.has_content = False
         self.all_caps = all_caps
+        self.cover_tables = cover_tables
+        self.uppercase = False
 
     def control(self, raw):
         # Measured with Insert Format Symbol, Uncap Next / Cap Next in 22.1.
         if raw in (b'\x12\x8e', b'\x12\x0e'):
             self.capitalize = raw[1] == 0x0e
             self.after_punctuation = False
+        if self.cover_tables and raw in (b'\x12\x08', b'\x12\x88'):
+            self.uppercase = raw[1] == 8
 
     def literal(self, text):
         result = []
         for char in text:
             if char.isalpha():
-                if self.capitalize or self.all_caps:
+                if self.capitalize or self.all_caps or self.uppercase:
                     char = char.upper()
                 self.capitalize = False
             if char in '.!?:':
@@ -68,6 +75,10 @@ def render_record(renderer, raw, speakers):
         return renderer.conflict()
     if op == 0x16:
         return renderer.paragraph(int.from_bytes(raw[1:], 'little'))
+    if renderer.cover_tables and is_cell(raw):
+        return renderer.paragraph(255)
+    if renderer.cover_tables and op in (9, 10):
+        return renderer.literal('\t') if op == 9 else renderer.paragraph(255)
     if op == 0x15 and raw[1] == 7:
         label = raw[10:].rstrip(b'\0').decode('cp1252')
         value = speakers.get(label)

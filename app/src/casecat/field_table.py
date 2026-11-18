@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import struct
 import zlib
 
+from .caption import CAPTION_NAMES, caption_value
+
 
 def field_record(name):
     encoded = name.encode('cp1252')
@@ -53,13 +55,19 @@ def read_fields(native):
     return tuple(result)
 
 
-def field_texts(native):
+def field_texts(native, *, display=False):
     # Field values may themselves contain native hard spaces. Other formatting
     # remains in the table and is rejected for editing until it is understood.
-    return {field.name: field.value.replace(b'\x01', b' ').decode('cp1252') for field in read_fields(native)}
+    result = {}
+    for field in read_fields(native):
+        value = field.value.replace(b'\x01', b' ').decode('cp1252')
+        if field.name in CAPTION_NAMES:
+            value = value.replace(' \n', '\n') if display else value.replace('\n', '')
+        result[field.name] = value
+    return result
 
 
-def rewrite_fields(native, values):
+def rewrite_fields(native, values, *, wrap_captions=False):
     if not values:
         return native
     fields = list(read_fields(native))
@@ -74,7 +82,10 @@ def rewrite_fields(native, values):
     fields.sort(key=lambda field: int.from_bytes(field.identifier, 'little'))
     descriptors, payloads = [], []
     for field in fields:
-        value = values[field.name].encode('cp1252') if field.name in values else field.value
+        value = field.value
+        if field.name in values:
+            text = caption_value(field.name, values[field.name]) if wrap_captions else values[field.name]
+            value = text.encode('cp1252')
         descriptor = bytearray(field.descriptor)
         struct.pack_into('<I', descriptor, 72, len(value))
         if field.name in values:
@@ -82,14 +93,21 @@ def rewrite_fields(native, values):
         descriptors.append(descriptor)
         payloads.append(value)
     table = struct.pack('<I', len(fields)) + b''.join(descriptors) + b''.join(payloads)
-    offset, size = struct.unpack_from('<II', native, 632)
+    result = bytearray(replace_section(native, 632, table))
+    struct.pack_into('<I', result, 628, len(fields))
+    read_fields(result)
+    return bytes(result)
+
+
+def replace_section(native, field, data):
+    """Replace a known container section without moving stream-relative positions."""
+    offset, size = struct.unpack_from('<II', native, field)
     if not offset and not size:
         result = bytearray(native)
-        struct.pack_into('<II', result, 632, len(result), len(table))
-        result += table
-        read_fields(result)
+        struct.pack_into('<II', result, field, len(result), len(data))
+        result += data
         return bytes(result)
-    end, delta = offset + size, len(table) - size
+    end, delta = offset + size, len(data) - size
     result = bytearray(native)
     # Stream positions are unchanged. Relocate container section addresses,
     # including extended streams, independently of their on-disk order.
@@ -98,13 +116,12 @@ def rewrite_fields(native, values):
     if native[directory:directory+8] != b'2XSTRMZ\0':
         raise ValueError('Missing native extended-stream directory.')
     count = struct.unpack_from('<I', native, directory+8)[0]
-    pointers = [540, 548, 556, 564, 572, 580, 588, 612, 644]
+    pointers = [540, 548, 556, 564, 572, 580, 588, 612, 632, 644]
     pointers += list(range(directory+32, directory+32+count*8, 8))
     for position in pointers:
         address = struct.unpack_from('<I', native, position)[0]
-        if address >= end:
+        if position != field and address >= end:
             struct.pack_into('<I', result, position, address + delta)
-    struct.pack_into('<I', result, 636, len(table))
-    result[offset:end] = table
-    read_fields(result)
+    struct.pack_into('<I', result, field + 4, len(data))
+    result[offset:end] = data
     return bytes(result)
