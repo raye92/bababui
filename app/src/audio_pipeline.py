@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher
 import hashlib
+from itertools import count
 import json
 import math
 from pathlib import Path
@@ -16,6 +17,10 @@ from shared.storage import file_lock
 
 
 AUDIO_MODEL = 'gemini-3.5-transcribe'
+CHUNK_SECONDS = 30 * 60
+OVERLAP_SECONDS = 60
+CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
+MAX_CHUNKS = 3
 
 
 @dataclass(frozen=True)
@@ -36,9 +41,17 @@ class Transcription:
 
 
 def segments(duration):
-    if not math.isfinite(duration) or not 0 < duration <= 3540:
-        raise ValueError('Choose a WAV recording between 0 and 59 minutes long.')
-    return [(0, duration)] if duration <= 1800 else [(0, 1800), (1740, duration)]
+    max_duration = CHUNK_SECONDS + (MAX_CHUNKS - 1) * CHUNK_STEP
+    if not math.isfinite(duration) or not 0 < duration <= max_duration:
+        raise ValueError('Choose a WAV recording longer than 0 seconds and at most 1 hour 28 minutes.')
+    plan = []
+    for index in range(MAX_CHUNKS):
+        start = index * CHUNK_STEP
+        end = min(start + CHUNK_SECONDS, duration)
+        plan.append((start, end))
+        if end == duration:
+            break
+    return plan
 
 
 def parse_words(response, *, timestamps=True):
@@ -114,18 +127,29 @@ def _seam_positions(words, default):
 
 
 def stitch(chunks):
-    labels = {}
-    def label(speaker):
-        return labels.setdefault(speaker, f'Speaker {len(labels)+1}')
-    a = [replace(w, speaker=label(w.speaker)) if w.speaker is not None else w for w in chunks[0]]
-    if len(chunks) == 1:
-        return tuple(a), []
-    b = [replace(w, start=w.start+1740, end=w.end+1740) if w.start is not None else w
-         for w in chunks[1]]
+    speakers = dict.fromkeys(w.speaker for w in chunks[0] if w.speaker is not None)
+    labels = {speaker: f'Speaker {i}' for i, speaker in enumerate(speakers, 1)}
+    next_label = count(len(labels) + 1)
+    tail = [replace(w, speaker=labels[w.speaker]) if w.speaker is not None else w for w in chunks[0]]
+    combined, warnings = [], []
+    for index, chunk in enumerate(chunks[1:], 1):
+        start = index * CHUNK_STEP
+        incoming = [replace(w, start=w.start+start, end=w.end+start) if w.start is not None else w
+                    for w in chunk]
+        # Only the previous chunk participates in the next overlap.
+        kept, tail, seam_warnings = _join_overlap(tail, incoming, index + 1, start, next_label)
+        combined.extend(kept)
+        warnings.extend(seam_warnings)
+    combined.extend(tail)
+    return tuple(combined), warnings
+
+
+def _join_overlap(a, b, chunk_number, start, next_label):
+    midpoint = start + OVERLAP_SECONDS // 2
     a_timed = any(w.start is not None for w in a)
     b_timed = any(w.start is not None for w in b)
-    left = [(i, w) for i, w in enumerate(a) if w.start is not None and w.start >= 1740]
-    right = [(i, w) for i, w in enumerate(b) if w.start is not None and w.start < 1800]
+    left = [(i, w) for i, w in enumerate(a) if w.start is not None and w.start >= start]
+    right = [(i, w) for i, w in enumerate(b) if w.start is not None and w.start < start + OVERLAP_SECONDS]
     # Search near the edge of an untimed chunk for the repeated minute.
     if not a_timed:
         left = list(enumerate(a[-400:], max(0, len(a) - 400)))
@@ -163,31 +187,29 @@ def stitch(chunks):
     targets = Counter(candidates.values())
     mapping = {s: t for s, t in candidates.items() if targets[t] == 1}
     warnings = []
-    next_label = len(labels) + 1
     for speaker in dict.fromkeys(w.speaker for w in b):
         if speaker is not None and speaker not in mapping:
-            mapping[speaker] = f'Speaker {next_label}'
-            next_label += 1
-            warnings.append(f'Unmatched speaker in chunk 2 assigned {mapping[speaker]}; review the identity.')
+            mapping[speaker] = f'Speaker {next(next_label)}'
+            warnings.append(f'Unmatched speaker in chunk {chunk_number} assigned {mapping[speaker]}; review the identity.')
     b = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in b]
     if len(pairs) >= 5:
         if a_timed and b_timed:
-            (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-1770))
-            combined = a[:ia] + b[ib:]
+            (ia, _), (ib, _) = min(pairs, key=lambda p: abs(p[0][1].start-midpoint))
         elif a_timed:
             (ia, _), (ib, _) = pairs[-1]
-            combined = a[:ia+1] + b[ib+1:]
+            ia += 1
+            ib += 1
         else:
             (ia, _), (ib, _) = pairs[0]
-            combined = a[:ia] + b[ib:]
-    elif not (a_timed and b_timed):
-        combined = a + b
+        return a[:ia], b[ib:], warnings
+    if not (a_timed and b_timed):
         warnings.append('Could not match the overlap without timestamps. Both chunks were kept. Review for repeated words.')
-    else:
-        combined = [w for w, t in zip(a, _seam_positions(a, 0)) if t < 1770]
-        combined.extend(w for w, t in zip(b, _seam_positions(b, 1770)) if t >= 1770)
-        warnings.append('Uncertain overlap alignment: joined at 29:30. Review for missing or repeated words.')
-    return tuple(combined), warnings
+        return a, b, warnings
+    a = [w for w, t in zip(a, _seam_positions(a, start)) if t < midpoint]
+    b = [w for w, t in zip(b, _seam_positions(b, midpoint)) if t >= midpoint]
+    minutes, seconds = divmod(midpoint, 60)
+    warnings.append(f'Uncertain overlap alignment: joined at {minutes}:{seconds:02d}. Review for missing or repeated words.')
+    return a, b, warnings
 
 
 def save_json(path, data):

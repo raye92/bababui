@@ -45,12 +45,14 @@ for identical audio share transcription, then format independently. Background
 results and warnings stay in their own tabs. Wait for a tab to finish before
 closing it, and for all requests to finish before exiting.
 
-WAVs must be no longer than 59 minutes. Recordings longer than 30 minutes use
-chunks 0:00-30:00 and 29:00-end. Word timestamps and tolerant text alignment match
-speakers and remove the repeated minute. Matching is best effort: an unmatched
-speaker receives a new label, and an uncertain join falls back to 29:30. Review
-the warnings and resulting transcript, especially speakers absent from the
-overlap. Timestamps are used internally and do not appear in Incoming.
+WAVs must be no longer than 1 hour 28 minutes. The app uses up to three
+30-minute chunks that start at 0:00, 29:00, and 58:00, with a one-minute overlap.
+If a transcription request returns HTTP 429, the app waits 60 seconds and retries
+that chunk once. Word timestamps and tolerant text alignment match speakers and
+remove repeated words at each join. An unmatched speaker receives a new label.
+If alignment is uncertain and both chunks have timestamps, the app joins them
+at the midpoint of the overlap. Review the warnings and resulting transcript.
+Timestamps are used internally and do not appear in Incoming.
 
 Each tab remembers its processing model: Gemini 3.8 Flash (default), Gemini 4
 Argon, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model

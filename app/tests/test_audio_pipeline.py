@@ -9,7 +9,9 @@ from app.src.audio_pipeline import Word, segments, stitch, parse_words, render
 def test_duration_and_chunks():
     assert segments(1800) == [(0, 1800)]
     assert segments(3540) == [(0, 1800), (1740, 3540)]
-    for duration in (0, -1, 3540.1, float('nan')):
+    assert segments(3540.1) == [(0, 1800), (1740, 3540), (3480, 3540.1)]
+    assert segments(5280) == [(0, 1800), (1740, 3540), (3480, 5280)]
+    for duration in (0, -1, 5280.1, float('nan')):
         with pytest.raises(ValueError):
             segments(duration)
 
@@ -36,6 +38,24 @@ def test_unaligned_overlap_uses_timestamp_cut():
     assert 'Keep.' in text and 'KeepB.' in text
     assert 'Drop' not in text
     assert warnings
+
+
+def test_three_chunks_preserve_speaker_labels_and_trim_both_overlaps():
+    first_overlap = 'one two three four five'.split()
+    second_overlap = 'six seven eight nine ten'.split()
+    a = [Word('Opening.', 'a', 40, 41)]
+    a += [Word(w, 'a', 1768+i, 1769+i) for i, w in enumerate(first_overlap)]
+    b = [Word(w, 'b', 28+i, 29+i) for i, w in enumerate(first_overlap)]
+    b += [Word(w, 'c', 1768+i, 1769+i) for i, w in enumerate(second_overlap)]
+    c = [Word(w, 'a', 28+i, 29+i) for i, w in enumerate(second_overlap)]
+    c += [Word('Closing.', 'a', 80, 81), Word('New.', 'b', 82, 83)]
+
+    words, warnings = stitch([a, b, c])
+
+    assert render(words) == ('Speaker 1: Opening. one two three four five\n'
+                             'Speaker 2: six seven eight nine ten Closing.\nSpeaker 3: New.')
+    assert words[-2] == Word('Closing.', 'Speaker 2', 3560, 3561)
+    assert any('chunk 3' in warning for warning in warnings)
 
 
 def test_annotation_bytes_preserve_unicode():
@@ -173,14 +193,16 @@ def test_missing_annotations_and_bad_timestamps_are_rejected():
 
 
 @pytest.mark.parametrize('statuses', [(429, 200), (429, 429), (403,)])
-def test_second_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeypatch, statuses):
+@pytest.mark.parametrize('transcript', [('First.', 'Second.'), ('First.', 'Second.', 'Third.')])
+def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeypatch, statuses, transcript):
     import json
     import httpx
     from google import genai
     from app.src.audio_pipeline import AudioPipeline, media
 
     requests, uploads, waits, progress = [], [], [], []
-    remaining = iter((200, *statuses))
+    prior_chunks = len(transcript) - 1
+    remaining = iter((200,) * prior_chunks + statuses)
 
     def transport(request):
         payload = json.loads(request.content)
@@ -188,7 +210,7 @@ def test_second_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkey
         status = next(remaining)
         if status != 200:
             return httpx.Response(status, json={'error': {'code': status, 'message': 'Request failed'}})
-        text = 'First.' if len(uploads) == 1 else 'Second.'
+        text = transcript[len(uploads) - 1]
         return httpx.Response(200, json={'status': 'completed', 'steps': [
             {'type': 'model_output', 'content': [{'type': 'text', 'text': text, 'annotations': [
                 {'type': 'word_info', 'speaker': 's1', 'start_index': 0, 'end_index': len(text),
@@ -200,7 +222,7 @@ def test_second_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkey
 
     wav = tmp_path / 'source.wav'
     wav.write_bytes(b'wav')
-    monkeypatch.setattr(media, 'probe', lambda _: 3540)
+    monkeypatch.setattr(media, 'probe', lambda _: 3540 if len(transcript) == 2 else 5280)
     monkeypatch.setattr(media, 'prepare', lambda *args: None)
     monkeypatch.setattr('app.src.audio_pipeline.time.sleep', waits.append)
     # Isolate the app's fallback from the SDK's short built-in retries.
@@ -211,20 +233,19 @@ def test_second_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkey
                                  NS(files=NS(upload=upload), interactions=sdk.interactions))
         if statuses[-1] == 200:
             result = pipeline.run(wav, progress.append)
-            assert result.text == 'Speaker 1: First.\nSpeaker 2: Second.'
+            assert result.text.splitlines() == [f'Speaker {i}: {word}' for i, word in enumerate(transcript, 1)]
             assert pipeline.run(wav) == result
         else:
             with pytest.raises(Exception) as caught:
                 pipeline.run(wav, progress.append)
             assert getattr(caught.value, 'status_code', getattr(caught.value, 'code', None)) == statuses[-1]
-        assert len(list(pipeline.cache.rglob('chunk-0.json'))) == 1
-        assert len(list(pipeline.cache.rglob('chunk-1.json'))) == (statuses[-1] == 200)
+        assert len(list(pipeline.cache.rglob('chunk-*.json'))) == prior_chunks + (statuses[-1] == 200)
 
-    assert len(uploads) == 2
-    assert len(requests) == 1 + len(statuses)
+    assert len(uploads) == len(transcript)
+    assert len(requests) == prior_chunks + len(statuses)
     assert waits == ([60] if statuses[0] == 429 else [])
     if statuses[0] == 429:
-        assert requests[1] == requests[2]
+        assert requests[-2] == requests[-1]
         assert any('60 seconds' in message and '429' in message for message in progress)
 
 
