@@ -5,10 +5,44 @@ from dataclasses import replace
 import pytest
 
 from app.src.casecat.archive import inspect_archive, export_zip
-from app.src.casecat.codec import load_job
+from app.src.casecat.codec import load_job, records
 from app.src import documents
+from app.src.review_model import build_review
+from app.src.suggestions import resolve_all
 from app.tests.test_native_casecat import zip_bytes
+from app.tests.test_native_fields import field_files, native_stream
+from app.tests.test_native_layout import layout_bytes
 from app.tests.test_native_structure import container_files
+
+
+def test_accept_all_export_uses_colloquy_indent_for_new_speaker_turns(tmp_path):
+    layout = bytearray(layout_bytes(first=3600))
+    default = layout[1024:1536]
+    colloquy = bytearray(default)
+    struct.pack_into('<H', colloquy, 174, 2880)
+    layout[1536:1536] = default * 2 + colloquy
+    struct.pack_into('<I', layout, 4, 4)
+    files = field_files(layout=layout)
+    del files['jobs/example.wav']
+    doc = documents.import_casecat(inspect_archive(zip_bytes(files)))
+    original = doc.native.original
+    incoming = original.replace(len(original.text), len(original.text),
+                                '\n     MR. COUNSEL:  One question.\n     :  Go ahead.\n          More testimony.')
+    start = incoming.text.index(':  Go ahead.')
+    incoming = incoming.insert_field(start, 'EZ SPEAKER 01', 'MS. OLD')
+    review = build_review(original, incoming)
+    doc.native.original, doc.native.incoming = resolve_all(original, incoming, review.ranges, True)
+
+    target = tmp_path / 'accepted.zip'
+    doc.export_casecat(target)
+    restored_bundle = inspect_archive(target)
+    restored = load_job(restored_bundle, restored_bundle.jobs[0])
+    assert restored.text == incoming.text
+    assert any(element.start == start and element.kind == 'field' for element in restored.revision.elements)
+    stream = native_stream(restored)
+    paragraph_styles = [int.from_bytes(raw[1:], 'little')
+                        for _, raw in records(stream, 0, len(stream)) if raw[0] == 0x16]
+    assert paragraph_styles == [5, 2, 3, 4, 4, 4, 255]
 
 
 def test_export_moves_boundary_to_retained_byline_control(tmp_path):

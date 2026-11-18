@@ -11,13 +11,13 @@ from app.tests.test_native_casecat import job_files, zip_bytes
 from app.tests.test_native_layout import layout_bytes
 
 
-def container_files(words=('Hello ', 'world.')):
+def container_files(words=('Hello ', 'world.'), *, layout=None):
     files = job_files(words=words)
     native = bytearray(files['jobs/example.sgngl'])
     # Three position entries and four opaque extended streams deliberately
     # differ from the two-entry/nine-stream private sample.
     length = len(native) - 1024
-    layout = layout_bytes()
+    layout = layout_bytes() if layout is None else layout
     struct.pack_into('<II', native, 540, len(native), len(layout))
     struct.pack_into('<I', native, 624, 1)
     native += layout

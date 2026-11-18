@@ -14,10 +14,10 @@ FIELD = b'\x15\x07\x12\x00\x00\x00\x01\x01\x01\x01EZ SPEAKER 01\x00'
 ORPHAN = b'\x11\x06\x02\x00\x00\x00'
 
 
-def field_files(value='MS. OLD'):
+def field_files(value='MS. OLD', *, layout=None):
     words = (b'\x16\x05\x00' + ORPHAN + b'BY ' + FIELD + b':\x16\x02\x00Question?',
              b'\x16\x03\x00Yes.\x16\x04\x00' + FIELD + b': More.')
-    files = container_files(tuple(word.decode('cp1252') for word in words))
+    files = container_files(tuple(word.decode('cp1252') for word in words), layout=layout)
     native = bytearray(files['jobs/example.sgngl'])
     offset, size = struct.unpack_from('<II', native, 632)
     entry = bytearray(128)
