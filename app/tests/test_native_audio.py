@@ -9,7 +9,7 @@ from app.src.casecat.anchors import AnchoredSpan
 
 
 def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000, last='gamma.', *, copy_stroke=False,
-                  editable=False):
+                  editable=False, embedded_clock_high_byte=0):
     from app.src.casecat import archive
     from app.tests.test_native_casecat import job_files, zip_bytes
     clocks = (10600, 13200, 14000)
@@ -29,9 +29,10 @@ def audio_archive(tmp_path, resume_clock=13000, stop_elapsed=4000, last='gamma.'
     with wave.open(str(wav), 'wb') as out:
         out.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
         out.writeframes(bytes(32000 * 40))
+    embedded_clocks = (clocks[0], clocks[1] | (embedded_clock_high_byte << 24), clocks[2])
     groups = [b'\x13\x01\x01' + struct.pack('<II', 1, clock) +
               b''.join(bytes.fromhex(value) for value in span.audio) + span.content.encode('cp1252')
-              for clock, span in zip(clocks, spans)]
+              for clock, span in zip(embedded_clocks, spans)]
     if copy_stroke:
         groups.insert(2, b'\x13\x01\x01' + struct.pack('<II', 1, clocks[0]) + b'copied ')
     stream = b''.join(groups)
@@ -68,7 +69,31 @@ def timing_source(tmp_path, **recording):
     return timing.AudioMap.from_job(bundle, job, tmp_path/'sample.wav'), job.baseline
 
 
-def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, monkeypatch):
+def test_import_uses_note_clock_and_preserves_differing_embedded_byte(tmp_path, monkeypatch):
+    from app.src import documents
+    from app.src.casecat.timing import AudioMap
+
+    monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
+    bundle = audio_archive(tmp_path, editable=True, embedded_clock_high_byte=0x6e)
+    doc = documents.import_casecat(bundle)
+    job = doc.native.job
+    assert job.text == 'Alpha beta gamma.'
+    assert job.stroke_clocks == (10600, 13200, 14000)
+    playback = AudioMap.from_job(bundle, job, doc.wav_path)
+    assert playback.position_ms(job.baseline, job.text.index('beta')) == 11940
+
+    doc.native.original = job.baseline.replace(6, 10, 'second')
+    target = tmp_path / 'edited.zip'
+    doc.export_casecat(target, corrected_audio=False)
+    restored = documents.import_casecat(target)
+    assert restored.original == 'Alpha second gamma.'
+    assert restored.native.job.stroke_clocks == job.stroke_clocks
+    assert restored.native.job.notes_bytes == job.notes_bytes
+    assert b'\x13\x01\x01' + struct.pack('<II', 1, (0x6e << 24) | 13200) in restored.native.job.native_bytes
+
+
+@pytest.mark.parametrize('embedded_clock_high_byte', [0, 0x6e])
+def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, monkeypatch, embedded_clock_high_byte):
     from hashlib import sha256
     from app.src import documents
     from app.src.casecat import archive, codec
@@ -76,7 +101,7 @@ def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, m
     from app.src.speech_alignment import SpeechAlignment
 
     monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
-    doc = documents.import_casecat(audio_archive(tmp_path))
+    doc = documents.import_casecat(audio_archive(tmp_path, embedded_clock_high_byte=embedded_clock_high_byte))
     bundle, job = doc.native.bundle, doc.native.job
     wav = bundle.read(job.audio_member)
     doc.native.alignment = SpeechAlignment(sha256(wav).hexdigest(), 40000,
@@ -91,6 +116,10 @@ def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, m
     assert exported.notes_bytes[:640] == job.notes_bytes[:640]
     assert [key for key, _ in struct.iter_unpack('<II', exported.notes_bytes[640:])] == [1, 1, 1]
     assert exported.stroke_clocks == (10400, 13000, 13800)
+    start, length = struct.unpack_from('<II', exported.native_bytes, 532)
+    embedded = b''.join(raw[3:] for _, raw in codec.records(exported.native_bytes, start, start + length)
+                        if raw[0] == 0x13)
+    assert embedded == exported.notes_bytes[640:]
     assert AudioMap.from_job(restored, exported, tmp_path / 'sample.wav').stroke_ms == (4000, 10000, 18000)
     assert bundle.read(bundle.member(job.key + '.sgstn')) == job.notes_bytes
     assert bundle.read(bundle.member(job.key + '.sgngl')) == job.native_bytes

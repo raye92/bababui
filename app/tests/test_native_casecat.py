@@ -140,10 +140,11 @@ def test_edited_export_refuses_missing_native_sections_without_touching_destinat
     assert target.read_bytes() == b'existing'
 
 
-def test_embedded_steno_must_match_original():
+@pytest.mark.parametrize('byte_in_last_note', [0, 4, 6, 7], ids=['keys', 'clock-low', 'clock-mid', 'clock-high'])
+def test_import_rejects_a_changed_companion_note(byte_in_last_note):
     files = job_files()
     data = bytearray(files['jobs/example.sgstn'])
-    data[-1] ^= 1
+    data[-8 + byte_in_last_note] ^= 1
     files['jobs/example.sgstn'] = bytes(data)
     bundle = archive.inspect_archive(zip_bytes(files))
     with pytest.raises(ValueError, match='steno'):

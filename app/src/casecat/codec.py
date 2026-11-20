@@ -20,6 +20,11 @@ def u32(data, offset):
     return struct.unpack_from('<I', data, offset)[0]
 
 
+def matches_steno_note(record, note):
+    """An in-order stroke can have an extra high clock byte in the transcript."""
+    return record == note or record[:7] + b'\0' == note
+
+
 def records(data, start, end):
     """Widths observed in CaseCAT 22.1.5.46514 at 0x00cf0e00.
 
@@ -105,6 +110,7 @@ def load_job(bundle, key):
     spans, refs, content, audio, formatting = [], (), [], [], []
     elements, position, content_length, byline = [], 0, 0, None
     stroke = 0
+    differing_clock_offset = None
     original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
     stroke_clocks = []
     end_cover = cover_end(native)
@@ -142,16 +148,17 @@ def load_job(bundle, key):
             refs = tuple(range(len(stroke_clocks), len(stroke_clocks) + size))
             for index in range(size):
                 record = raw[3 + index * 8:11 + index * 8]
-                if record == notes[640 + stroke * 8:648 + stroke * 8]:
-                    stroke += 1
-                    stroke_clocks.append(u32(record, 4))
-                elif record in original_strokes:
-                    # An extra occurrence may precede its original. Ordered
-                    # coverage is still required at EOF. Leading copies use
-                    # the first original clock because no passage precedes them.
-                    stroke_clocks.append(stroke_clocks[-1] if stroke_clocks else u32(notes, 644))
-                else:
-                    raise ValueError(f'Native steno association mismatch at byte {offset}.')
+                note = notes[640 + stroke * 8:648 + stroke * 8]
+                if record != note:
+                    if record in original_strokes:
+                        # Even forward copies use the preceding passage clock.
+                        stroke_clocks.append(stroke_clocks[-1] if stroke_clocks else u32(notes, 644))
+                        continue
+                    if not matches_steno_note(record, note):
+                        raise ValueError(f'Native steno association mismatch at byte {offset}.')
+                    differing_clock_offset = offset
+                stroke += 1
+                stroke_clocks.append(u32(note, 4))
             content, audio, formatting = [], [], []
         elif op >= 32:
             try:
@@ -215,6 +222,9 @@ def load_job(bundle, key):
     flush()
     if stroke != count:
         raise ValueError('The native transcript does not cover the original steno sequence.')
+    # With extra occurrences, the differing byte could belong to a copied stroke.
+    if differing_clock_offset is not None and len(stroke_clocks) != count:
+        raise ValueError(f'Native steno association mismatch at byte {differing_clock_offset}.')
     revision = Revision(tuple(spans), tuple(elements), all_caps, tuple(sorted(definitions.items())))
     audio_member = bundle.member(key + '.wav')
     warnings = [RENDERING_NOTICE]
