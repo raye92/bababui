@@ -8,7 +8,7 @@ import struct
 import wave
 
 from .anchors import Revision
-from .codec import records, u32
+from .codec import matches_steno_note, records, u32
 from .structure import group_targets
 from .timing import AudioMap, raw_recording_events, recording_events
 
@@ -50,8 +50,8 @@ def _rewrite_strokes(native, notes, clocks):
         for i in range(3, len(raw), 8):
             original = raw[i:i + 8]
             at = offset + i + 4
-            if original != notes[note:note + 8]:
-                raise AudioExportError('The transcript and original notes have different stroke clocks.')
+            if not matches_steno_note(original, notes[note:note + 8]):
+                raise AudioExportError('The embedded stroke does not match its original note.')
             struct.pack_into('<I', result, at, clocks[occurrence])
             struct.pack_into('<I', rewritten_notes, note + 4, clocks[occurrence])
             note += 8

@@ -20,6 +20,11 @@ def u32(data, offset):
     return struct.unpack_from('<I', data, offset)[0]
 
 
+def matches_steno_note(record, note):
+    """An in-order stroke can have an extra high clock byte in the transcript."""
+    return record == note or record[:7] + b'\0' == note
+
+
 def records(data, start, end):
     """Widths observed in CaseCAT 22.1.5.46514 at 0x00cf0e00.
 
@@ -149,9 +154,7 @@ def load_job(bundle, key):
                         # Even forward copies use the preceding passage clock.
                         stroke_clocks.append(stroke_clocks[-1] if stroke_clocks else u32(notes, 644))
                         continue
-                    # Some embedded clocks have a nonzero high byte where the
-                    # matching original note has zero.
-                    if record[:7] + b'\0' != note:
+                    if not matches_steno_note(record, note):
                         raise ValueError(f'Native steno association mismatch at byte {offset}.')
                     differing_clock_offset = offset
                 stroke += 1

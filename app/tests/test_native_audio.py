@@ -70,11 +70,8 @@ def timing_source(tmp_path, **recording):
 
 
 def test_import_uses_note_clock_and_preserves_differing_embedded_byte(tmp_path, monkeypatch):
-    from hashlib import sha256
     from app.src import documents
-    from app.src.casecat.retiming import AudioExportError
     from app.src.casecat.timing import AudioMap
-    from app.src.speech_alignment import SpeechAlignment
 
     monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
     bundle = audio_archive(tmp_path, editable=True, embedded_clock_high_byte=0x6e)
@@ -86,12 +83,7 @@ def test_import_uses_note_clock_and_preserves_differing_embedded_byte(tmp_path, 
     assert playback.position_ms(job.baseline, job.text.index('beta')) == 11940
 
     doc.native.original = job.baseline.replace(6, 10, 'second')
-    doc.native.alignment = SpeechAlignment(sha256(bundle.read(job.audio_member)).hexdigest(), 40000,
-                                           (4000, 10000, 18000), ())
     target = tmp_path / 'edited.zip'
-    with pytest.raises(AudioExportError, match='different stroke clocks'):
-        doc.export_casecat(target)
-    assert not target.exists()
     doc.export_casecat(target, corrected_audio=False)
     restored = documents.import_casecat(target)
     assert restored.original == 'Alpha second gamma.'
@@ -100,7 +92,8 @@ def test_import_uses_note_clock_and_preserves_differing_embedded_byte(tmp_path, 
     assert b'\x13\x01\x01' + struct.pack('<II', 1, (0x6e << 24) | 13200) in restored.native.job.native_bytes
 
 
-def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, monkeypatch):
+@pytest.mark.parametrize('embedded_clock_high_byte', [0, 0x6e])
+def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, monkeypatch, embedded_clock_high_byte):
     from hashlib import sha256
     from app.src import documents
     from app.src.casecat import archive, codec
@@ -108,7 +101,7 @@ def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, m
     from app.src.speech_alignment import SpeechAlignment
 
     monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path / 'assets')
-    doc = documents.import_casecat(audio_archive(tmp_path))
+    doc = documents.import_casecat(audio_archive(tmp_path, embedded_clock_high_byte=embedded_clock_high_byte))
     bundle, job = doc.native.bundle, doc.native.job
     wav = bundle.read(job.audio_member)
     doc.native.alignment = SpeechAlignment(sha256(wav).hexdigest(), 40000,
@@ -123,6 +116,10 @@ def test_casecat_export_retimes_strokes_without_changing_keys_or_wav(tmp_path, m
     assert exported.notes_bytes[:640] == job.notes_bytes[:640]
     assert [key for key, _ in struct.iter_unpack('<II', exported.notes_bytes[640:])] == [1, 1, 1]
     assert exported.stroke_clocks == (10400, 13000, 13800)
+    start, length = struct.unpack_from('<II', exported.native_bytes, 532)
+    embedded = b''.join(raw[3:] for _, raw in codec.records(exported.native_bytes, start, start + length)
+                        if raw[0] == 0x13)
+    assert embedded == exported.notes_bytes[640:]
     assert AudioMap.from_job(restored, exported, tmp_path / 'sample.wav').stroke_ms == (4000, 10000, 18000)
     assert bundle.read(bundle.member(job.key + '.sgstn')) == job.notes_bytes
     assert bundle.read(bundle.member(job.key + '.sgngl')) == job.native_bytes

@@ -96,14 +96,15 @@ Import accepts an extra embedded stroke only when its complete eight-byte record
 matches an original note, including one later in the sequence. Every note must still be
 covered in order. When the transcript has one stroke per note, an embedded clock
 can have a nonzero high byte where its original note has zero. If the other
-seven bytes match, playback uses the original note's clock.
+seven bytes match, playback uses the original note's clock. Export with speech
+alignment writes the corrected clock to both the transcript and the matching note.
 Each embedded occurrence has a separate editorial reference,
 so editing a repeated stroke's text cannot move it to the earlier occurrence.
 For playback in this app, repeats inherit the preceding occurrence's effective
 clock before pause and PCM drift correction. Leading copies use the first original
 clock. An exact match for the next note takes priority over a possible copy. Speech
-alignment can refine playback for each occurrence in BABABUI. For copied strokes
-or differing clock bytes, CaseCAT export offers to keep the original timing.
+alignment can refine playback for each occurrence in BABABUI. For copied strokes,
+CaseCAT export offers to keep the original timing.
 
 ## Verification and limits
 
