@@ -84,7 +84,22 @@ def test_identical_consecutive_original_notes_are_consumed_before_duplicates():
     assert job.baseline.spans[1].stroke_refs == (1,)
 
 
-@pytest.mark.parametrize('problem', ['unknown', 'future', 'missing', 'kind', 'empty'])
+def test_exact_forward_copy_takes_priority_over_a_partial_clock_match():
+    files = job_files(('a', 'b', 'c'))
+    notes = bytearray(files['jobs/example.sgstn'])
+    first, second = notes[640:648], notes[648:656]
+    third = second[:7] + b'\x01'
+    notes[656:664] = third
+    stream = b'\x13\x02\x04' + first + third + second + third + b'text'
+    header = bytearray(files['jobs/example.sgngl'][:1024])
+    struct.pack_into('<I', header, 536, len(stream))
+    files.update({'jobs/example.sgngl': bytes(header + stream), 'jobs/example.sgstn': bytes(notes)})
+
+    _, job = load(files)
+    assert job.stroke_clocks == (1000, 1000, 1010, (1 << 24) + 1010)
+
+
+@pytest.mark.parametrize('problem', ['unknown', 'copy_clock', 'future', 'missing', 'kind', 'empty'])
 def test_duplicate_support_does_not_accept_other_steno_mismatches(problem):
     files = duplicate_files()
     native = bytearray(files['jobs/example.sgngl'])
@@ -93,6 +108,9 @@ def test_duplicate_support_does_not_accept_other_steno_mismatches(problem):
     offset = groups[2][0]
     if problem == 'unknown':
         native[offset + 3] ^= 0x80
+    elif problem == 'copy_clock':
+        # A damaged copy of the next note precedes the intact original.
+        native[offset + 3:offset + 11] = groups[4][1][3:10] + b'\x6e'
     elif problem == 'future':
         offset = groups[1][0]
         native[offset + 3:offset + 11] = groups[-1][1][3:]

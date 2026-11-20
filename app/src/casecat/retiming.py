@@ -39,6 +39,8 @@ def _recording_clocks(events, times, duration):
 def _rewrite_strokes(native, notes, clocks):
     # CaseCAT can reuse a stroke in another passage. Its copy must remain
     # byte-identical to the companion note, including the recorded clock.
+    if len(clocks) > u32(notes, 516):
+        raise AudioExportError('This job contains copied strokes whose CaseCAT timing cannot be verified.')
     result, rewritten_notes = bytearray(native), bytearray(notes)
     note, occurrence = 640, 0
     start, length = u32(native, 532), u32(native, 536)
@@ -49,7 +51,7 @@ def _rewrite_strokes(native, notes, clocks):
             original = raw[i:i + 8]
             at = offset + i + 4
             if original != notes[note:note + 8]:
-                raise AudioExportError('This job contains copied strokes whose CaseCAT timing cannot be verified.')
+                raise AudioExportError('The transcript and original notes have different stroke clocks.')
             struct.pack_into('<I', result, at, clocks[occurrence])
             struct.pack_into('<I', rewritten_notes, note + 4, clocks[occurrence])
             note += 8
