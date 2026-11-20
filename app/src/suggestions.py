@@ -400,14 +400,14 @@ def _group_decisions(left, right, changes):
     return result
 
 
-def suggestions(original, incoming):
-    if original == incoming:
-        return []
+def _expanded_text_edits(original, incoming, left_start, left_end, right_start, right_end):
     a, b = original.text, incoming.text
-    gaps = text_edits(a, b)
+    gaps = text_edits(a[left_start:left_end], b[right_start:right_end])
     # Expand both sides together so adopting a field/symbol cannot cut it in half.
     expanded = []
-    for start, end, ns, ne in gaps:
+    for i, j, k, l in gaps:
+        start, end = left_start+i, left_start+j
+        ns, ne = right_start+k, right_start+l
         # A change from one speaker label to another is one decision, even
         # for literal labels or when one side only deletes part of a name.
         old_label = _attribution_span(a, start, end)
@@ -432,14 +432,31 @@ def suggestions(original, incoming):
                 for e in rev.elements:
                     if (x < e.end and y > e.start) or (x == y and e.start < x < e.end):
                         front, back = max(0, x-e.start), max(0, e.end-y)
-                        start, ns = max(0, start-front), max(0, ns-front)
-                        end, ne = min(len(a), end+back), min(len(b), ne+back)
+                        start, ns = max(left_start, start-front), max(right_start, ns-front)
+                        end, ne = min(left_end, end+back), min(right_end, ne+back)
             changed = before != (start, end, ns, ne)
         if expanded and (start < expanded[-1][1] or ns < expanded[-1][3]):
             expanded[-1][1] = max(end, expanded[-1][1]); expanded[-1][3] = max(ne, expanded[-1][3])
         else:
             expanded.append([start, end, ns, ne])
-    result, fields = [], {}
+    return expanded
+
+
+def suggestions(original, incoming):
+    from app.src.suggestion_filter import speaker_replacements
+
+    if original == incoming:
+        return []
+    a, b = original.text, incoming.text
+    speakers = tuple(speaker_replacements(original, incoming))
+    result = [Suggestion(original, incoming, (span,), 'speaker') for span in speakers]
+    # Diff the text between speaker decisions so even a completely rewritten
+    # answer can be accepted independently of its attribution.
+    expanded, fields = [], {}
+    previous_a = previous_c = 0
+    for start, end, ns, ne in (*speakers, (len(a), len(a), len(b), len(b))):
+        expanded.extend(_expanded_text_edits(original, incoming, previous_a, start, previous_c, ns))
+        previous_a, previous_c = end, ne
     for span in expanded:
         start, end, ns, ne = span
         left = next((e for e in original.elements if e.kind == 'field' and (e.start, e.end) == (start, end)), None)

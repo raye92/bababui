@@ -310,3 +310,38 @@ def test_repetitive_transcript_compares_only_changed_passages():
     a, b, c, d = change.ranges[0]
     assert (old.text[a:b], new.text[c:d]) == ('red', 'blue')
     assert a == old.text.index('red') and c == new.text.index('blue')
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_speaker_change_beside_an_added_turn_is_a_separate_decision(reverse):
+    first = 'MR. SMITH: Let us return to your report.\n'
+    last = '\nMR. SMITH: When did you prepare it?'
+    original = revision(first + 'MS. JONES: Yes.' + last)
+    incoming = revision(first + 'THE WITNESS: Yeah.\nMS. JONES: One more question.' + last)
+    if reverse:
+        original, incoming = incoming, original
+    edits = suggestions(original, incoming)
+    speaker, = [edit for edit in edits if edit.kind == 'speaker']
+    (a, b, c, d), = speaker.ranges
+    pair = ('MS. JONES', 'THE WITNESS')
+    assert (original.text[a:b], incoming.text[c:d]) == (pair[::-1] if reverse else pair)
+    accepted, _ = resolve(original, incoming, speaker, True)
+    assert accepted.text == original.text[:a] + incoming.text[c:d] + original.text[b:]
+
+
+@pytest.mark.parametrize('new_turn', ['MR. SMITH: Thank you.', '     A    Thank you.'])
+def test_inserted_repeated_turn_with_no_speaker_replacement_is_not_a_mismatch(new_turn):
+    original = revision('MS. JONES: Thank you.\nTHE WITNESS: Thank you.')
+    incoming = revision(original.text.replace('\n', '\n' + new_turn + '\n'))
+    assert all(edit.kind != 'speaker' for edit in suggestions(original, incoming))
+
+
+def test_swapped_speakers_on_identical_replies_count_as_two_occurrences():
+    original = revision('MS. JONES: Thank you.\nTHE WITNESS: Thank you.')
+    incoming = revision('THE WITNESS: Thank you.\nMS. JONES: Thank you.')
+    edits = suggestions(original, incoming)
+    assert [edit.kind for edit in edits] == ['speaker', 'speaker']
+    accepted, pending = resolve(original, incoming, edits[0], True)
+    assert accepted.text == 'THE WITNESS: Thank you.\nTHE WITNESS: Thank you.'
+    remaining, = suggestions(accepted, pending)
+    assert remaining.kind == 'speaker'

@@ -85,22 +85,32 @@ class SpeakerCombo(QComboBox):
         event.ignore()
 
 
-def _attribution_edits(model, locations, needs_check):
+def _attribution_edits(model, locations, needs_check, mappings):
     """Find pending label replacements and uncertain labels in the actual diff."""
-    pending = sorted((p for p in locations if not p['resolved'] and p['start'] < p['end']),
-                     key=lambda p: p['start'])
-    if not pending:
-        return {}
-    ends = [p['end'] for p in pending]
+    pending = [p for p in locations if not p['resolved'] and p['start'] < p['end']]
+    assigned = {(p['start'], p['end']): p['speaker'] for p in pending}
+    uncertain = sorted((p for p in pending if p['speaker'] in needs_check), key=lambda p: p['start'])
+    ends = [p['end'] for p in uncertain]
     original, incoming = model.original.text, model.incoming.text
     by_speaker = {}
     for index, edit in enumerate(model.edits):
+        if edit.kind == 'speaker':
+            (_, _, start, end), = edit.ranges
+            speaker = assigned.get((start, end))
+            if speaker is None:
+                # A formatter can also supply a name directly, without a numbered tag.
+                name = speaker_name_key(incoming[start:end])
+                candidates = [key for key, value in mappings.items() if value and speaker_name_key(value) == name]
+                speaker = candidates[0] if len(candidates) == 1 else None
+            if speaker:
+                by_speaker.setdefault(speaker, set()).add(index)
+            continue
         for a, b, c, d in edit.ranges:
             if c == d:
                 continue
             first = bisect_right(ends, c)
-            for i in range(first, len(pending)):
-                location = pending[i]
+            for i in range(first, len(uncertain)):
+                location = uncertain[i]
                 start, end = location['start'], location['end']
                 if start >= d:
                     break
@@ -112,15 +122,12 @@ def _attribution_edits(model, locations, needs_check):
                 line_start = original.rfind('\n', 0, a) + 1
                 line_end = original.find('\n', a)
                 before = LABEL.match(original[line_start:line_end if line_end >= 0 else len(original)])
-                mismatch = bool(observed)
                 if before and incoming.rfind('\n', 0, c) == incoming.rfind('\n', 0, start):
                     label_start, label_end = (line_start + pos for pos in before.span('name'))
                     if (a < label_end and b > label_start) or (a == b and label_start <= a <= label_end):
                         if speaker_name_key(before['name']) == current:
                             continue
-                        mismatch = True
-                if mismatch or speaker in needs_check:
-                    by_speaker.setdefault(speaker, set()).add(index)
+                by_speaker.setdefault(speaker, set()).add(index)
     return by_speaker
 
 
@@ -226,11 +233,8 @@ class ReviewView(QWidget):
             rows.setSpacing(6)
             before = '\n'.join(original.text[a:b] for a, b, _, _ in change.ranges)
             after = '\n'.join(incoming.text[c:d] for _, _, c, d in change.ranges)
-            needs_review = index in self.needs_review
-            if needs_review:
+            if index in self.needs_review or index in attribution:
                 title = 'Speaker attribution · Needs review'
-            elif index in attribution:
-                title = 'Speaker attribution'
             else:
                 title = 'Linked field' if change.field else 'Wording'
             if change.kind == 'metadata':
@@ -248,6 +252,11 @@ class ReviewView(QWidget):
             rows.addWidget(heading)
             if change.field:
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
+            if change.kind == 'speaker' and before == after:
+                (a, b, c, d), = change.ranges
+                fields = [next(e.name for e in rev.elements if (e.start, e.end) == span and e.kind == 'field')
+                          for rev, span in ((original, (a, b)), (incoming, (c, d)))]
+                rows.addWidget(QLabel(' → '.join(fields)))
             for _, text in change_diff(change):
                 text = text.replace('\n', '<br>')
                 label = QLabel(f'<span style="white-space:pre-wrap; font-size:large">{text}</span>')
@@ -291,9 +300,8 @@ class ReviewView(QWidget):
             if matches < 2 or (speaker not in overrides and uses[mapped] > 1):
                 needs_check.add(speaker)
         locations = (self.review or {}).get('locations', ())
-        self.speaker_edits = _attribution_edits(self.model, locations, needs_check)
-        self.needs_review = frozenset(index for speaker in needs_check
-                                      for index in self.speaker_edits.get(speaker, ()))
+        self.speaker_edits = _attribution_edits(self.model, locations, needs_check, mappings)
+        self.needs_review = frozenset(i for i, edit in enumerate(self.changes) if edit.kind == 'speaker')
         self.unmatched_speaker_ranges = tuple(sorted(
             (p['start'], p['end']) for p in locations
             if not p['resolved'] and p['start'] < p['end'] and mappings.get(p['speaker']) is None))
@@ -302,7 +310,7 @@ class ReviewView(QWidget):
         for speaker, summary in summaries.items():
             mapped = mappings[speaker]
             matches = matches_by_speaker[speaker]
-            mismatches = sum(summary['counts'].values())-matches if mapped else 0
+            mismatches = len(self.needs_review.intersection(self.speaker_edits.get(speaker, ())))
             total_matches += matches
             heading = QHBoxLayout()
             label = QLabel(f'{speaker} → {mapped or "Needs review"}')
@@ -333,7 +341,8 @@ class ReviewView(QWidget):
             bar.setValue(matches)
             bar.setFormat(f'{matches} {"match" if matches == 1 else "matches"} · '
                           f'{mismatches} {"mismatch" if mismatches == 1 else "mismatches"}')
-            bar.setToolTip('Agreement with existing labels, not verified identity.\n'+'\n'.join(f'{n}: {v}' for n,v in summary['counts'].items()))
+            votes = '\n'.join(f'{name}: {count}' for name, count in summary['counts'].items())
+            bar.setToolTip('Mismatches are pending speaker changes.\nSpeaker identification votes\n' + votes)
             rows.addWidget(bar)
         scrollbar = self.speaker_scroll.verticalScrollBar()
         position = scrollbar.value() if self.review is self._shown_review else 0
@@ -348,8 +357,11 @@ class ReviewView(QWidget):
         self._size_speaker_list()
         self.speaker_scroll.setVisible(bool(summaries) and self.summary.isChecked())
         scrollbar.setValue(position)
-        self.summary.setVisible(bool(summaries))
-        self.summary.setText(f'Speakers · {total_matches} matches')
+        self.summary.setVisible(bool(summaries or self.needs_review))
+        self.summary.setEnabled(bool(summaries))
+        self.summary.setArrowType((Qt.DownArrow if self.summary.isChecked() else Qt.RightArrow)
+                                  if summaries else Qt.NoArrow)
+        self.summary.setText(f'Speakers · {total_matches} matches · {len(self.needs_review)} to review')
 
     def _size_speaker_list(self):
         box = self.speaker_scroll.widget()

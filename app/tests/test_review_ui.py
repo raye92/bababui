@@ -6,7 +6,7 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QProgressBar, QPushButton
 from app.src.review_view import ReviewView, change_diff
 from app.src.suggestions import Suggestion, resolve
 from app.tests.test_suggestion_filter import speakers
@@ -34,6 +34,80 @@ def test_speaker_summary_is_fixed_and_cards_filter_to_mismatches():
     assert sum(not card.isHidden() for card in view.cards) == 1
     view.select(1)
     assert view.current == 1
+    view.close()
+
+
+@pytest.mark.parametrize('accept', [False, True])
+def test_repeated_thank_you_counts_as_one_pending_speaker_change(accept):
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review, track_decision
+
+    app = QApplication.instance() or QApplication([])
+    first = 'THE WITNESS: I brought the report.\nTHE WITNESS: The date is correct.\nTHE WITNESS: Thank you.\n'
+    original = revision(first + ': Thank you.').insert_field(len(first), 'EZ SPEAKER 02', 'MS. JONES')
+    state = SimpleNamespace(original=original)
+    begin_review(state, original.text.replace('THE WITNESS:', 'SPEAKER 2:').replace('MS. JONES:', 'SPEAKER 2:'))
+    view = ReviewView()
+    view.set_revisions(original, state.incoming, review=state.review)
+    assert view.speaker_scroll.widget().findChild(QProgressBar).format() == '2 matches · 1 mismatch'
+    assert '1 to review' in view.summary.text()
+    view.filter_speaker('SPEAKER 2')
+    assert len(view.visible_indices) == 1
+    assert any('Speaker attribution · Needs review' in label.text()
+               for label in view.cards[view.current].findChildren(QLabel))
+    change = view.changes[view.current]
+    before = state.incoming.text
+    state.original, state.incoming = resolve(original, state.incoming, change, accept)
+    track_decision(state.review, change, before, state.incoming.text)
+    view.set_revisions(state.original, state.incoming, review=state.review)
+    assert view.speaker_scroll.widget().findChild(QProgressBar).format() == '2 matches · 0 mismatches'
+    assert '0 to review' in view.summary.text() and not view.visible_indices
+    view.close()
+
+
+@pytest.mark.parametrize('accept_speaker', [False, True])
+@pytest.mark.parametrize('wording_first', [False, True])
+def test_speaker_fields_and_changed_answer_have_independent_cards(accept_speaker, wording_first):
+    app = QApplication.instance() or QApplication([])
+    original = revision(': Yes.').insert_field(0, 'EZ SPEAKER 02', 'JONES')
+    incoming = revision(': Yeah.').insert_field(0, 'EZ SPEAKER 03', 'LEE')
+    view = ReviewView()
+    view.set_revisions(original, incoming)
+    speaker, wording = view.changes
+    assert (speaker.kind, wording.kind) == ('speaker', 'text')
+    (a, b, c, d), = speaker.ranges
+    assert (original.text[a:b], incoming.text[c:d]) == ('JONES', 'LEE')
+    assert '1 to review' in view.summary.text()
+    assert 'Needs review' in view.cards[0].findChild(QLabel).text()
+    first = wording if wording_first else speaker
+    original, incoming = resolve(original, incoming, first, not accept_speaker if wording_first else accept_speaker)
+    view.set_revisions(original, incoming)
+    remaining, = view.changes
+    if wording_first:
+        assert '1 to review' in view.summary.text()
+        assert original.text.startswith('JONES:') and incoming.text.startswith('LEE:')
+        original, incoming = resolve(original, incoming, remaining, accept_speaker)
+    else:
+        assert '0 to review' in view.summary.text()
+        assert original.text.endswith(' Yes.') and incoming.text.endswith(' Yeah.')
+        original, incoming = resolve(original, incoming, remaining, not accept_speaker)
+    chosen = 'LEE: Yes.' if accept_speaker else 'JONES: Yeah.'
+    assert original.text == incoming.text == chosen
+    assert original.elements[0].name == incoming.elements[0].name == (
+        'EZ SPEAKER 03' if accept_speaker else 'EZ SPEAKER 02')
+    view.close()
+
+
+def test_different_native_speaker_slots_with_the_same_display_name_are_identifiable():
+    app = QApplication.instance() or QApplication([])
+    before = revision(': Thank you.').insert_field(0, 'EZ SPEAKER 02', 'SPEAKER 2')
+    after = revision(': Thank you.').insert_field(0, 'EZ SPEAKER 03', 'SPEAKER 2')
+    view = ReviewView()
+    view.set_revisions(before, after)
+    assert '1 to review' in view.summary.text()
+    card, = view.cards
+    assert any('EZ SPEAKER 02' in label.text() and 'EZ SPEAKER 03' in label.text()
+               for label in card.findChildren(QLabel))
     view.close()
 
 

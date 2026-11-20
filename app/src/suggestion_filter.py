@@ -352,7 +352,8 @@ def index_speaker_fields(revision):
 
 
 def _label_pattern(index_fields):
-    names = [re.escape(e.value) for e in index_fields or () if not LABEL.fullmatch(e.value + ':')]
+    values = dict.fromkeys(e.value for e in index_fields or () if e.value)
+    names = [re.escape(value) for value in values if not LABEL.fullmatch(value + ':')]
     return re.compile(_LABEL_PATTERN % '|'.join((_NAME_PATTERN, *names)), re.I) if names else LABEL
 
 
@@ -375,6 +376,64 @@ def _speaker_choices(paragraphs, fields, index_fields=()):
 
 def _field_ranges(revision):
     return {(e.start, e.end): e for e in revision.elements if e.kind == 'field'}
+
+
+def _review_turn_pairs(old, new):
+    """Anchor unchanged turns, then align testimony independently of the names."""
+    from app.src.advanced_diff import paragraph_ops
+
+    count_delta = Counter(p[3] for p in old)
+    count_delta.subtract(p[3] for p in new)
+
+    def anchors(paragraphs):
+        # Repeated identical replies keep their order. If a copy was added
+        # or removed, the intact full lines distinguish the surviving turns.
+        return [(body, line if not body or count_delta[body] else None)
+                for _, line, _, body in paragraphs]
+
+    lines = SequenceMatcher(None, anchors(old), anchors(new))
+    for tag, a, b, c, d in lines.get_opcodes():
+        left, right = old[a:b], new[c:d]
+        if tag == 'equal' or len(left) == len(right) == 1:
+            yield from zip(left, right)
+        elif tag == 'replace':
+            for _, i, j, k, l in paragraph_ops([p[3] for p in left], [p[3] for p in right]):
+                if j - i == l - k:
+                    yield from zip(left[i:j], right[k:l])
+                elif min(j - i, l - k) == 1:
+                    # An added or deleted turn can share the same diff. Require
+                    # a single plausible reply before pairing across that gap.
+                    pairs = [(x, y) for x in left[i:j] for y in right[k:l] if x[3] and y[3]
+                             and SequenceMatcher(None, x[3], y[3], autojunk=False).ratio() >= .5]
+                    if len(pairs) == 1:
+                        yield pairs[0]
+
+
+def speaker_replacements(original, incoming):
+    """Return a separate name range for each pending change of speaker."""
+    if ':' not in original.text or ':' not in incoming.text:
+        return
+    old_fields, new_fields = _field_ranges(original), _field_ranges(incoming)
+    labels = _label_pattern(e for fields in (old_fields, new_fields) for e in fields.values()
+                            if e.value and speaker_number(e.name))
+    old = _paragraphs(original.text, byline_context=False, labels=labels)
+    new = _paragraphs(incoming.text, byline_context=False, labels=labels)
+    for left, right in _review_turn_pairs(old, new):
+        before, after = left[2], right[2]
+        if not before or not after:
+            continue
+        source, target = _label_range(left), _label_range(right)
+        first, second = old_fields.get(source), new_fields.get(target)
+        if ((not first and GENERIC.fullmatch(before['name']))
+                or (not second and GENERIC.fullmatch(after['name']))):
+            continue  # An unmapped voice still needs an identity.
+        if first and second and first.name == second.name:
+            continue  # A shared field definition keeps its own linked edit.
+        distinct_slots = first and second and speaker_number(first.name) and speaker_number(second.name)
+        if not distinct_slots and speaker_name_key(before['name']) == speaker_name_key(after['name']):
+            continue
+        if original.atomic_range(*source) == source and incoming.atomic_range(*target) == target:
+            yield (*source, *target)
 
 
 def speaker_choices(original):
