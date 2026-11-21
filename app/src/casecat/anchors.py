@@ -6,6 +6,14 @@ import uuid
 from .elements import NativeElement, edited_elements, paragraph_symbols
 
 
+class FieldConflict(ValueError):
+    """A proposal would give one linked field two different values."""
+
+    def __init__(self, name):
+        super().__init__('The proposal assigns conflicting values to one speaker field.')
+        self.name = name
+
+
 @dataclass(frozen=True)
 class AnchoredSpan:
     identity: str
@@ -283,7 +291,7 @@ class Revision:
                 value = value[:start-field.start] + content + value[end-field.start:]
             _validate_field_value(value)
             if field.name in definitions and definitions[field.name] != value:
-                raise ValueError('The proposal assigns conflicting values to one speaker field.')
+                raise FieldConflict(field.name)
             definitions[field.name] = value
         for field in self.elements:
             if field.kind == 'field' and field.name in definitions:

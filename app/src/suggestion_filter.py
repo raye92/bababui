@@ -52,7 +52,9 @@ from app.src.casecat.fields import field_values
 from app.src.number_forms import equivalent_integer
 
 
-_NAME_PATTERN = r'SPEAKER\s+\d+|(?:MS|MR|MRS|DR)\. [^:\n]+|THE [^:\n]+'
+# An unnamed CaseCAT speaker field shows as [EZ SPEAKER 01] (or [!EZ SPEAKER 01]).
+# It is still a speaker label, so a change there is an attribution, not a rename.
+_NAME_PATTERN = r'SPEAKER\s+\d+|(?:MS|MR|MRS|DR)\. [^:\n]+|THE [^:\n]+|\[!?EZ SPEAKER \d+\]'
 _LABEL_PATTERN = r'^(?P<prefix>[ \t]*(?:BY[ \t]+)?)(?P<name>%s):'
 LABEL = re.compile(_LABEL_PATTERN % _NAME_PATTERN, re.I)
 GENERIC = re.compile(r'SPEAKER\s+(\d+)', re.I)
@@ -391,10 +393,39 @@ def speaker_choices(original):
             if choice.selectable}
 
 
+def _propose(base, text):
+    """Propose `text`, never renaming a linked field to two different values.
+
+    When the draft gives occurrences of one field different values, each edited
+    occurrence becomes its own change instead of a rename of the whole field.
+    """
+    from app.src.casecat.anchors import FieldConflict
+    from app.src.suggestions import propose, text_edits
+    for _ in range(sum(e.kind == 'field' for e in base.elements) + 1):
+        try:
+            return propose(base, text)
+        except FieldConflict as conflict:
+            edits = text_edits(base.text, text)
+            edited = {e for e in base.elements if e.kind == 'field' and e.name == conflict.name
+                      and any(a < e.end and b > e.start or e.start <= a <= b <= e.end for a, b, _, _ in edits)}
+            if not edited:
+                raise
+            base = replace(base, elements=tuple(e for e in base.elements if e not in edited))
+    return propose(base, text)
+
+
+def _unnamed(name, value):
+    return value in (f'[{name}]', f'[!{name}]')
+
+
 def _replace_speaker(revision, start, end, name, reference, values):
     if reference is None:
         return revision._replace(start, end, name)
-    result = revision._replace(start, end, '').insert_field(start, reference.name, values[reference.name])
+    value = values[reference.name]
+    result = revision._replace(start, end, '').insert_field(start, reference.name, value)
+    if reference.name not in dict(revision.definitions) and _unnamed(reference.name, value):
+        # An unnamed speaker has no definition. Relinking its label must not invent one.
+        result = replace(result, definitions=revision.definitions)
     return replace(result, elements=tuple(
         replace(e, raw=reference.raw, source=reference.source)
         if e.kind == 'field' and e.start == start else e for e in result.elements))
@@ -510,8 +541,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None,
     speaker_elements = {fields[_label_range(p)] for p in attribution_paragraphs
                         if p[2] and _label_range(p) in fields}
     base = replace(original, elements=tuple(e for e in original.elements if e not in speaker_elements))
-    from app.src.suggestions import propose
-    revision = propose(base, text)
+    revision = _propose(base, text)
     _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text, labels=labels)
     aligned_sources = {j: old[i] for i,j in projected_pairs}
     values = field_values(original)

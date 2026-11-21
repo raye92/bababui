@@ -1,3 +1,4 @@
+import re
 from app.src.casecat.anchors import Revision, AnchoredSpan
 from app.src.suggestions import suggestions, resolve
 
@@ -144,3 +145,62 @@ def test_speaker_override_can_use_literal_label_but_not_cover_field():
     override_speaker(state, 'SPEAKER 1', 'THE WITNESS')
     assert state.incoming.text == original.text
     assert state.incoming.elements == original.elements
+
+
+def unnamed_speakers(numbers):
+    """A rough whose speaker fields were never named, so each label shows as [EZ SPEAKER NN]."""
+    from dataclasses import replace
+    old = Revision((AnchoredSpan('root', (), (), ''),))
+    for i, number in enumerate(numbers):
+        name = f'EZ SPEAKER {number:02d}'
+        old = old._replace(len(old.text), len(old.text), '     ')
+        old = old.insert_field(len(old.text), name, f'[{name}]')
+        old = old._replace(len(old.text), len(old.text), f':  Passage number {i} has unique testimony.\n')
+    return replace(old, definitions=())
+
+
+def _draft(old, labels):
+    lines = old.text.split('\n')
+    return '\n'.join(re.sub(r'\[EZ SPEAKER \d+\]', label, line, count=1) if label else line
+                     for line, label in zip(lines, [*labels, None]))
+
+
+def test_unnamed_speaker_given_to_two_people_is_one_change_at_that_line():
+    # 261120up: the rough labels the attorney and the reporter both [EZ SPEAKER 01].
+    # The draft splits them, which once failed the whole AI draft as a field rename.
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+    old = unnamed_speakers([1, 2, 1, 1, 2, 1])
+    state = SimpleNamespace(original=old)
+    begin_review(state, _draft(old, ['SPEAKER 1', 'SPEAKER 2', 'SPEAKER 1', 'SPEAKER 1', 'SPEAKER 2', 'SPEAKER 3']))
+    changes = suggestions(old, state.incoming)
+    assert [(old.text[a:b], state.incoming.text[c:d]) for change in changes for a, b, c, d in change.ranges] == [
+        ('[EZ SPEAKER 01]', 'SPEAKER 3')]
+    assert state.incoming.definitions == old.definitions
+    assert sum(e.kind == 'field' for e in state.incoming.elements) == 5
+
+
+def test_unnamed_speakers_mapped_back_leave_the_rough_unchanged():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+    old = unnamed_speakers([1, 2, 1, 1, 2, 1])
+    state = SimpleNamespace(original=old)
+    begin_review(state, _draft(old, ['SPEAKER 1', 'SPEAKER 2', 'SPEAKER 1', 'SPEAKER 1', 'SPEAKER 2', 'SPEAKER 1']))
+    assert state.incoming.text == old.text
+    assert state.incoming.definitions == old.definitions
+    assert suggestions(old, state.incoming) == []
+
+
+def test_two_names_for_one_field_become_separate_changes_not_an_error():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review
+    old = unnamed_speakers([1, 2, 1, 1, 2, 1])
+    state = SimpleNamespace(original=old)
+    begin_review(state, _draft(old, ['MR. ALT', 'MS. UP', 'MR. ALT', 'MR. ALT', 'MS. UP', 'THE REPORTER']))
+    changes = suggestions(old, state.incoming)
+    one = [change for change in changes if change.field != 'EZ SPEAKER 02']
+    assert all(change.field is None for change in one)
+    assert sorted(state.incoming.text[c:d] for change in one for _, _, c, d in change.ranges) == [
+        'MR. ALT', 'MR. ALT', 'MR. ALT', 'THE REPORTER']
+    # One person at every occurrence is still a linked rename of that field.
+    assert dict(state.incoming.definitions).get('EZ SPEAKER 02') == 'MS. UP'
