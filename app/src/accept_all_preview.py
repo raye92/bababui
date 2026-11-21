@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QTextEdit
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.native_editor import NativeTranscriptEditor
-from app.src.review_colors import ADDITION_BACKGROUND
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.suggestions import preview_ranges, resolve_all
 
 
@@ -43,9 +43,9 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         super().__init__(font)
         self.setReadOnly(True)
         self._text = ''
-        self._edits, self._highlights = (), []
+        self._edits, self._highlights, self._labels = (), [], []
 
-    def load_preview(self, bundle, job, prepared, model, selected):
+    def load_preview(self, bundle, job, prepared, model, selected, labels=()):
         self.set_native_source(bundle, job)
         self.setPlainText(job.text, prepared=prepared)
         self._text, self._edits = job.text, model.edits
@@ -61,7 +61,20 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
                     cursor.setPosition(offsets[first])
                     cursor.setPosition(offsets[last], QTextCursor.KeepAnchor)
                     self._highlights.append((first, last, index, cursor))
+        self.set_label_ranges(labels, offsets)
         self.highlight_edit(selected)
+
+    def set_label_ranges(self, labels, offsets=None):
+        """Corrected or unmatched speaker labels, in the accepted text's positions."""
+        if offsets is None:
+            offsets = list(accumulate((2 if ord(char) > 0xffff else 1 for char in self._text), initial=0))
+        self._labels = []
+        for start, end in labels:
+            if 0 <= start < end <= len(self._text):
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(offsets[start])
+                cursor.setPosition(offsets[end], QTextCursor.KeepAnchor)
+                self._labels.append(cursor)
 
     def highlight_edit(self, selected):
         marks = []
@@ -71,6 +84,13 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
             mark.format.setBackground(QColor(ADDITION_BACKGROUND))
             mark.format.setForeground(QColor('#1e5531'))
             mark.format.setFontUnderline(index == selected)
+            marks.append(mark)
+        # Speaker labels come last, so they stay yellow inside a green edit.
+        for cursor in self._labels:
+            mark = QTextEdit.ExtraSelection()
+            mark.cursor = cursor
+            mark.format.setBackground(QColor(CHECK_BACKGROUND))
+            mark.format.setForeground(QColor(CHECK_FOREGROUND))
             marks.append(mark)
         self.set_review_marks(marks, [])
 

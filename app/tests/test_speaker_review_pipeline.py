@@ -164,3 +164,53 @@ def test_testing_mode_saves_the_speaker_review_request_and_decisions(tmp_path, m
     assert logs == ['1.json', 'result.json']
     saved = json.loads(next((tmp_path / 'bababui-transcriptions').glob('*-result.json')).read_text(encoding='utf-8'))
     assert saved['summary'] == 'Speaker review: 1 label corrected, 1 turn split, 0 flagged.'
+
+
+def test_audio_check_sends_the_clip_with_the_turns_before_and_after(tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from app.src import speaker_audio
+    from app.src.speaker_audio import AudioSpeakerCheck
+    clips, deleted, sent = [], [], []
+
+    def prepare(path, segment, destination):
+        clips.append(segment)
+        Path(destination).write_bytes(b'clip')
+    monkeypatch.setattr(speaker_audio.media, 'prepare', prepare)
+    replies = iter(['{"speaker": "SPEAKER 1", "why": "Same voice as the examiner."}',
+                    '```json\n{"speaker": "uncertain"}\n```', '{"speaker": "SPEAKER 3"}'])
+
+    class Files:
+        def upload(self, file, config):
+            assert Path(file).read_bytes() == b'clip' and config == {'mime_type': 'audio/wav'}
+            return SimpleNamespace(name='files/clip', uri='gs://clip', state='ACTIVE')
+
+        def delete(self, name):
+            deleted.append(name)
+
+    class Interactions:
+        def create(self, **kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(status='completed', output_text=next(replies))
+
+    check = AudioSpeakerCheck(tmp_path / 'job.wav', 'key', 'gemini-4-argon',
+                              sdk=SimpleNamespace(files=Files(), interactions=Interactions()))
+    question = {'turn': {'speaker': 'SPEAKER 1', 'proposed': 'SPEAKER 2', 'text': 'Doctor, when you reviewed',
+                         'start': 324.1, 'end': 325.9},
+                'before': {'speaker': 'SPEAKER 2', 'text': 'The prior MRI findings.', 'start': 319.7, 'end': 323.8},
+                'after': {'speaker': 'SPEAKER 3', 'text': 'Objection.', 'start': 326.1, 'end': 328.9},
+                'participants': {'SPEAKER 1': 'examining attorney Mr. Smith'}}
+    assert check(question) == {'speaker': 'SPEAKER 1', 'why': 'Same voice as the examiner.'}
+    assert clips == [{'start': 319.45, 'end': 329.15}]
+    assert deleted == ['files/clip']
+    request = sent[0]
+    assert request['model'] == 'gemini-4-argon' and request['store'] is False
+    assert request['input'][0] == {'type': 'audio', 'uri': 'gs://clip', 'mime_type': 'audio/wav'}
+    payload = json.loads(request['input'][1]['text'])
+    assert (payload['original'], payload['proposed']) == ('SPEAKER 1', 'SPEAKER 2')
+    assert payload['before'] == {'speaker': 'SPEAKER 2', 'text': 'The prior MRI findings.', 'from': 0.25, 'to': 4.35}
+    assert payload['disputed']['from'] == 4.65 and payload['after']['speaker'] == 'SPEAKER 3'
+    # Anything but one of the two labels is uncertain.
+    assert check(question)['speaker'] == 'uncertain'
+    assert check(question)['speaker'] == 'uncertain'
+    assert deleted == ['files/clip'] * 3

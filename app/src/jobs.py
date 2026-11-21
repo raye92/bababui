@@ -2,6 +2,7 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
 import hashlib
+from itertools import count
 import json
 from pathlib import Path
 import tempfile
@@ -16,10 +17,12 @@ from app.src.audio_pipeline import AudioPipeline, check_wav_digest
 from app.src.vocabulary_reconciliation import normalized_vocabulary
 from app.src.ai_review import AssistedReview, review_edits
 from app.src.casecat.timing import AudioMap
-from app.src.processing import ProcessingClient, APP_DIR
+from app.src.processing import DEFAULT_MODEL, ProcessingClient, APP_DIR
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept, begin_review
+from app.src.speaker_audio import AudioSpeakerCheck
 from shared.speaker_review import review_speakers
+from shared.transcription import has_key
 from shared.storage import atomic_bytes
 
 
@@ -170,18 +173,35 @@ class ProcessingWorker(QThread):
         testing = request.config.get('testing', False)
         folder = Path(tempfile.gettempdir())/'bababui-transcriptions'
         name = f'speaker-review-{uuid4().hex}'
+        saved = count(1)
 
         def save(entry):
-            atomic_bytes(folder/f'{name}-{entry["batch"]}.json',
+            atomic_bytes(folder/f'{name}-{entry["kind"]}-{next(saved)}.json',
                          json.dumps(entry, ensure_ascii=False, indent=2).encode('utf-8'))
         # Stitching notes say where a speaker number may have changed at a chunk join.
         notes = [w for w in transcription.warnings if 'speaker' in w.casefold()]
+        # Conflicting proposals are checked against the recording with Gemini.
+        key = request.config.get('gemini_api_key', '')
+        model = request.review_model if request.review_model.startswith('gemini-') else DEFAULT_MODEL
+        verify = AudioSpeakerCheck(request.wav_path, key, model) if has_key(key) else None
         result = review_speakers(transcription.words, complete, context=request.context, notes=notes,
-                                 progress=report, log=save if testing else None)
+                                 rough=self._rough(), verify=verify, progress=report,
+                                 log=save if testing else None)
         if testing:
             atomic_bytes(folder/f'{name}-result.json',
                          json.dumps(result.to_json(), ensure_ascii=False, indent=2).encode('utf-8'))
         return result
+
+    def _rough(self):
+        """The reporter's rough testimony, an additional check on proposed speakers."""
+        request = self.request
+        if request.original is None:
+            return None
+        original = request.original
+        if request.body_start:
+            from app.src.notice_review import split_revision
+            _, original = split_revision(original, request.body_start)
+        return original.text
 
     def _align(self, transcription):
         request = self.request

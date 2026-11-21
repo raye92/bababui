@@ -40,14 +40,30 @@ With AI-assisted review on, the AI review model then checks speaker attribution
 and turn boundaries on the stitched Gemini transcript, before Q/A and colloquy
 formatting. It reviews every turn, using introductions, the current examiner, who
 is addressed, the preceding question, the following response, and the confirmed
-notice. It splits a turn at the first word the next person speaks and corrects a
+notice. It proposes a split at the first word the next person speaks, or a new
 label when the exchange identifies one participant. Words, their order and their
-audio times never change, and the raw export stays Gemini's own transcript. When
-the exchange establishes only a role, such as an objection that either of two
-attorneys could have made, Gemini's label stays, the turn is formatted as its own
-colloquy paragraph, and a warning gives its audio time. In Incoming, a corrected
-speaker label is yellow, and only the reassigned part of a split turn. Converting a
-correct label to Q or A adds no highlight, and wording highlights are unchanged.
+audio times never change, and the raw export stays Gemini's own transcript.
+
+Every proposed change keeps Gemini's label, the proposed label and the reason.
+A proposal is checked before it is applied. It conflicts with the exchange when
+the turn speaks directly to the proposed speaker ("Doctor, when you ..." is not
+said by the doctor), when it gives the witness an objection, or when it rests on
+a bare courtesy such as "Thank you". It also conflicts when the reporter's rough
+attributes the words to Gemini's speaker. A conflicting proposal goes to Gemini
+with the audio of that turn and the turns immediately before and after it. If
+the voice confirms the proposal, it is applied; if it confirms Gemini's label,
+the proposal is dropped. Otherwise Gemini's label stays, the turn is formatted
+by that speaker's role and flagged, and a warning gives its audio time. When the
+exchange establishes only a role, such as an objection that either of two
+attorneys could have made, Gemini's label stays and the turn is flagged too.
+
+A review card that gives words to a different speaker, such as Q to THE WITNESS:
+or a split that moves words from a Q to an A, is titled Speaker. When the speaker
+review made the change, the card shows Gemini's label, the proposed label, the
+reason and the checks. A corrected speaker label is yellow in Incoming, the inline
+view and the Accept All preview, even inside a green wording edit, and only on the
+reassigned part of a split turn. Converting a correct label to Q or A adds no
+highlight.
 
 BABABUI then formats the transcription and writes the
 result to Incoming. The current

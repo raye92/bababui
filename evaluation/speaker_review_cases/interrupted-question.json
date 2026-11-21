@@ -1,0 +1,12 @@
+{
+  "id": "interrupted-question",
+  "title": "The examiner's interrupted question, addressed to the doctor",
+  "context": "Witness (deponent): Dr. Michael Chen.\nAttorney: Mr. Smith.\nAttorney: Ms. Jones.",
+  "witness": "SPEAKER 2",
+  "asr": "[0:05:00] Speaker 1: Doctor, I have just a few follow-up questions. You testified that you assigned 20% apportionment to pre-existing degeneration. Correct?\n[0:05:09] Speaker 2: Correct.\n[0:05:11] Speaker 1: Did you identify any objective findings supporting that apportionment?\n[0:05:15] Speaker 2: Yes.\n[0:05:17] Speaker 1: What findings did you rely upon?\n[0:05:19] Speaker 2: The prior MRI findings and the applicant's medical history.\n[0:05:24] Speaker 1: Doctor, when you reviewed the records\n[0:05:26] Speaker 3: Objection, let him finish the question.\n[0:05:29] Speaker 1: Did you see the MRI report from March?\n[0:05:32] Speaker 2: Yes, I did.",
+  "expected": "BY SPEAKER 1:\n     Q    Doctor, I have just a few follow-up questions.  You testified that you assigned 20% apportionment to pre-existing degeneration.  Correct?\n     A    Correct.\n     Q    Did you identify any objective findings supporting that apportionment?\n     A    Yes.\n     Q    What findings did you rely upon?\n     A    The prior MRI findings and the applicant's medical history.\n     Q    Doctor, when you reviewed the records --\n\n     SPEAKER 3:  Objection, let him finish the question.\n\nBY SPEAKER 1:\n     Q    Did you see the MRI report from March?\n     A    Yes, I did.",
+  "clues": [
+    {"asr": "Doctor, when you reviewed the records", "clue": "The turn speaks directly to the doctor, so the doctor did not say it, and \"Let him finish the question\" shows it was the examiner's question. Gemini's SPEAKER 1 is right; keep the Q."},
+    {"asr": "Objection, let him finish the question", "clue": "Ms. Jones objects that the examiner was cut off before finishing his question."}
+  ]
+}

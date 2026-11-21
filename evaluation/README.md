@@ -282,10 +282,13 @@ Each case is graded in four separate areas:
   yellow, and only on the reassigned part of a split turn. Q/A conversion of a
   correct label is not highlighted.
 
-`evaluation/speaker_review_cases/` holds four hand-graded cases from the
-specification: the doctor's answer inside the examiner's turn, a witness's
-clarifying question, ambiguous objections, and Gemini renumbering speakers at a
-chunk boundary. Each case gives Gemini's `Speaker N:` lines, optionally with an
+`evaluation/speaker_review_cases/` holds five hand-graded cases: the doctor's
+answer inside the examiner's turn, a witness's clarifying question, ambiguous
+objections, Gemini renumbering speakers at a chunk boundary, and the examiner's
+interrupted question "Doctor, when you reviewed the records", which must keep
+Gemini's examiner label. The grader has no audio or reporter's rough, so a
+proposal that conflicts with the exchange stays flagged, and an unneeded flag
+counts against review status. Each case gives Gemini's `Speaker N:` lines, optionally with an
 audio time such as `[0:29:08]`, the case context, the stitching notes, the
 expected draft, and the phrases that must be flagged. The expected speaker of
 each word comes from the expected draft: Q is the examiner on the BY line in

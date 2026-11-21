@@ -88,7 +88,7 @@ CORE RULES
  
 These rules govern every decision. Nothing later in this prompt overrides them.
  
-1. Keep every speaker label, and every change of speaker, exactly as given. Who speaks each turn, and where each turn starts, is decided before formatting, not here. Do not renumber, swap, reassign, or merge labels, and do not replace them with names or titles such as MR. SMITH, THE WITNESS, or THE REPORTER. A label marked [unconfirmed] is provisional: write the label without the marker, keep that turn as its own colloquy paragraph, and flag it (Section 15).
+1. Keep every speaker label, and every change of speaker, exactly as given. Who speaks each turn, and where each turn starts, is decided before formatting, not here. Do not renumber, swap, reassign, or merge labels, and do not replace them with names or titles such as MR. SMITH, THE WITNESS, or THE REPORTER. A label marked [unconfirmed] is provisional: write the label without the marker, format the turn by that speaker's role as usual, keep it as its own paragraph, and flag it (Section 15).
 2. Keep every word exactly as given, in its original order. Do not correct grammar, spelling, or punctuation, and do not remove filler words, false starts, or repetitions. The only changes allowed are spacing and the line structure this prompt describes.
 3. Speaker numbers do not imply roles. The witness may be any speaker number, and so may each attorney.
 4. Do not decide formatting from question marks, answer wording, or speaker number alone. Decide from each speaker's established role and the context of the entire deposition. Decide Q/A or colloquy for each turn separately: the examiner's question to the witness is Q, but the same examiner telling the witness "You may answer" is colloquy.

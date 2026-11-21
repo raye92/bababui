@@ -459,7 +459,8 @@ class DocumentView(QWidget):
             self.set_accept_all_preview(False)
             return
         job, prepared = result
-        self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, self.diff_view.current)
+        self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, self.diff_view.current,
+                                         labels=self.diff_view.speaker_label_ranges)
         self._preview_model = model
         self._update_original_page()
         if not self.stack.currentIndex():

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from evaluation.speaker_review_grading import AREAS, grade, load_cases, main, parse_words, report, run_case
-from shared.speaker_review import (CORRECTED, FLAGGED, PROMPT, UNREVIEWED, SpeakerReview, label_highlights,
+from shared.speaker_review import (CORRECTED, FLAGGED, KEPT, PROMPT, UNREVIEWED, SpeakerReview, label_highlights,
                                    review_speakers)
 
 CASES = Path(__file__).parents[1] / 'speaker_review_cases'
@@ -46,7 +46,15 @@ CORRECT = {
         {'id': 8, 'speaker': 'SPEAKER 1', 'why': 'The doctor, renumbered.'},
         {'id': 9, 'speaker': 'SPEAKER 2', 'why': 'The examiner, renumbered.'},
         {'id': 10, 'speaker': 'SPEAKER 1', 'why': 'The doctor, renumbered.'}]},
+    'interrupted-question': {'participants': {'SPEAKER 1': 'examining attorney Mr. Smith', 'SPEAKER 2': 'witness',
+                                              'SPEAKER 3': 'attorney Ms. Jones'},
+                             'turns': [{'id': n, 'speaker': f'SPEAKER {2 - n % 2}'} for n in range(1, 8)]
+                             + [{'id': 8, 'speaker': 'SPEAKER 3'}, {'id': 9, 'speaker': 'SPEAKER 1'},
+                                {'id': 10, 'speaker': 'SPEAKER 2'}]},
 }
+# The proposal that put the examiner's interrupted question on the witness.
+WRONG_WITNESS = copy.deepcopy(CORRECT['interrupted-question'])
+WRONG_WITNESS['turns'][6] = {'id': 7, 'speaker': 'SPEAKER 2', 'why': 'The witness interrupts with a question.'}
 
 
 @pytest.fixture(scope='module')
@@ -325,9 +333,9 @@ def test_saved_reviews_grade_like_live_ones(cases, tmp_path, capsys):
                                                                encoding='utf-8')
     assert main([str(CASES), '--saved', str(tmp_path), '--json', str(tmp_path / 'results.json')]) == 0
     out = capsys.readouterr().out
-    assert 'Highlight placement: 32 of 32 correct' in out
+    assert 'Highlight placement: 42 of 42 correct' in out
     saved = json.loads((tmp_path / 'results.json').read_text())
-    assert len(saved) == 4 and all(not r['failures'] for r in saved)
+    assert len(saved) == 5 and all(not r['failures'] for r in saved)
 
 
 def test_a_saved_review_for_another_transcript_is_refused(cases):
@@ -347,3 +355,111 @@ def test_report_lists_each_area_and_the_clue(cases):
     assert 'Review status: 3 of 4 correct' in text
     assert 'Highlight placement: 5 of 6 correct' in text
     assert 'Clue: The introductions make SPEAKER 2 the examiner' in text
+
+
+# Checks on a proposed change -----------------------------------------------------
+
+def test_a_proposal_that_speaks_to_its_own_speaker_goes_to_the_audio(cases):
+    case = cases['interrupted-question']
+    questions = []
+
+    def verify(question):
+        questions.append(question)
+        return {'speaker': 'SPEAKER 1', 'why': 'The examiner\'s voice.'}
+    review = review_speakers(case.words, answer(WRONG_WITNESS), verify=verify)
+    question = questions[0]
+    assert question['turn']['text'] == 'Doctor, when you reviewed the records'
+    assert (question['turn']['speaker'], question['turn']['proposed']) == ('SPEAKER 1', 'SPEAKER 2')
+    assert question['before']['text'] == "The prior MRI findings and the applicant's medical history."
+    assert question['after']['text'] == 'Objection, let him finish the question.'
+    assert question['conflicts'] == ['it speaks directly to SPEAKER 2 (“Doctor”)']
+    assert question['turn']['start'] == 324.0 and question['after']['end'] is not None
+    kept = review.segments[6]
+    assert (kept.status, kept.speaker, kept.gemini, kept.proposed) == (KEPT, 'SPEAKER 1', 'SPEAKER 1', 'SPEAKER 2')
+    assert kept.reason == 'The witness interrupts with a question.'
+    assert kept.checks[-1] == "the audio check heard SPEAKER 1: The examiner's voice."
+    assert review.summary.endswith('1 proposed change dropped after the audio check.')
+    assert lines(review.text)[6] == 'Speaker 1: Doctor, when you reviewed the records'
+    change = review.record()['changes'][0]
+    assert (change['gemini'], change['proposed'], change['speaker'], change['status']) == (
+        'SPEAKER 1', 'SPEAKER 2', 'SPEAKER 1', KEPT)
+    result = grade(case, review)
+    assert result['failures'] == []
+
+
+def test_without_the_audio_a_conflicting_proposal_keeps_gemini_and_is_flagged(cases):
+    case = cases['interrupted-question']
+    review = review_speakers(case.words, answer(WRONG_WITNESS))
+    flagged = review.segments[6]
+    assert (flagged.status, flagged.speaker, flagged.proposed) == (FLAGGED, 'SPEAKER 1', 'SPEAKER 2')
+    assert lines(review.text)[6] == 'Speaker 1 [unconfirmed]: Doctor, when you reviewed the records'
+    assert review.warnings == ('Speaker review at 0:05:24: “Doctor, when you reviewed the records” was proposed '
+                               'for SPEAKER 2 (The witness interrupts with a question), but it speaks directly to '
+                               'SPEAKER 2 (“Doctor”), and the audio could not be checked. Kept Speaker 1 for now; '
+                               'check the audio.',)
+    # The grader keeps identity right and reports the unneeded flag.
+    result = grade(case, review)
+    assert failures(result) == {'identity': [], 'splits': [], 'status': ['incorrect'], 'highlights': []}
+
+
+def test_an_uncertain_or_failed_audio_check_also_flags(cases):
+    case = cases['interrupted-question']
+    for verify in (lambda q: {'speaker': 'uncertain'}, lambda q: {'speaker': 'SPEAKER 3'},
+                   lambda q: (_ for _ in ()).throw(ValueError('timeout'))):
+        segment = review_speakers(case.words, answer(WRONG_WITNESS), verify=verify).segments[6]
+        assert (segment.status, segment.speaker) == (FLAGGED, 'SPEAKER 1')
+        assert segment.checks[-1] == 'the audio check was uncertain'
+
+
+def test_the_audio_can_confirm_a_conflicting_proposal(cases):
+    case = cases['interrupted-question']
+    segment = review_speakers(case.words, answer(WRONG_WITNESS),
+                              verify=lambda q: {'speaker': 'SPEAKER 2'}).segments[6]
+    assert (segment.status, segment.speaker) == (CORRECTED, 'SPEAKER 2')
+
+
+def test_the_reporters_rough_is_an_additional_check(cases):
+    case = cases['answer-inside-question']
+    agree = ('EXAMINATION\nBY MS. RUIZ:\n     Q    Good morning, Doctor.  My name is Ana Ruiz, and I represent the '
+             "defendant.  I'll be asking you some questions today.\n     A    Good morning.  I'm Dr. Paul Chen, "
+             'the orthopedic evaluator in this case.\n     Q    Doctor, when did you examine him?\n     A    I first '
+             'examined him in March.\n     Q    What did you find at that March examination?\n     A    Tenderness '
+             'in the lower back and a reduced range of motion.\n')
+    calls = []
+    review = review_speakers(case.words, answer(CORRECT[case.id]), rough=agree, verify=calls.append)
+    split = next(s for s in review.segments if s.status == CORRECTED)
+    assert split.checks == ("the reporter's rough agrees (THE WITNESS)",) and calls == []
+    # A rough that keeps the answer inside the examiner's Q disagrees, so the audio decides.
+    disagree = agree.replace('him?\n     A    I first', 'him?  I first')
+    review = review_speakers(case.words, answer(CORRECT[case.id]), rough=disagree,
+                             verify=lambda q: {'speaker': 'SPEAKER 1'})
+    split = next(s for s in review.segments if s.proposed == 'SPEAKER 1')
+    assert split.status == CORRECTED
+    assert split.checks[:2] == ("the reporter's rough has MS. RUIZ, which matches Gemini",
+                                'the audio check heard SPEAKER 1')
+
+
+def test_an_objection_cannot_go_to_the_witness(cases):
+    case = cases['ambiguous-objection']
+    data = copy.deepcopy(CORRECT[case.id])
+    data['participants'] = {'SPEAKER 1': 'witness Dr. Brooks'}
+    data['turns'][4] = {'id': 5, 'speaker': 'SPEAKER 1', 'why': 'A guess.'}
+    segment = review_speakers(case.words, answer(data)).segments[4]
+    assert (segment.status, segment.speaker) == (FLAGGED, 'SPEAKER 3')
+    assert 'an objection is attorney colloquy, not the witness' in segment.checks
+
+
+def test_audio_checks_are_logged_for_diagnostics(cases):
+    case = cases['interrupted-question']
+    logged = []
+    review_speakers(case.words, answer(WRONG_WITNESS), verify=lambda q: {'speaker': 'SPEAKER 1'}, log=logged.append)
+    assert [entry['kind'] for entry in logged] == ['batch', 'audio']
+    assert logged[1]['answer'] == {'speaker': 'SPEAKER 1'}
+
+
+def test_a_continuation_paragraph_starting_with_the_word_a_is_not_an_answer():
+    from shared.speaker_review import label_units
+    draft = 'BY MR. SMITH:\n     Q    Did it hurt?\n     A    Yes.\n          A few days later it stopped.'
+    units = label_units(draft)
+    assert [(u.kind, u.examiner) for u in units] == [('q', 'MR. SMITH'), ('a', 'MR. SMITH')]
+    assert units[1].tokens == ['yes', 'a', 'few', 'days', 'later', 'it', 'stopped']

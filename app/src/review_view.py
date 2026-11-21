@@ -7,7 +7,52 @@ from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context, preview_ranges
-from shared.speaker_review import label_highlights
+from shared.speaker_review import WITNESS, label_changes, label_key, label_units
+
+
+def speaker_paragraphs(text):
+    """(start, end, label start, label end, speaker) for each labeled speech paragraph.
+    Q is the examiner on the BY line in effect and A is the witness."""
+    units = label_units(text)
+    starts = [text.rfind('\n', 0, u.label_start) + 1 for u in units]
+    result = []
+    for k, unit in enumerate(units):
+        speaker = unit.examiner if unit.kind == 'q' else WITNESS if unit.kind == 'a' else label_key(unit.label)
+        end = starts[k + 1] if k + 1 < len(units) else len(text)
+        result.append((starts[k], end, unit.label_start, unit.label_end, speaker))
+    return result
+
+
+def _speakers_in(paragraphs, start, end):
+    """Speakers of the paragraphs a range covers, and whether it covers one of their labels."""
+    found = [p for p in paragraphs if (p[0] < end and start < p[1]) or (start == end and p[0] <= start < p[1])]
+    return {p[4] for p in found}, any(start < p[3] and end > p[2] for p in found)
+
+
+def speaker_change(change, original_paragraphs, incoming_paragraphs):
+    """True when a decision gives words to a different known speaker: a label such as
+    Q replaced by THE WITNESS:, or a paragraph split or join that moves words between
+    Q and A. Renaming an unresolved SPEAKER N is attribution, not this."""
+    for a, b, c, d in change.ranges:
+        before, label_before = _speakers_in(original_paragraphs, a, b)
+        after, label_after = _speakers_in(incoming_paragraphs, c, d)
+        if not before or not after or None in before | after:
+            continue
+        if any(x.startswith('SPEAKER ') for x in before | after):
+            continue
+        if (label_before or label_after) and before != after:
+            return True
+    return False
+
+
+def speaker_note(info):
+    """One line on a card: Gemini's label, the proposed label and why."""
+    text = f"AI speaker review: Gemini had {info['gemini'] or 'no label'}, proposed {info['proposed']}."
+    if info.get('reason'):
+        text += f" {info['reason'].rstrip('.')}."
+    if info.get('checks'):
+        text += ' Checks: ' + '; '.join(info['checks']) + '.'
+    return text
 
 
 def visible_text(text, empty):
@@ -150,6 +195,7 @@ class ReviewView(QWidget):
         self.unmatched_speaker_ranges = ()
         self.corrected_speaker_ranges = ()
         self.speaker_label_ranges = ()
+        self.speaker_changes = frozenset()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 4, 8, 4)
         self.count = QLabel()
@@ -222,10 +268,15 @@ class ReviewView(QWidget):
         original, incoming = model.original, model.incoming
         self._speakers(original)
         # Yellow labels: speakers the AI review corrected against Gemini, plus unmatched labels.
-        self.corrected_speaker_ranges = label_highlights((review or {}).get('speaker_review'), incoming.text)
+        reviewed = label_changes((review or {}).get('speaker_review'), incoming.text)
+        self.corrected_speaker_ranges = tuple((a, b) for a, b, _ in reviewed)
         self.speaker_label_ranges = tuple(sorted(set(self.unmatched_speaker_ranges)
                                                  | set(self.corrected_speaker_ranges)))
         attribution = set().union(*self.speaker_edits.values())
+        before_paragraphs, after_paragraphs = speaker_paragraphs(original.text), speaker_paragraphs(incoming.text)
+        self.speaker_changes = frozenset(index for index, change in enumerate(self.changes)
+                                         if index not in attribution and speaker_change(
+                                             change, before_paragraphs, after_paragraphs))
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -245,11 +296,13 @@ class ReviewView(QWidget):
                 title = 'Speaker attribution · Needs review'
             elif index in attribution:
                 title = 'Speaker attribution'
+            elif index in self.speaker_changes:
+                title = 'Speaker'
             else:
                 title = 'Linked field' if change.field else 'Wording'
             if change.kind == 'metadata':
                 title = 'Native fields and symbols'
-            if change.kind == 'structure' and index not in attribution:
+            if change.kind == 'structure' and index not in attribution and index not in self.speaker_changes:
                 title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
             if change.ranges:
                 start = change.ranges[0][0]
@@ -260,6 +313,14 @@ class ReviewView(QWidget):
             heading = QLabel(title)
             heading.setWordWrap(True)
             rows.addWidget(heading)
+            for a, b, info in reviewed:
+                if info and any(c < b and d > a or c == d and a <= c <= b for _, _, c, d in change.ranges):
+                    reason = QLabel(speaker_note(info))
+                    reason.setObjectName('speakerReason')
+                    reason.setTextFormat(Qt.PlainText)
+                    reason.setWordWrap(True)
+                    rows.addWidget(reason)
+                    break
             if change.field:
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
             for _, text in change_diff(change):
