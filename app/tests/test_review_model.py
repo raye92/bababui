@@ -182,3 +182,49 @@ def test_complete_review_preserves_correspondence_and_round_trips():
             change = replace(change, original=kept, incoming=pending)
             kept, pending = resolve(kept, pending, change, accept)
         assert kept.text == pending.text == expected
+
+
+def missing_answer():
+    """A deposition excerpt and the long answer an AI draft can drop."""
+    answer = ('I went to the clinic on Monday and the doctor told me that the pain in my lower back was coming '
+              'from the disc between the fourth and fifth vertebrae and that I should rest for two weeks.')
+    before = '\n'.join(['Q Did you see a doctor?', 'A ' + answer, 'Q What did you do next?',
+                        'A I went home and rested.', 'Q The car was red.'])
+    return answer, before
+
+
+def test_accept_all_keeps_a_passage_missing_from_the_ai_draft():
+    from app.src.review_model import accept_all, build_review, map_position
+    answer, before = missing_answer()
+    after = before.replace('A ' + answer + '\n', '').replace('red', 'blue')
+    model = build_review(revision(before), revision(after))
+    assert len(model.edits) == 2
+    missing, = model.missing
+    assert [model.original.text[a:b] for a, b, _, _ in model.edits[missing].ranges] == ['A ' + answer + '\n']
+    assert model.accept_all_ranges == model.edits[1 - missing].ranges
+    accepted, pending = accept_all(model)
+    assert pending is model.incoming
+    assert accepted.text == before.replace('red', 'blue')
+    # Its card stays pending, and is still a missing passage.
+    remaining = build_review(accepted, pending)
+    assert len(remaining.edits) == 1 and remaining.missing == {0}
+    # Positions in the AI draft move past the kept passage.
+    position = map_position(after.index('blue'), model.accept_all_positions())
+    assert accepted.text[position:position + 4] == 'blue'
+
+
+@pytest.mark.parametrize('case', ['short', 'moved', 'reworded'])
+def test_a_short_deletion_a_moved_passage_or_a_rewording_is_not_missing(case):
+    from app.src.review_model import accept_all, build_review
+    answer, before = missing_answer()
+    if case == 'short':
+        before = before.replace(answer, 'Yes, on Monday at the clinic near my house.')
+        after = before.replace('A Yes, on Monday at the clinic near my house.\n', '')
+    elif case == 'moved':
+        after = before.replace('A ' + answer + '\n', '').replace('Q The car', 'A ' + answer + '\nQ The car')
+    else:
+        after = before.replace(answer, answer.replace('the doctor told me that', 'he said')
+                               .replace('and that I should rest', 'so rest'))
+    model = build_review(revision(before), revision(after))
+    assert model.edits and not model.missing
+    assert accept_all(model)[0].text == after

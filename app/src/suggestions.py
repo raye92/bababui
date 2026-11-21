@@ -60,8 +60,10 @@ def preview_ranges(change):
         # Joining or splitting a word can be a one-sided character edit.
         left, right, changed = ((left_a, right_a, incoming[c:d]) if a == b else
                                 (left_b, right_b, original[a:b]))
+        # A hyphen join or split, such as re-evaluation to reevaluation, also
+        # highlights the whole word it changes.
         if (not left or not right or '\n' in changed or '\r' in changed
-                or not any(char.isspace() for char in changed)):
+                or not any(char.isspace() or char in '-‐‑' for char in changed)):
             return change.ranges
     for _ in range(max(left_a, left_b)):
         if not a or not c or original[a-1] != incoming[c-1]:

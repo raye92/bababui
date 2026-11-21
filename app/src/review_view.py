@@ -5,6 +5,7 @@ from html import escape
 from PySide6.QtCore import QEvent, Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
+from app.src.addressees import note_spans
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context, preview_ranges
 from shared.speaker_review import WITNESS, label_changes, label_key, label_units
@@ -177,12 +178,74 @@ def _attribution_edits(model, locations, needs_check, flagged=None):
     return by_speaker
 
 
+class QuestionCard(QFrame):
+    """One speaker decision: an unresolved voice, or one uncertain turn."""
+
+    def __init__(self, question, names, parent=None):
+        super().__init__(parent)
+        from app.src.speaker_questions import VOICE
+        from app.src.playback import timestamp
+        self.question = question
+        self.setObjectName('speakerQuestion')
+        self.setFrameShape(QFrame.StyledPanel)
+        rows = QVBoxLayout(self)
+        rows.setContentsMargins(6, 4, 6, 4)
+        rows.setSpacing(4)
+        if question.kind == VOICE:
+            title = f'Unresolved voice · {question.speaker} · {question.turns} linked turns'
+        else:
+            title = f'Who said this? · {question.speaker}' if question.speaker else 'Who said this?'
+        heading = QLabel(title)
+        heading.setObjectName('questionTitle')
+        heading.setTextFormat(Qt.PlainText)
+        heading.setWordWrap(True)
+        rows.addWidget(heading)
+        when = f' · {timestamp(int(question.time * 1000))}' if question.time is not None else ''
+        clip = QLabel(f'“{question.text}”{when}')
+        clip.setObjectName('questionClip')
+        clip.setTextFormat(Qt.PlainText)
+        clip.setWordWrap(True)
+        rows.addWidget(clip)
+        if question.suggestion:
+            hint = QLabel(f'Suggested: {question.suggestion}')
+            hint.setObjectName('questionSuggestion')
+            hint.setTextFormat(Qt.PlainText)
+            rows.addWidget(hint)
+        self.combo = SpeakerCombo()
+        self.combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo.addItem('Choose a participant', None)
+        for name in names:
+            self.combo.addItem(name, name)
+        self.combo.setCurrentIndex(max(0, self.combo.findData(question.suggestion)))
+        rows.addWidget(self.combo)
+        buttons = QHBoxLayout()
+        self.review_button = QPushButton('Review')
+        self.review_button.setToolTip('Go to the identifying clip and play it with the exchange around it.')
+        self.this_button = QPushButton('Assign this turn')
+        self.all_button = QPushButton(f'Assign all {question.turns} linked turns')
+        self.all_button.setVisible(question.kind == VOICE and question.turns > 1)
+        for button in (self.review_button, self.this_button, self.all_button):
+            buttons.addWidget(button)
+        rows.addLayout(buttons)
+        self.combo.currentIndexChanged.connect(self._enable)
+        self._enable()
+
+    def _enable(self):
+        chosen = self.combo.currentData() is not None
+        self.this_button.setEnabled(chosen)
+        self.all_button.setEnabled(chosen)
+
+
 class ReviewView(QWidget):
     requested = Signal(int, bool)
     selected = Signal(int)
     selection_changed = Signal()
     navigated = Signal()
     mapping_requested = Signal(str, object)
+    # A participant name and the question it answers; True assigns every linked turn.
+    assign_requested = Signal(object, str, bool)
+    question_review_requested = Signal(object)
+    speaker_undo_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -195,7 +258,10 @@ class ReviewView(QWidget):
         self.unmatched_speaker_ranges = ()
         self.corrected_speaker_ranges = ()
         self.speaker_label_ranges = ()
-        self.speaker_changes = frozenset()
+        self.speaker_changes = self.missing = frozenset()
+        self.questions, self.resolved_speakers = [], {}
+        self.question_cards = []
+        self.show_resolved = False
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 4, 8, 4)
         self.count = QLabel()
@@ -269,14 +335,18 @@ class ReviewView(QWidget):
         self._speakers(original)
         # Yellow labels: speakers the AI review corrected against Gemini, plus unmatched labels.
         reviewed = label_changes((review or {}).get('speaker_review'), incoming.text)
+        # Q/A or colloquy labels changed by whom a turn addressed, with why.
+        addressed = note_spans((review or {}).get('addressees'), incoming.text)
         self.corrected_speaker_ranges = tuple((a, b) for a, b, _ in reviewed)
         self.speaker_label_ranges = tuple(sorted(set(self.unmatched_speaker_ranges)
                                                  | set(self.corrected_speaker_ranges)))
         attribution = set().union(*self.speaker_edits.values())
         before_paragraphs, after_paragraphs = speaker_paragraphs(original.text), speaker_paragraphs(incoming.text)
+        # A passage missing from the AI draft is not a speaker change, whatever labels it holds.
+        self.missing = frozenset(getattr(model, 'missing', ()))
         self.speaker_changes = frozenset(index for index, change in enumerate(self.changes)
-                                         if index not in attribution and speaker_change(
-                                             change, before_paragraphs, after_paragraphs))
+                                         if index not in attribution and index not in self.missing
+                                         and speaker_change(change, before_paragraphs, after_paragraphs))
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -302,8 +372,15 @@ class ReviewView(QWidget):
                 title = 'Linked field' if change.field else 'Wording'
             if change.kind == 'metadata':
                 title = 'Native fields and symbols'
-            if change.kind == 'structure' and index not in attribution and index not in self.speaker_changes:
+            if (change.kind == 'structure' and index not in attribution and index not in self.speaker_changes
+                    and index not in self.missing):
                 title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
+            if index in self.missing:
+                title = 'Missing from AI draft'
+            addressee = next((note for a, b, note in addressed
+                              if any(c < b and d > a or c == d and a <= c < b for _, _, c, d in change.ranges)), None)
+            if addressee is not None and title == 'Wording':
+                title = 'Q/A or colloquy'
             if change.ranges:
                 start = change.ranges[0][0]
                 qt_start = len(original.text[:start].encode('utf-16-le')) // 2
@@ -313,6 +390,13 @@ class ReviewView(QWidget):
             heading = QLabel(title)
             heading.setWordWrap(True)
             rows.addWidget(heading)
+            if index in self.missing:
+                note = QLabel('The AI draft has no words for this passage, so the transcription probably missed this '
+                              'audio. Listen before removing it. Accept All keeps your text.')
+                note.setObjectName('missingNote')
+                note.setTextFormat(Qt.PlainText)
+                note.setWordWrap(True)
+                rows.addWidget(note)
             for a, b, info in reviewed:
                 if info and any(c < b and d > a or c == d and a <= c <= b for _, _, c, d in change.ranges):
                     reason = QLabel(speaker_note(info))
@@ -321,6 +405,12 @@ class ReviewView(QWidget):
                     reason.setWordWrap(True)
                     rows.addWidget(reason)
                     break
+            if addressee is not None:
+                reason = QLabel(addressee['why'])
+                reason.setObjectName('addresseeReason')
+                reason.setTextFormat(Qt.PlainText)
+                reason.setWordWrap(True)
+                rows.addWidget(reason)
             if change.field:
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
             for _, text in change_diff(change):
@@ -374,12 +464,53 @@ class ReviewView(QWidget):
             (p['start'], p['end']) for p in locations
             if not p['resolved'] and p['start'] < p['end'] and mappings.get(p['speaker']) is None))
 
+        from app.src.speaker_questions import questions
+        self.questions, self.resolved_speakers = questions(self.review, self.model.incoming.text)
+        self.question_cards = []
+        for question in self.questions:
+            card = QuestionCard(question, names)
+            card.review_button.clicked.connect(
+                lambda _, q=question, snapshot=box: self._review_question(q) if self.speaker_scroll.widget() is snapshot else None)
+            card.this_button.clicked.connect(
+                lambda _, c=card, snapshot=box: self.assign_requested.emit(c.question, c.combo.currentData(), False)
+                if self.speaker_scroll.widget() is snapshot else None)
+            card.all_button.clicked.connect(
+                lambda _, c=card, snapshot=box: self.assign_requested.emit(c.question, c.combo.currentData(), True)
+                if self.speaker_scroll.widget() is snapshot else None)
+            rows.addWidget(card)
+            self.question_cards.append(card)
+        tools = QHBoxLayout()
+        self.resolved_toggle = QToolButton()
+        self.resolved_toggle.setCheckable(True)
+        self.resolved_toggle.setChecked(self.show_resolved)
+        self.resolved_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.resolved_toggle.setArrowType(Qt.DownArrow if self.show_resolved else Qt.RightArrow)
+        self.resolved_toggle.setText(f'Resolved speakers ({len(set(summaries) - {q.speaker for q in self.questions})})')
+        tools.addWidget(self.resolved_toggle, 1)
+        self.undo_button = QPushButton('Undo')
+        self.undo_button.setToolTip('Undo the last speaker assignment or review decision.')
+        self.undo_button.clicked.connect(self.speaker_undo_requested)
+        self.undo_button.setEnabled(False)
+        tools.addWidget(self.undo_button, 0, Qt.AlignRight)
+        rows.addLayout(tools)
+        resolved = QWidget()
+        resolved.setObjectName('resolvedSpeakers')
+        resolved_rows = QVBoxLayout(resolved)
+        resolved_rows.setContentsMargins(0, 0, 0, 0)
+        resolved.setVisible(self.show_resolved)
+        self.resolved_toggle.toggled.connect(lambda on, w=resolved: self._toggle_resolved(on, w))
+        rows.addWidget(resolved)
+        asked = {q.speaker for q in self.questions}
+
         total_matches = 0
         for speaker, summary in summaries.items():
             mapped = mappings[speaker]
             matches = matches_by_speaker[speaker]
             mismatches = sum(summary['counts'].values())-matches if mapped else 0
             total_matches += matches
+            if speaker in asked:
+                continue  # Its open question is shown above instead.
+            target = resolved_rows
             heading = QHBoxLayout()
             label = QLabel(f'{speaker} → {mapped or "Needs review"}')
             label.setWordWrap(True)
@@ -390,7 +521,7 @@ class ReviewView(QWidget):
             button.setEnabled(bool(self.speaker_edits.get(speaker)))
             button.clicked.connect(lambda _, s=speaker: self.filter_speaker(s))
             heading.addWidget(button, 0, Qt.AlignRight)
-            rows.addLayout(heading)
+            target.addLayout(heading)
             combo = SpeakerCombo()
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.addItem('Needs review', None)
@@ -403,14 +534,14 @@ class ReviewView(QWidget):
             combo.activated.connect(lambda i, s=speaker, c=combo, snapshot=box:
                                     self.mapping_requested.emit(s, c.itemData(i))
                                     if self.speaker_scroll.widget() is snapshot else None)
-            rows.addWidget(combo)
+            target.addWidget(combo)
             bar = QProgressBar()
             bar.setRange(0, max(1, matches+mismatches))
             bar.setValue(matches)
             bar.setFormat(f'{matches} {"match" if matches == 1 else "matches"} · '
                           f'{mismatches} {"mismatch" if mismatches == 1 else "mismatches"}')
             bar.setToolTip('Agreement with existing labels, not verified identity.\n'+'\n'.join(f'{n}: {v}' for n,v in summary['counts'].items()))
-            rows.addWidget(bar)
+            target.addWidget(bar)
         scrollbar = self.speaker_scroll.verticalScrollBar()
         position = scrollbar.value() if self.review is self._shown_review else 0
         self._shown_review = self.review
@@ -422,10 +553,25 @@ class ReviewView(QWidget):
             old.deleteLater()
         self.speaker_scroll.setWidget(box)
         self._size_speaker_list()
-        self.speaker_scroll.setVisible(bool(summaries) and self.summary.isChecked())
+        shown = bool(summaries or self.questions)
+        self.speaker_scroll.setVisible(shown and self.summary.isChecked())
         scrollbar.setValue(position)
-        self.summary.setVisible(bool(summaries))
-        self.summary.setText(f'Speakers · {total_matches} matches')
+        self.summary.setVisible(shown)
+        affected = sum(q.turns for q in self.questions)
+        unresolved = len(self.questions)
+        self.summary.setText(f'Speakers · {unresolved} unresolved · {affected} '
+                             f'{"turn" if affected == 1 else "turns"} · {total_matches} matches')
+
+    def _toggle_resolved(self, on, widget):
+        self.show_resolved = on
+        widget.setVisible(on)
+        self.resolved_toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self._size_speaker_list()
+
+    def _review_question(self, question):
+        if question.speaker and question.speaker in self.speaker_edits:
+            self.filter_speaker(question.speaker)
+        self.question_review_requested.emit(question)
 
     def _size_speaker_list(self):
         box = self.speaker_scroll.widget()

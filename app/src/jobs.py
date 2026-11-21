@@ -1,6 +1,7 @@
 """Independent per-document jobs and shared in-flight transcription."""
+from collections import Counter
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from itertools import count
 import json
@@ -13,6 +14,7 @@ import wave
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from app.src import addressees
 from app.src.audio_pipeline import AudioPipeline, check_wav_digest
 from app.src.vocabulary_reconciliation import normalized_vocabulary
 from app.src.ai_review import AssistedReview, review_edits
@@ -20,8 +22,13 @@ from app.src.casecat.timing import AudioMap
 from app.src.processing import DEFAULT_MODEL, ProcessingClient, APP_DIR
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept, begin_review
-from app.src.speaker_audio import AudioSpeakerCheck
+from app.src.speaker_audio import AudioSpeakerCheck, VoiceComparison
+from app.src.speaker_identity import UNRESOLVED, identifying_clips, link_voices, linked, verify_members
+from app.src.speaker_identity import turns as _runs
+# A voice with at most this many turns has its turns checked against its clearest clip.
+MINOR_TURNS = 24
 from shared.speaker_review import review_speakers
+from shared.spelling_review import review_spelling
 from shared.transcription import has_key
 from shared.storage import atomic_bytes
 
@@ -103,6 +110,8 @@ class Request:
     vocabulary: tuple[str, ...] = ()
     body_start: int = 0
     context: str = ''
+    # Confirmed notice spellings, each a ('person' or 'organization', name) pair.
+    sources: tuple[tuple[str, str], ...] = ()
 
 
 class ProcessingWorker(QThread):
@@ -140,8 +149,11 @@ class ProcessingWorker(QThread):
                 speakers = self._review_speakers(transcription, report)
                 text = speakers.text
                 warnings.extend(speakers.warnings)
+            # The reporter's house spellings, after the speaker review and before formatting.
+            text = self._house_spelling(text, report, warnings)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
+            result, addressed = self._addressees(result, text, report, warnings)
             alignment = None
             if request.job is not None:
                 report('Aligning transcript with audio...')
@@ -155,7 +167,7 @@ class ProcessingWorker(QThread):
             if request.review_model is None:
                 self.succeeded.emit(request.document_id, result, warnings, alignment)
             else:
-                reviewed = self._review(result, report, alignment, speakers)
+                reviewed = self._review(result, report, alignment, speakers, addressed)
                 self.reviewed.emit(request.document_id, reviewed, warnings, alignment)
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'
@@ -163,6 +175,45 @@ class ProcessingWorker(QThread):
                 if request.config.get(key):
                     message = message.replace(request.config[key], '[REDACTED]')
             self.failed.emit(request.document_id, message)
+
+    def _house_spelling(self, text, report, warnings):
+        """Apply app/assets/Spelling and Terminology.csv to the turns before formatting."""
+        from app.src import house_spelling
+        request = self.request
+        self.house = self.house_summary = None
+        try:
+            reference = house_spelling.load()
+        except (OSError, ValueError, UnicodeError) as exc:
+            warnings.append(f'The house spelling reference could not be read, so it was skipped: {exc}')
+            return text
+        report('Applying house spellings...')
+        model = request.review_model or request.model
+        testing = request.config.get('testing', False)
+        folder = Path(tempfile.gettempdir())/'bababui-transcriptions'
+        name = f'house-spelling-{uuid4().hex}'
+        saved = count(1)
+
+        def save(entry):
+            atomic_bytes(folder/f'{name}-{entry["kind"]}-{next(saved)}.json',
+                         json.dumps(entry, ensure_ascii=False, indent=2).encode('utf-8'))
+
+        def complete(payload, prompt):
+            return self.processor_factory(request.config, model).complete(payload, prompt)
+        ask = house_spelling.model_decisions(complete, save if testing else None)
+        unsure = []
+
+        def decide(items):
+            try:
+                return ask(items)
+            except Exception:  # noqa: BLE001 - any model or network failure
+                unsure.append(len(items))
+                return [house_spelling.KEEP] * len(items)
+        result = reference.apply(text, decide)
+        notes = [result.summary] if result.changes else []
+        if unsure:
+            notes.append(f'{unsure[0]} context entr{"y" if unsure[0] == 1 else "ies"} kept: the model could not decide.')
+        self.house, self.house_summary = reference, ' '.join(notes) or None
+        return result.text
 
     def _review_speakers(self, transcription, report):
         request = self.request
@@ -178,19 +229,53 @@ class ProcessingWorker(QThread):
         def save(entry):
             atomic_bytes(folder/f'{name}-{entry["kind"]}-{next(saved)}.json',
                          json.dumps(entry, ensure_ascii=False, indent=2).encode('utf-8'))
-        # Stitching notes say where a speaker number may have changed at a chunk join.
-        notes = [w for w in transcription.warnings if 'speaker' in w.casefold()]
-        # Conflicting proposals are checked against the recording with Gemini.
+        # Conflicting proposals and renumbered voices are checked against the recording with Gemini.
         key = request.config.get('gemini_api_key', '')
         model = request.review_model if request.review_model.startswith('gemini-') else DEFAULT_MODEL
         verify = AudioSpeakerCheck(request.wav_path, key, model) if has_key(key) else None
-        result = review_speakers(transcription.words, complete, context=request.context, notes=notes,
-                                 rough=self._rough(), verify=verify, progress=report,
-                                 log=save if testing else None)
+        compare = VoiceComparison(request.wav_path, key, model) if has_key(key) else None
+        log = save if testing else None
+        # A voice a later chunk numbered afresh is linked to an earlier one by its voice first.
+        words, identities, identity_notes = link_voices(transcription.words, transcription.identities, compare,
+                                                        progress=report, log=log)
+        # Stitching notes say where a speaker number may have changed at a chunk join.
+        notes = [w for w in transcription.warnings if 'speaker' in w.casefold()] + identity_notes
+        result = review_speakers(words, complete, context=request.context, notes=notes,
+                                 rough=self._rough(), verify=verify, progress=report, log=log,
+                                 identities=identities)
+        result = replace(result, voices=self._voices(result, compare, report, log))
         if testing:
             atomic_bytes(folder/f'{name}-result.json',
                          json.dumps(result.to_json(), ensure_ascii=False, indent=2).encode('utf-8'))
         return result
+
+    @staticmethod
+    def _voices(result, compare, report, log):
+        """Which turns share one voice, for each voice the reporter may be asked about: a
+        voice still unresolved after the review, and any voice with few turns, such as a
+        second attorney or the reporter, that the rough may not name."""
+        final = list(result.words)
+        for segment in result.segments:
+            label = result.display(segment.speaker) if segment.speaker else None
+            for i in range(segment.start, segment.end):
+                final[i] = replace(final[i], speaker=label)
+        sizes = Counter(owner for owner, _, _ in _runs(final))
+        voices = []
+        for label in sizes:
+            info = result.identities.get(label, {})
+            if label is None or (info.get('status') != UNRESOLVED and sizes[label] > MINOR_TURNS):
+                continue
+            clips = identifying_clips(final, label, 1)
+            clip = clips[0] if clips else None
+            verdicts = verify_members(final, label, clip, compare, progress=report, log=log)
+            spans = {first: end for owner, first, end in _runs(final) if owner == label}
+            voices.append({'label': label, 'status': info.get('status', ''), 'chunk': info.get('chunk'),
+                           'evidence': info.get('evidence', ''), 'clip': clip,
+                           'turns': [{'first': first, 'last': spans[first], 'start': final[first].start,
+                                      'end': final[spans[first] - 1].end, 'verdict': verdict,
+                                      'linked': linked(verdict, spans[first] - first)}
+                                     for first, verdict in sorted(verdicts.items())]})
+        return tuple(voices)
 
     def _rough(self):
         """The reporter's rough testimony, an additional check on proposed speakers."""
@@ -217,7 +302,17 @@ class ProcessingWorker(QThread):
         return align_speech(original, times, transcription.words,
                             transcription.duration_ms, transcription.wav_sha256)
 
-    def _review(self, text, report, alignment=None, speakers=None):
+    @staticmethod
+    def _addressees(draft, source, report, warnings):
+        """Q/A or colloquy from whom each turn addressed, where a later reply settles it."""
+        report('Checking whom each turn addressed...')
+        try:
+            return addressees.revise(draft, source)
+        except Exception:  # noqa: BLE001 - the formatter's draft is still usable
+            warnings.append("The addressee check could not run. The formatter's Q/A and colloquy labels were kept.")
+            return draft, []
+
+    def _review(self, text, report, alignment=None, speakers=None, addressed=()):
         request = self.request
         from app.src.notice_review import split_revision, joined_snapshot, response_body
         from app.src.speaker_votes import VoiceCheck
@@ -239,8 +334,17 @@ class ProcessingWorker(QThread):
             state.review['speaker_review'] = record
             if off_record_undo is not None:
                 off_record_undo = (*off_record_undo[:2], {**off_record_undo[2], 'speaker_review': record})
+        if addressed:
+            # Why a label changed travels with every review snapshot, as the speaker review does.
+            state.review['addressees'] = list(addressed)
+            if off_record_undo is not None:
+                off_record_undo = (*off_record_undo[:2], {**off_record_undo[2], 'addressees': list(addressed)})
+        # Spelling covers the reporter's rough and every AI edit, before any is accepted.
+        spelling, spelling_summary = self._review_spelling(state.original.text, state.incoming.text, report)
         before_rules = state.original, state.incoming, state.review
-        auto_accept(state, disabled_rules=request.disabled_rules)
+        # A change to a house spelling stays pending and green for the reporter.
+        keep = getattr(self, 'house', None) and self.house.protects
+        auto_accept(state, disabled_rules=request.disabled_rules, keep=keep)
         after_rules = state.original, state.incoming, state.review
         report('Reviewing small wording edits...')
 
@@ -251,17 +355,74 @@ class ProcessingWorker(QThread):
         try:
             original, incoming, review, summary = review_edits(
                 *after_rules, request.review_model, complete, request.document_id,
-                testing=request.config.get('testing', False))
+                testing=request.config.get('testing', False), keep=keep)
             after_ai = original, incoming, review
         except (OSError, ValueError):
             after_ai = after_rules
             summary = 'AI-assisted review could not be applied and recorded. Edits remain pending.'
+        summary = f'{spelling_summary} {summary}'
+        if getattr(self, 'house_summary', None):
+            summary = f'{self.house_summary} {summary}'
+        if addressed:
+            summary = f'{addressees.summary(addressed)} {summary}'
         if speakers is not None:
             summary = f'{speakers.summary} {summary}'
         if head is not None:
             off_record_undo, before_rules, after_rules, after_ai = (
                 joined_snapshot(head, head, snapshot) for snapshot in (off_record_undo, before_rules, after_rules, after_ai))
-        return AssistedReview(request.original, off_record_undo, before_rules, after_rules, after_ai, summary)
+        return AssistedReview(request.original, off_record_undo, before_rules, after_rules, after_ai, summary,
+                              spelling)
+
+    def _spelling_sources(self):
+        """Confirmed notice spellings, the job vocabulary and the rough's named speakers."""
+        request = self.request
+        sources = {name.casefold(): (kind, name) for kind, name in request.sources}
+        for name in request.vocabulary:
+            sources.setdefault(name.casefold(), ('name', name))
+        # The reporter's house spellings are settled; the spelling review leaves them unmarked.
+        if getattr(self, 'house', None) is not None:
+            for form in self.house.forms():
+                sources.setdefault(form.casefold(), ('house', form))
+        if request.original is not None:
+            from app.src.casecat.fields import field_values
+            from app.src.casecat.elements import speaker_number
+            try:
+                values = field_values(request.original)
+            except ValueError:
+                values = {}  # Linked speaker fields that disagree confirm nothing.
+            for field, value in values.items():
+                number = speaker_number(field)
+                # EZ speakers 300 and up are standard titles such as THE WITNESS.
+                if number and int(number) < 300 and value.strip() and not value.startswith('['):
+                    sources.setdefault(value.casefold(), ('person', value))
+        return tuple(sources.values())
+
+    def _review_spelling(self, rough, draft, report):
+        """Words whose exact spelling needs the reporter's judgment, and a summary line."""
+        request = self.request
+        report('Checking spellings...')
+
+        def complete(payload, prompt):
+            return self.processor_factory(request.config, request.review_model).complete(payload, prompt)
+
+        testing = request.config.get('testing', False)
+        folder = Path(tempfile.gettempdir())/'bababui-transcriptions'
+        name = f'spelling-review-{uuid4().hex}'
+        saved = count(1)
+
+        def save(entry):
+            atomic_bytes(folder/f'{name}-{entry["kind"]}-{next(saved)}.json',
+                         json.dumps(entry, ensure_ascii=False, indent=2).encode('utf-8'))
+        try:
+            result = review_spelling(rough, draft, complete, sources=self._spelling_sources(),
+                                     context=request.context, progress=report, log=save if testing else None)
+        except Exception:  # noqa: BLE001 - any model or network failure
+            # The draft is still useful without spelling marks.
+            return None, 'Spelling review could not run.'
+        if testing:
+            atomic_bytes(folder/f'{name}-result.json',
+                         json.dumps(result.record(), ensure_ascii=False, indent=2).encode('utf-8'))
+        return result.record(), result.summary
 
 
 class JobManager(QObject):

@@ -1,6 +1,6 @@
 """WAV transcription and timestamp-aware, best-effort speaker stitching."""
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 import hashlib
 from itertools import chain, count
@@ -25,6 +25,20 @@ CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
 MAX_DURATION = CHUNK_SECONDS + 3 * CHUNK_STEP
 VOCABULARY_SECONDS = 60 * 60
 TIMING_CLIP_SECONDS = 5 * 60
+# A chunk with no words for this long, right after steady speech (this many
+# words in the five minutes before), may have stopped or skipped ahead.
+TAIL_GAP_SECONDS = 45
+FIRST, PROVISIONAL = 'first chunk', 'provisional'
+RECOVERED = 'Speaker R'  # a voice in a recovery clip that matched none of the chunk's own
+# Matching a chunk's speaker to the previous chunk needs 5 shared words, or at
+# least this many exact words: the same word at the same moment of the WAV.
+MIN_EXACT_WORDS = 2
+EXACT_SECONDS = 1.0
+TAIL_SPEECH_WORDS = 50
+MAX_REFILLS = 4
+# Words that announce a pause, so silence after them is expected.
+PAUSE_CUES = re.compile(r"\boff\s+(?:of\s+)?(?:the\s+)?record\b|\brecess\b|\bbreak\b|\bconcluded\b|"
+                        r"\badjourn", re.I)
 
 
 @dataclass(frozen=True)
@@ -42,6 +56,9 @@ class Transcription:
     warnings: tuple[str, ...]
     duration_ms: int
     wav_sha256: str
+    # How each job-wide speaker label was established: {label: {"chunk", "status",
+    # "suggested", "evidence"}}. A provisional label waits for the voice check.
+    identities: dict = field(default_factory=dict, hash=False, compare=False)
 
 
 def segments(duration, *, vocabulary=False):
@@ -129,13 +146,29 @@ def _seam_positions(words, default):
 
 
 def stitch(chunks):
-    kept, warnings = _stitched_chunks(chunks)
+    kept, warnings, _ = _stitched_chunks(chunks)
     return tuple(chain.from_iterable(kept)), warnings
 
 
+def stitch_identities(chunks):
+    """Stitched words, warnings, and how each job-wide speaker label was established."""
+    kept, warnings, identities = _stitched_chunks(chunks)
+    return tuple(chain.from_iterable(kept)), warnings, identities
+
+
 def _stitched_chunks(chunks):
+    """Join chunks into one transcript with job-wide speaker labels.
+
+    Chunk 1's speakers get Speaker 1, 2, ... in order of appearance. Each later
+    chunk is matched against the previous chunk's job-wide labels in their
+    shared minute, so chunk 3 maps to the labels chunk 2 already resolved. A
+    speaker who does not speak in a shared minute gets a new, provisional label.
+    """
     speakers = dict.fromkeys(w.speaker for w in chunks[0] if w.speaker is not None)
     labels = {speaker: f'Speaker {i}' for i, speaker in enumerate(speakers, 1)}
+    identities = {label: {'chunk': 1, 'status': PROVISIONAL if str(speaker).startswith(RECOVERED) else FIRST,
+                          'suggested': None, 'evidence': ''}
+                  for speaker, label in labels.items()}
     next_label = count(len(labels) + 1)
     tail = [replace(w, speaker=labels[w.speaker]) if w.speaker is not None else w for w in chunks[0]]
     combined, warnings = [], []
@@ -144,14 +177,14 @@ def _stitched_chunks(chunks):
         incoming = [replace(w, start=w.start+start, end=w.end+start) if w.start is not None else w
                     for w in chunk]
         # Only the previous chunk participates in the next overlap.
-        kept, tail, seam_warnings = _join_overlap(tail, incoming, index + 1, start, next_label)
+        kept, tail, seam_warnings = _join_overlap(tail, incoming, index + 1, start, next_label, identities)
         combined.append(kept)
         warnings.extend(seam_warnings)
     combined.append(tail)
-    return combined, warnings
+    return combined, warnings, identities
 
 
-def _join_overlap(a, b, chunk_number, start, next_label):
+def _join_overlap(a, b, chunk_number, start, next_label, identities=None):
     midpoint = start + OVERLAP_SECONDS // 2
     a_timed = any(w.start is not None for w in a)
     b_timed = any(w.start is not None for w in b)
@@ -181,23 +214,50 @@ def _join_overlap(a, b, chunk_number, start, next_label):
         if match.size >= 8 and len(set(tokens) - {''}) >= 4 and all(
                 edge.find(phrase) == edge.rfind(phrase) for edge in edges):
             pairs = [(left[match.a+k], right[match.b+k]) for k in range(match.size)]
-    votes = defaultdict(Counter)
+    votes, exact = defaultdict(Counter), defaultdict(Counter)
     for (_, wa), (_, wb) in pairs:
         if wa.speaker is not None and wb.speaker is not None:
             votes[wb.speaker][wa.speaker] += 1
-    candidates = {}
+            # The same word at the same moment of the WAV in both chunks.
+            if (a_timed and b_timed and normalize(wa) and normalize(wa) == normalize(wb)
+                    and abs(wa.start - wb.start) <= EXACT_SECONDS):
+                exact[wb.speaker][wa.speaker] += 1
+    candidates, hints = [], {}
     for speaker, counts in votes.items():
         ranked = counts.most_common()
         target, score = ranked[0]
         if score >= 5 and score / sum(counts.values()) >= .7 and (len(ranked) == 1 or score > ranked[1][1]):
-            candidates[speaker] = target
-    targets = Counter(candidates.values())
-    mapping = {s: t for s, t in candidates.items() if targets[t] == 1}
+            candidates.append((score, speaker, target))
+        elif len(ranked) == 1 and len(exact[speaker]) == 1 and exact[speaker][target] >= MIN_EXACT_WORDS:
+            # A short utterance in the overlap, such as "Okay. Now," before a new
+            # question: every shared word is the same word at the same time, all
+            # with one speaker on each side. Gemini heard the same voice.
+            candidates.append((exact[speaker][target], speaker, target))
+        elif len(ranked) == 1 and exact[speaker][target]:
+            # One shared word, such as "Yes.", suggests a match for the voice check to confirm.
+            hints[speaker] = target
+    # One speaker per label, strongest evidence first: when Gemini merged two
+    # voices under one label in the earlier chunk, only the better match maps.
+    mapping, taken = {}, set()
+    for score, speaker, target in sorted(candidates, key=lambda c: -c[0]):
+        if target not in taken:
+            mapping[speaker] = target
+            taken.add(target)
     warnings = []
     for speaker in dict.fromkeys(w.speaker for w in b):
         if speaker is not None and speaker not in mapping:
-            mapping[speaker] = f'Speaker {next(next_label)}'
-            warnings.append(f'Unmatched speaker in chunk {chunk_number} assigned {mapping[speaker]}; review the identity.')
+            # Never matched by elimination: a voice that does not speak in the
+            # shared minute may be a participant returning from an earlier chunk,
+            # or a new one. The identity check compares its voice later.
+            label = mapping[speaker] = f'Speaker {next(next_label)}'
+            warnings.append(f'Unmatched speaker in chunk {chunk_number} assigned {label}; review the identity.')
+            if identities is not None:
+                hint = hints.get(speaker)
+                identities[label] = {
+                    'chunk': chunk_number, 'status': PROVISIONAL,
+                    'suggested': hint if hint not in taken else None,
+                    'evidence': (f'one word in the shared minute matched {hint}' if hint and hint not in taken else
+                                 f'did not speak in the minute shared with chunk {chunk_number - 1}')}
     b = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in b]
     if len(pairs) >= 5:
         if a_timed and b_timed:
@@ -212,11 +272,50 @@ def _join_overlap(a, b, chunk_number, start, next_label):
     if not (a_timed and b_timed):
         warnings.append('Could not match the overlap without timestamps. Both chunks were kept. Review for repeated words.')
         return a, b, warnings
-    a = [w for w, t in zip(a, _seam_positions(a, start)) if t < midpoint]
-    b = [w for w, t in zip(b, _seam_positions(b, midpoint)) if t >= midpoint]
-    minutes, seconds = divmod(midpoint, 60)
-    warnings.append(f'Uncertain overlap alignment: joined at {minutes}:{seconds:02d}. Review for missing or repeated words.')
+    # Cut at the overlap's midpoint, unless one chunk has no words there: when the
+    # earlier chunk stops before the midpoint, the later chunk is kept from where
+    # it stopped, and when the later chunk starts after it, the earlier one is kept
+    # up to that start. A midpoint cut would then drop words neither chunk repeats.
+    # Start times only: Gemini sometimes gives a word an end time far past its start.
+    a_end = max(w.start for w in a if w.start is not None)
+    b_start = min(w.start for w in b if w.start is not None)
+    a_cut = b_cut = midpoint
+    if a_end < midpoint:
+        a_cut, b_cut = math.inf, a_end
+    elif b_start > midpoint:
+        a_cut, b_cut = b_start, -math.inf
+    a = [w for w, t in zip(a, _seam_positions(a, start)) if t < a_cut]
+    b = [w for w, t in zip(b, _seam_positions(b, midpoint)) if t >= b_cut]
+    joined = midpoint if a_cut == b_cut else (a_end if a_cut == math.inf else b_start)
+    warnings.append(f'Uncertain overlap alignment: joined at {clock(joined)}. Review for missing or repeated words.')
+    if a_end < start:
+        warnings.append(f'No words were transcribed between {clock(a_end)} and {clock(start)}. '
+                        'Check the audio there for missing testimony.')
     return a, b, warnings
+
+
+def _gaps(words, length):
+    """(last, resume) for each long silence after steady speech; resume is None at the chunk's end."""
+    timed = [(w.start, i) for i, w in enumerate(words) if w.start is not None]
+    times = [t for t, _ in timed]
+    found = []
+    for k, (t, i) in enumerate(timed):
+        following = times[k + 1] if k + 1 < len(times) else None
+        if (following if following is not None else length) - t <= TAIL_GAP_SECONDS:
+            continue
+        if sum(t - 300 <= x <= t for x in times) < TAIL_SPEECH_WORDS:
+            continue  # Speech had already thinned out: a pause, not a transcript that stopped.
+        if PAUSE_CUES.search(' '.join(w.text for w in words[max(0, i - 19):i + 1])):
+            continue  # Announced: going off the record, a recess or a break.
+        found.append((t, following))
+    return found
+
+
+def clock(seconds):
+    seconds = int(seconds)
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f'{hours}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes}:{seconds:02d}'
 
 
 def save_json(path, data):
@@ -337,6 +436,59 @@ class AudioPipeline:
             save_json(cached, [asdict(w) for w in words])
         return words
 
+    def _fill_gaps(self, path, start, end, words, directory, progress, digest, index):
+        """Words for a chunk whose transcript stopped, or skipped ahead, in steady speech.
+
+        Gemini sometimes stops a chunk's transcript early, or jumps over part of
+        it. A stretch of more than TAIL_GAP_SECONDS with no words, right after
+        steady speech, is transcribed again from a minute before it, joined to the
+        words before it like a chunk overlap, and cut where the chunk's own words
+        resume. A pause announced as going off the record or a break is left alone.
+        Each request is cached with the chunk.
+        """
+        warnings = []
+        for last, resume in _gaps(words, end - start)[:MAX_REFILLS]:
+            words, notes = self._refill(path, start, end, words, last, resume, directory, progress, digest, index)
+            warnings.extend(notes)
+        return words, warnings
+
+    def _refill(self, path, start, end, words, last, resume, directory, progress, digest, index):
+        tail = resume is None
+        resume_at = end - start if tail else resume
+        what = (f'Chunk {index + 1} of the transcription stopped at {clock(start + last)}' if tail else
+                f'Chunk {index + 1} of the transcription skipped from {clock(start + last)} to {clock(start + resume)}')
+        progress(f'{what}. Transcribing the rest of that chunk...' if tail else f'{what}. Transcribing that part again...')
+        offset = max(0, math.floor(last) - OVERLAP_SECONDS)
+        stop = end - start if tail else min(end - start, math.ceil(resume) + OVERLAP_SECONDS)
+        cached = directory / f'chunk-{index}-rest-{offset}.json'
+        try:
+            again = self._segment_words(path, start + offset, start + stop, cached, progress, digest)
+        except Exception:  # noqa: BLE001 - keep the completed transcript
+            if tail:
+                return words, [f'{what}, {clock(end - start - last)} before its end, and the rest could not be '
+                               f'transcribed. Words may be missing between {clock(start + last)} and {clock(end)}.']
+            return words, [f'{what}, and that part could not be transcribed. Words may be missing there.']
+        # Separate speaker names until the overlap matches them to the chunk's own.
+        again = [replace(w, speaker=f'{w.speaker} (rest)' if w.speaker is not None else None,
+                         start=w.start + offset if w.start is not None else None,
+                         end=w.end + offset if w.end is not None else None) for w in again]
+        if not any(w.start is not None and last < w.start < resume_at for w in again):
+            return words, []  # Nothing more was said there.
+        # The chunk's own words resume after the gap: keep them, and only the new words before them.
+        split = len(words) if tail else next(i for i, w in enumerate(words) if w.start is not None and w.start >= resume)
+        before, after = words[:split], words[split:]
+        kept, again, seam = _join_overlap(before, again, index + 1, offset, (f'R{n}' for n in count(1)))
+        again = [w for w in again if w.start is None or w.start < resume_at]
+        notes = [f'{what}, {clock(end - start - last)} before its end. The rest of the chunk was transcribed '
+                 'again; review that part.' if tail else f'{what}. That part was transcribed again; review it.']
+        if any(w.startswith('Unmatched speaker') for w in seam):
+            notes.append(f'Some speakers transcribed again in chunk {index + 1} could not be matched; '
+                         'review the identity.')
+        if any(w.startswith('Uncertain') for w in seam):
+            notes.append(f'The part of chunk {index + 1} transcribed again could not be lined up word for word. '
+                         f'Review for repeated words near {clock(start + offset + OVERLAP_SECONDS // 2)}.')
+        return [*kept, *again, *after], notes
+
     def _recover_timing(self, path, start, end, words, directory, progress, digest):
         observations = []
         step = min(TIMING_CLIP_SECONDS, math.ceil((end - start) / 2))
@@ -377,11 +529,15 @@ class AudioPipeline:
             if not any(w.start is not None for w in words):
                 progress(f'Recovering word timestamps for chunk {i+1} from shorter audio clips...')
                 words = self._recover_timing(path, start, end, words, directory, progress, digest)
+            # A later chunk only repeats this one's last minute, so a chunk that stopped
+            # early, or skipped ahead, would leave a gap. Transcribe that part again.
+            words, refill_warnings = self._fill_gaps(path, start, end, words, directory, progress, digest, i)
+            timing_warnings.extend(refill_warnings)
             chunks.append(words)
             if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
-        retained, warnings = _stitched_chunks(chunks)
+        retained, warnings, identities = _stitched_chunks(chunks)
         words = tuple(chain.from_iterable(retained))
         if vocabulary:
             windows, vocabulary_warnings = self._vocabulary_windows(path, plan[-1][1], progress, digest, vocabulary)
@@ -394,4 +550,5 @@ class AudioPipeline:
         if not text.strip():
             raise ValueError('Transcription returned no usable text.')
         check_wav_digest(path, digest)
-        return Transcription(text, words, tuple(timing_warnings + warnings), int(plan[-1][1] * 1000), digest)
+        return Transcription(text, words, tuple(timing_warnings + warnings), int(plan[-1][1] * 1000), digest,
+                             identities)

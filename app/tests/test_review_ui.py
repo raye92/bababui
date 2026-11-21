@@ -373,6 +373,24 @@ def test_old_card_cannot_select_a_new_model_index():
     view.close()
 
 
+def test_a_passage_missing_from_the_ai_draft_has_its_own_card():
+    from app.src.review_model import build_review
+    from app.tests.test_review_model import missing_answer
+    QApplication.instance() or QApplication([])
+    answer, before = missing_answer()
+    after = before.replace('A ' + answer + '\n', '').replace('red', 'blue')
+    view = ReviewView()
+    view.set_model(build_review(revision(before), revision(after)))
+    missing, = view.missing
+    notes = [card.findChild(QLabel, 'missingNote') for card in view.cards]
+    assert [note is not None for note in notes] == [index == missing for index in range(len(view.cards))]
+    assert 'Listen before removing it. Accept All keeps your text.' in notes[missing].text()
+    assert 'Missing from AI draft' in [label.text() for label in view.cards[missing].findChildren(QLabel)]
+    assert 'Missing from AI draft' not in [label.text() for label in view.cards[1 - missing].findChildren(QLabel)]
+    assert missing not in view.speaker_changes
+    view.close()
+
+
 @pytest.mark.parametrize(('caption', 'expected', 'speaker'), [
     ('Accept All', 'The blue car is small and new.', 'MS. SIEMENS'),
     ('Reject All', 'The blue car is large and old.', 'MR. LEISER'),

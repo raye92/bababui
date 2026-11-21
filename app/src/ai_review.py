@@ -37,6 +37,8 @@ class AssistedReview:
     after_rules: tuple
     after_ai: tuple
     summary: str
+    # Words whose spelling needs the reporter's judgment. It never changes the text.
+    spelling: dict | None = None
 
 
 def _protected(revision, start, end):
@@ -76,14 +78,14 @@ def _small_word_edit(before, after):
             and 0 < max(deleted + added, default=0) <= 4)
 
 
-def candidates(original, incoming):
-    """Yield exact edit cards and their matching UI excerpts."""
+def candidates(original, incoming, keep=None):
+    """Yield exact edit cards and their matching UI excerpts. `keep(edit)` skips an edit."""
     left, right = original.text, incoming.text
     edits = suggestions(original, incoming)
     spans = sorted(span for edit in edits for span in edit.ranges)
     positions = {span: index for index, span in enumerate(spans)}
     for edit in edits:
-        if edit.kind != 'text' or edit.field or len(edit.ranges) != 1:
+        if edit.kind != 'text' or edit.field or len(edit.ranges) != 1 or (keep and keep(edit)):
             continue
         a, b, c, d = span = edit.ranges[0]
         front_a, back_a = word_context(left, a, b)
@@ -113,9 +115,13 @@ def _unique_ids(pairs):
     return result
 
 
-def review_edits(original, incoming, review, model, complete, document_id, *, testing=False, directory=None):
-    """Apply validated decisions as a batch, with an optional diagnostic log."""
-    edits = list(candidates(original, incoming))
+def review_edits(original, incoming, review, model, complete, document_id, *, testing=False, directory=None,
+                 keep=None):
+    """Apply validated decisions as a batch, with an optional diagnostic log.
+
+    Edits that `keep` marks, such as a change to a house spelling, stay pending.
+    """
+    edits = list(candidates(original, incoming, keep))
     payload = [{'id': str(index), **item} for index, (_, item) in enumerate(edits, 1)]
     decisions, failure = {}, ''
     if payload:

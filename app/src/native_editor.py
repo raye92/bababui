@@ -7,8 +7,8 @@ from PySide6.QtGui import (QKeySequence, QTextCursor,
                           QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
                           QTextBlockFormat, QTextFormat, QTextOption, QPainter,
                           QTextTableFormat, QTextLength)
-from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
-from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
+from PySide6.QtCore import Signal, Qt, QEvent, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
+from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox, QToolTip
 
 from app.src.casecat.layout import read_layouts, ParagraphStyle
 from shared.transcript_formatting import TranscriptFormatter
@@ -452,6 +452,11 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         # Use the same application palette as the original text editor.
         self.setStyleSheet('QTextEdit { border: 0; }')
         self.document().documentLayout().documentSizeChanged.connect(self._update_page_scroll_range)
+        self._spelling = None
+        # Typing moves the text under the spelling marks; find the words again shortly after.
+        self._spelling_timer = QTimer(self, singleShot=True, interval=150)
+        self._spelling_timer.timeout.connect(self._refresh_element_marks)
+        self.textChanged.connect(lambda: self._spelling and self._spelling_timer.start())
         self._after_set_plaintext()
 
     def setReadOnly(self, readonly):
@@ -503,6 +508,29 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         self._external_selections = selections
         self._refresh_element_marks()
 
+    def set_spelling(self, record):
+        """Underline in orange the words whose spelling needs the reporter's judgment."""
+        if record == getattr(self, '_spelling', None):
+            return
+        self._spelling = record
+        self._refresh_element_marks()
+
+    def spelling_note(self, position):
+        """The spelling review note for the word at Qt `position`, or ''."""
+        from app.src.casecat.anchors import utf16_index
+        from app.src.spelling_marks import note_at
+        text = self.toPlainText()
+        return note_at(getattr(self, '_spelling', None), text, utf16_index(text, position))
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip and getattr(self, '_spelling', None):
+            note = self.spelling_note(self.cursorForPosition(event.pos()).position())
+            if note:
+                QToolTip.showText(event.globalPos(), note, self.viewport())
+                return True
+            QToolTip.hideText()
+        return super().viewportEvent(event)
+
     def _refresh_element_marks(self):
         selections = []
         if self._native_source and self.toPlainText() == self._native_source[1].text:
@@ -513,10 +541,15 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 mark.cursor = QTextCursor(self.document())
                 mark.cursor.setPosition(len(text[:element.start].encode('utf-16-le')) // 2)
                 mark.cursor.setPosition(len(text[:element.end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
-                color = ('#eab46a' if dark else '#a15a10') if element.kind == 'field' else ('#91bce9' if dark else '#276394')
+                color = (('#eab46a' if dark else '#a15a10') if element.kind in ('field', 'date')
+                         else ('#91bce9' if dark else '#276394'))
                 mark.format.setForeground(QColor(color))
                 selections.append(mark)
-        super().setExtraSelections([*selections, *getattr(self, '_external_selections', []), *getattr(self, '_review_selections', [])])
+        # Spelling marks come last, so the orange underline shows over every edit color.
+        from app.src.spelling_marks import selections as spelling_selections
+        spelling = spelling_selections(self.document(), self.toPlainText(), getattr(self, '_spelling', None))
+        super().setExtraSelections([*selections, *getattr(self, '_external_selections', []),
+                                    *getattr(self, '_review_selections', []), *spelling])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

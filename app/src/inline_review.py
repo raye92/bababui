@@ -3,10 +3,10 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 import math
 
-from PySide6.QtCore import Qt, Signal, QPointF, QSizeF, QRectF, QSignalBlocker
+from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QSizeF, QRectF, QSignalBlocker
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPalette, QPen,
                           QTextBlockFormat, QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
+from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QToolTip
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
@@ -236,9 +236,10 @@ class InlineReviewEditor(QTextEdit):
                 editor.setPlainText(revision.text)
         return self.source_editors
 
-    def set_model(self, model, *, unmatched_speakers=()):
+    def set_model(self, model, *, unmatched_speakers=(), spelling=None):
         anchor = self.source_position() if self.rows else ('original', 0)
         self.model = model
+        self._spelling = spelling
         original, incoming = self._sources(model)
         self._page_width, self._page_height = original._page_width, original._page_height
         self._left, self._right = original._left, original._right
@@ -632,7 +633,65 @@ class InlineReviewEditor(QTextEdit):
                 else:
                     mark.format.setFontUnderline(True)
                 marks.append(mark)
-        super().setExtraSelections(marks)
+        # Spelling marks come last, so the orange underline shows over every edit color.
+        super().setExtraSelections([*marks, *self._spelling_selections()])
+
+    def set_spelling(self, record):
+        if record != getattr(self, '_spelling', None):
+            self._spelling = record
+            self._refresh_selections()
+
+    def _spelling_rows(self):
+        """For each display row, its side and where its text starts in that side's transcript.
+
+        A row both sides share is checked once, as part of the rough.
+        """
+        for row in self.rows:
+            if row.caption_cell:
+                continue
+            yield row, ('incoming' if row.kind == 'incoming' else 'original'), row.source_start
+
+    def _spelling_selections(self):
+        from app.src.spelling_marks import selection
+        from shared.spelling_review import spelling_ranges
+        record = getattr(self, '_spelling', None)
+        if not record or self.model is None:
+            return []
+        marks = []
+        rows = {'original': [], 'incoming': []}
+        for row, side, source_start in self._spelling_rows():
+            rows[side].append((source_start, row))
+        for side, placed in rows.items():
+            placed.sort(key=lambda item: item[0])
+            starts = [start for start, _ in placed]
+            for start, end, _ in spelling_ranges(record, getattr(self.model, side).text):
+                # A word can wrap onto the next row; look from the row it starts in.
+                for source_start, row in placed[max(0, bisect_right(starts, start) - 1):]:
+                    if source_start >= end:
+                        break
+                    left, right = max(start, source_start), min(end, source_start + len(row.text))
+                    if left < right:
+                        marks.append(selection(self.document(), row.display_start + _qt(row.text[:left - source_start]),
+                                               row.display_start + _qt(row.text[:right - source_start])))
+        return marks
+
+    def spelling_note(self, position):
+        """The spelling review note for the word at display `position`, or ''."""
+        from app.src.spelling_marks import note_at
+        record = getattr(self, '_spelling', None)
+        if not record or self.model is None:
+            return ''
+        side, index = self._source_at(position)
+        return note_at(record, getattr(self.model, side).text, index)
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip and getattr(self, '_spelling', None):
+            note = self.spelling_note(self.cursorForPosition(event.pos()).position())
+            if note:
+                QToolTip.showText(event.globalPos(), note, self.viewport())
+                return True
+            QToolTip.hideText()
+        return super().viewportEvent(event)
 
     def _update_scroll_range(self):
         if self.pages:

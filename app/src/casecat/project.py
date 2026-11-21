@@ -84,6 +84,9 @@ class NativeState:
     review: dict | None = None
     alignment: SpeechAlignment | None = None
     notice: AttachedNotice | None = None
+    # Words whose spelling needs the reporter's judgment (shared.spelling_review).
+    # Views draw them; they are never part of the transcript or an export.
+    spelling: dict | None = None
 
     @classmethod
     def load(cls, bundle, key):
@@ -92,7 +95,7 @@ class NativeState:
 
     def duplicate(self):
         from copy import deepcopy
-        return replace(self, review=deepcopy(self.review))
+        return replace(self, review=deepcopy(self.review), spelling=deepcopy(self.spelling))
 
     @cached_property
     def recording(self):
@@ -178,7 +181,8 @@ class NativeState:
                 'job': self.job.key, 'source_sha256': self.bundle.digest,
                 'source_name': self.bundle.name, 'source_path': self.bundle.source_path,
                 'original': self.original.to_dict(), 'incoming': self.incoming.to_dict(),
-                'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None}
+                'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None,
+                **({'spelling': self.spelling} if self.spelling else {})}
 
     @classmethod
     def restore(cls, bundle, record, notice=None):
@@ -201,6 +205,11 @@ class NativeState:
             state.incoming = Revision.from_dict(record['incoming'])
             state.review = record.get('review')
             state.alignment = SpeechAlignment.restore(record.get('alignment'), len(state.job.stroke_clocks))
+            try:
+                from shared.spelling_review import validate_record
+                state.spelling = validate_record(record.get('spelling')) or None
+            except ValueError:
+                state.spelling = None  # Spelling marks are advisory; never block recovery.
             if state.review is not None:
                 from app.src.suggestion_filter import validate_review
                 validate_review(state.review, state.incoming.text)

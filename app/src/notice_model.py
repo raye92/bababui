@@ -24,6 +24,18 @@ class Appearance:
     email: str = ''
 
 
+_ORGANIZATION_WORDS = frozenset(
+    'inc llc llp corp corporation co company companies insurance ltd group services district county city state '
+    'department hospital center centre university association associates bank trust authority fund mutual '
+    'casualty indemnity partners clinic medical health systems school college agency board'.split())
+
+
+def _party_kind(name):
+    """An applicant is usually a person; an employer or insurer is an organization."""
+    words = re.findall(r"[^\W_]+", name.casefold())
+    return 'person' if 1 < len(words) <= 4 and not _ORGANIZATION_WORDS.intersection(words) else 'organization'
+
+
 @dataclass(frozen=True)
 class NoticeDetails:
     plaintiff: str = ''
@@ -67,9 +79,19 @@ class NoticeDetails:
             raise ValueError('Invalid notice details.') from exc
 
     def vocabulary(self):
-        names = [self.deponent]
+        return tuple(dict.fromkeys(name for _, name in self._named()))
+
+    def spelling_sources(self):
+        """Confirmed spellings, each a ('person' or 'organization', name) pair."""
+        found = {}
+        for kind, name in self._named():
+            found.setdefault(name.casefold(), (kind, name))
+        return tuple(found.values())
+
+    def _named(self):
+        names = [('person', self.deponent)]
         for row in self.appearances:
-            names.extend((row.attorney, row.firm))
+            names.extend((('person', row.attorney), ('organization', row.firm)))
         attorney_words = {w.casefold() for row in self.appearances for w in re.findall(r"[\w’'-]+", row.attorney)}
         for label in self.speakers:
             name = re.sub(r'^(?:BY\s+)?(?:(?:MR|MRS|MS|MISS|DR)\.?\s+)?', '', label.strip(), flags=re.I)
@@ -80,20 +102,20 @@ class NoticeDetails:
             if len(name.split()) == 1 and any(SequenceMatcher(None, name.casefold(), w).ratio() >= .8
                                               for w in attorney_words):
                 continue
-            names.append(name)
+            names.append(('person', name))
         for party in (self.plaintiff, self.defendant):
             entities = re.split(r'\s*[,;]?\s*\b(?:as\s+)?(?:insured|administered|adjusted)\s+by\s+|[;/]', party, flags=re.I)
             for entity in entities:
                 # A second insurer can follow a corporate suffix without a
                 # semicolon, e.g. “Blue Mill, Inc., Plains Insurance Company”.
                 entity = re.sub(r'\b(Inc\.?|Corp\.?|LLC|Ltd\.?),\s+(?=\w)', r'\1;', entity, flags=re.I)
-                names.extend(entity.split(';'))
+                names.extend((_party_kind(part), part) for part in entity.split(';'))
         terms = {}
-        for name in names:
+        for kind, name in names:
             term = ' '.join(name.split()).strip(' ,;')
             if term and not term.startswith('[!'):
-                terms.setdefault(term.casefold(), term)
-        return tuple(terms.values())
+                terms.setdefault(term.casefold(), (kind, term))
+        return list(terms.values())
 
     def speaker_context(self):
         """Confirmed participants and parties, for reviewing who speaks each turn."""

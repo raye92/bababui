@@ -26,7 +26,12 @@ class AcceptAllPreviewTask(QRunnable):
     def run(self):
         model = self.model
         try:
-            revision, _ = resolve_all(model.original, model.incoming, model.ranges, True)
+            if getattr(model, 'missing', None):
+                # The same result as Accept All, which keeps passages missing from the AI draft.
+                from app.src.review_model import accept_all
+                revision, _ = accept_all(model)
+            else:
+                revision, _ = resolve_all(model.original, model.incoming, model.ranges, True)
             job = self.job.with_revision(revision)
             prepared = prepare_editor_presentation(job, self.bundle)
         except Exception as exc:
@@ -44,6 +49,7 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self.setReadOnly(True)
         self._text = ''
         self._edits, self._highlights, self._labels = (), [], []
+        self._kept = ()
 
     def load_preview(self, bundle, job, prepared, model, selected, labels=()):
         self.set_native_source(bundle, job)
@@ -51,8 +57,15 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self._text, self._edits = job.text, model.edits
         self._highlights = []
         offsets = list(accumulate((2 if ord(char) > 0xffff else 1 for char in self._text), initial=0))
+        # A kept passage missing from the AI draft shifts the draft's positions after it.
+        self._kept = getattr(model, 'accept_all_positions', lambda: ())()
+        place = self.to_preview
+        labels = [(place(a), place(b)) for a, b in labels]
         for index, edit in enumerate(self._edits):
+            if index in getattr(model, 'missing', ()):
+                continue  # Not part of the Accept All result.
             for _, _, start, end in preview_ranges(edit):
+                start, end = place(start), place(end)
                 # Qt paints a selection of a paragraph separator as an empty
                 # colored cell. Highlight the visible parts of the edit.
                 for match in re.finditer(r'[^\n]+', self._text[start:end]):
@@ -92,7 +105,21 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
             mark.format.setBackground(QColor(CHECK_BACKGROUND))
             mark.format.setForeground(QColor(CHECK_FOREGROUND))
             marks.append(mark)
+        # The orange spelling underline is added after these by NativeTranscriptEditor.
         self.set_review_marks(marks, [])
+
+    def to_preview(self, position):
+        """A position in the AI draft, in this preview's text.
+
+        The preview keeps passages missing from the AI draft, which shift later text.
+        """
+        from app.src.review_model import map_position
+        return map_position(position, self._kept) if self._kept else position
+
+    def to_incoming(self, position):
+        """A position in this preview's text, in the AI draft."""
+        from app.src.review_model import map_position
+        return map_position(position, tuple((c2, d2, c, d) for c, d, c2, d2 in self._kept)) if self._kept else position
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
@@ -104,13 +131,14 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         position = utf16_index(self._text, hit if hit >= 0 else caret)
         candidates = [index for start, end, index, _ in self._highlights
                       if hit >= 0 and start <= position < end]
+        draft = self.to_incoming(position)
 
         def distance(index):
-            return min(max(start - position, position - end + 1, 0)
+            return min(max(start - draft, draft - end + 1, 0)
                        for _, _, start, end in self._edits[index].ranges)
 
         index = min(candidates, key=distance, default=-1)
-        self.passage_clicked.emit(index, position)
+        self.passage_clicked.emit(index, draft)
 
     def undo(self):
         self.history_requested.emit(True)

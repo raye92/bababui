@@ -32,7 +32,7 @@ lets a view highlight corrected speaker labels in the formatted draft,
 independently of wording highlights, and show why each label changed.
 """
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
 import json
@@ -52,6 +52,7 @@ Gemini's labels come from the voices in the audio, and you see only the words. K
 Review every turn from review.first_id to review.last_id, including turns that need no change. Read the whole transcript for context. Identify who speaks each part from the exchange: introductions and the oath, the current examiner, who is being addressed, the preceding question, the following response, who has firsthand knowledge, and the case context. Never decide from the label, a question mark, or one sentence alone.
 - Direct address names the listener, not the speaker. "Doctor, when you reviewed the records" is spoken to the witness, so the witness did not say it. A reply such as "Let him finish the question" shows that the interrupted turn was the examiner's question.
 - A short courtesy or acknowledgment such as "Thank you" or "Okay" gives too little context to change a label on its own.
+- Never give a turn to a participant only because that participant has no other label, or has not spoken in that part of the deposition. A label that the notes call unresolved may be a participant returning from earlier, or someone new.
 
 Return one JSON object, {"participants": {...}, "turns": [...]}.
 - "participants" gives each label's role and name, if known, such as {"SPEAKER 1": "examining attorney Mr. Smith", "SPEAKER 2": "witness"}.
@@ -361,9 +362,12 @@ def _neighbor(words, segment):
 def _verify(words, segments, index, found, verify, roles, context, log):
     """Ask the audio check about a conflicting proposal. Returns its label, or None."""
     segment = segments[index]
+    # The exchange around the turn: who was addressed, who answered, who resumed.
     question = {'turn': {**_neighbor(words, segment), 'speaker': segment.gemini, 'proposed': segment.proposed},
+                'earlier': _neighbor(words, segments[index - 2] if index > 1 else None),
                 'before': _neighbor(words, segments[index - 1] if index else None),
                 'after': _neighbor(words, segments[index + 1] if index + 1 < len(segments) else None),
+                'later': _neighbor(words, segments[index + 2] if index + 2 < len(segments) else None),
                 'reason': segment.reason, 'conflicts': found, 'participants': roles, 'context': context}
     answer, error = None, None
     called = verify is not None and question['turn']['start'] is not None
@@ -379,18 +383,27 @@ def _verify(words, segments, index, found, verify, roles, context, log):
     return label if label in (segment.gemini, segment.proposed) else None, why, called
 
 
-def _check(words, segments, verify, roles, rough_said, rough_labels, context, progress, log):
+def _voice_conflict(segment, identities):
+    """A voice the voice check found differs from every earlier speaker cannot simply be one of them."""
+    info = next((i for label, i in (identities or {}).items() if label_key(label) == segment.gemini), None)
+    if info and info.get('heard') == 'none' and segment.proposed and segment.proposed != segment.gemini:
+        return [f'the voice check found {segment.gemini} differs from every earlier speaker']
+    return []
+
+
+def _check(words, segments, verify, roles, rough_said, rough_labels, context, progress, log, identities=None):
     """Apply, drop or flag each proposed change after checking it."""
     checked = list(segments)
-    disputed = [k for k, s in enumerate(checked) if s.status == CORRECTED
-                and conflicts(words, s, roles, rough_said, rough_labels)]
+    conflicts_of = lambda s: (conflicts(words, s, roles, rough_said, rough_labels)
+                              + _voice_conflict(s, identities))
+    disputed = [k for k, s in enumerate(checked) if s.status == CORRECTED and conflicts_of(s)]
     if disputed and verify is not None:
         progress(f'Checking {len(disputed)} disputed speaker change{"s" if len(disputed) != 1 else ""} '
                  'against the audio...')
     for k, segment in enumerate(checked):
         if segment.status != CORRECTED:
             continue
-        found = conflicts(words, segment, roles, rough_said, rough_labels)
+        found = conflicts_of(segment)
         if not found:
             support = _rough_support(words, segment, rough_said, rough_labels)
             checked[k] = replace(segment, checks=segment.checks + ((support,) if support else ()))
@@ -417,6 +430,29 @@ class SpeakerReview:
     turns: tuple
     segments: tuple
     warnings: tuple = ()
+    # How each job-wide label was established (speaker_identity), and each voice
+    # still unresolved after the review with its turns: {"label", "status",
+    # "evidence", "clip": {"start", "end", "text", "first", "last"},
+    # "turns": [{"first", "last", "start", "end", "verdict", "linked"}]}.
+    identities: dict = field(default_factory=dict, compare=False, hash=False)
+    voices: tuple = ()
+
+    def renumbered(self):
+        """{label: earlier label} for each voice a later chunk numbered afresh that the
+        review gave, by the exchange, to one earlier speaker. That is renumbering, not
+        a change of who spoke, so it is not highlighted."""
+        found = {}
+        for label, info in (self.identities or {}).items():
+            if info.get('status') != 'unresolved':
+                continue
+            key = label_key(label)
+            mine = [s for s in self.segments if s.gemini == key]
+            moved = Counter(s.speaker for s in mine if s.status == CORRECTED and s.speaker != key)
+            if len(moved) == 1:
+                target, count = moved.most_common(1)[0]
+                if count >= .8 * len(mine):
+                    found[key] = target
+        return found
 
     @property
     def counts(self):
@@ -472,25 +508,49 @@ class SpeakerReview:
                 for s in self.segments if s.proposed and s.proposed != s.gemini]
 
     def record(self):
-        """JSON-safe data for highlighting corrected labels in a formatted draft and
-        showing why each label changed."""
+        """JSON-safe data for highlighting corrected labels in a formatted draft, showing
+        why each label changed, and finding each turn's audio and voice."""
         tokens, corrected, changes = [], [], self.changes()
         index = {(c['time'], c['text'], c['proposed']): n for n, c in enumerate(changes)}
+        renumbered = self.renumbered()
+        token_at, times = [0] * (len(self.words) + 1), []
         for segment in self.segments:
             change = index.get((segment.time, _snippet(self.words, segment.start, segment.end), segment.proposed))
+            # Giving a later chunk's number back to its earlier speaker is not a correction.
+            genuine = segment.status == CORRECTED and renumbered.get(segment.gemini) != segment.speaker
             for i in range(segment.start, segment.end):
                 found = word_tokens(self.words[i].text)
-                a = len(tokens)
+                a = token_at[i] = len(tokens)
                 tokens.extend(found)
-                if segment.status == CORRECTED and found:
+                start = getattr(self.words[i], 'start', None)
+                times.extend([None if start is None else round(start, 1)] * len(found))
+                if genuine and found:
                     if corrected and corrected[-1][1] == a and corrected[-1][2] == change:
                         corrected[-1][1] = len(tokens)
                     else:
                         corrected.append([a, len(tokens), change])
-        flags = [{'time': s.time, 'speaker': s.speaker, 'proposed': s.proposed, 'candidates': list(s.candidates),
-                  'text': _snippet(self.words, s.start, s.end), 'note': s.note, 'reason': s.reason}
+        token_at[len(self.words)] = len(tokens)
+        flags = [{'time': s.time, 'end': _last_time(self.words, s.start, s.end), 'speaker': s.speaker,
+                  'proposed': s.proposed, 'candidates': list(s.candidates),
+                  'text': _snippet(self.words, s.start, s.end), 'note': s.note, 'reason': s.reason,
+                  'tokens': [token_at[s.start], token_at[s.end]]}
                  for s in self.segments if s.status == FLAGGED]
-        return {'version': 2, 'tokens': tokens, 'corrected': corrected, 'changes': changes, 'flags': flags,
+        voices = []
+        for voice in self.voices:
+            clip = voice.get('clip')
+            voices.append({
+                **{k: voice[k] for k in ('label', 'status', 'evidence', 'chunk') if k in voice},
+                'clip': clip and {**{k: clip[k] for k in ('start', 'end', 'text')},
+                                  'tokens': [token_at[clip['first']], token_at[clip['last']]]},
+                'turns': [{'tokens': [token_at[t['first']], token_at[t['last']]], 'start': t['start'],
+                           'end': t['end'], 'verdict': t['verdict'], 'linked': t['linked']}
+                          for t in voice.get('turns', ())]})
+        turns = Counter(t.label for t in self.turns)
+        labels = {label_key(label): {'status': info.get('status', ''), 'turns': turns.get(label_key(label), 0)}
+                  for label, info in (self.identities or {}).items()}
+        return {'version': 2, 'tokens': tokens, 'times': times, 'corrected': corrected, 'changes': changes,
+                'flags': flags, 'voices': voices, 'labels': labels,
+                'renumbered': {label: target for label, target in renumbered.items()},
                 'summary': self.summary}
 
     def to_json(self):
@@ -518,7 +578,7 @@ def _warning(words, segment, label):
 
 
 def review_speakers(words, complete, *, context='', notes=(), rough=None, verify=None,
-                    progress=lambda message: None, batch_turns=BATCH_TURNS, log=None):
+                    progress=lambda message: None, batch_turns=BATCH_TURNS, log=None, identities=None):
     """Review every Gemini turn and return a SpeakerReview.
 
     `words` have text, speaker, start and end (seconds or None). `complete(payload,
@@ -579,8 +639,8 @@ def review_speakers(words, complete, *, context='', notes=(), rough=None, verify
         segments.extend(decided.get(turn.id) or [Segment(turn.id, turn.start, turn.end, turn.label, turn.label,
                                                          UNREVIEWED, False, _first_time(words, turn.start, turn.end))])
     rough_said, rough_labels = rough_attribution(words, rough)
-    segments = _check(words, segments, verify, roles, rough_said, rough_labels, context, progress, log)
-    result = SpeakerReview(words, tuple(turns), tuple(segments))
+    segments = _check(words, segments, verify, roles, rough_said, rough_labels, context, progress, log, identities)
+    result = SpeakerReview(words, tuple(turns), tuple(segments), (), identities or {})
     for segment in segments:
         if segment.status == FLAGGED:
             warnings.append(_warning(words, segment, result.display(segment.speaker)))
@@ -588,7 +648,7 @@ def review_speakers(words, complete, *, context='', notes=(), rough=None, verify
     if skipped and not any(w.startswith('Speaker review could not') for w in warnings):
         warnings.append(f"Speaker review did not return {skipped} turn{'s' if skipped != 1 else ''}. "
                         "Gemini's speaker labels were kept there.")
-    return SpeakerReview(words, tuple(turns), tuple(segments), tuple(warnings))
+    return SpeakerReview(words, tuple(turns), tuple(segments), tuple(warnings), identities or {})
 
 
 # Formatted drafts: labeled speech paragraphs and corrected-label highlights.
@@ -749,3 +809,31 @@ def label_changes(record, text):
     changes = record.get('changes') or []
     return tuple((a, b, changes[n] if n is not None and n < len(changes) else None)
                  for a, b, n in _highlights(*_key(record), text))
+
+
+@lru_cache(maxsize=16)
+def _unit_tokens(tokens, text):
+    units = label_units(text)
+    owners, draft = [], []
+    for index, unit in enumerate(units):
+        draft.extend(unit.tokens)
+        owners.extend([index] * len(unit.tokens))
+    found = [[] for _ in units]
+    for i, j in enumerate(align(tokens, draft)):
+        if j is not None:
+            found[owners[j]].append(i)
+    return tuple((u.label_start, u.label_end, u.kind, tuple(found[k])) for k, u in enumerate(units))
+
+
+def unit_audio(record, text):
+    """For each labeled speech paragraph of a formatted draft: (label start, label end,
+    kind, token indices of the stitched Gemini words it holds, start time, end time).
+    Times are seconds in the original WAV, or None when the record has none."""
+    if not record or not record.get('tokens') or not text:
+        return ()
+    times = record.get('times') or []
+    result = []
+    for start, end, kind, found in _unit_tokens(tuple(record['tokens']), text):
+        stamps = [times[i] for i in found if i < len(times) and times[i] is not None]
+        result.append((start, end, kind, found, min(stamps) if stamps else None, max(stamps) if stamps else None))
+    return tuple(result)

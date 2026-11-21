@@ -240,3 +240,40 @@ def test_preview_failure_restores_regular_review(native_window, tmp_path, monkey
     assert view.active_view() is view.inline_editor
     assert 'Test preview error' in native_window.status_label.text()
     assert view.document.original == 'Hello world.\n'
+
+
+def test_accept_all_and_its_preview_keep_a_passage_missing_from_the_ai_draft(native_window, tmp_path):
+    from app.tests.test_review_model import missing_answer
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    doc = view.document
+    answer, before = missing_answer()
+    view.editor.setPlainText(before)
+    after = before.replace('A ' + answer + '\n', '').replace('red', 'blue')
+    view.receive(after, [])
+    QTest.qWait(30)
+    assert len(view.review_model.edits) == 2 and len(view.review_model.missing) == 1
+    expected = before.replace('red', 'blue')
+
+    action = preview_action(native_window)
+    action.trigger()
+    ordinary_views = (None, view.editor, view.incoming_editor, view.inline_editor)
+    wait_until(lambda: view.active_view() not in ordinary_views and view.active_view().toPlainText() == expected)
+    preview = view.active_view()
+    marks = [mark.cursor.selectedText() for mark in preview.extraSelections()
+             if mark.format.background().style() != Qt.NoBrush]
+    assert 'blue' in marks and not any(answer[:20] in mark for mark in marks)
+    action.trigger()
+
+    accept_all = next(a for a in native_window.edit_btn.menu().actions() if a.text() == 'Accept All')
+    accept_all.trigger()
+    wait_until(lambda: not doc.busy)
+    assert doc.original == expected and doc.incoming == after
+    assert len(view.review_model.edits) == 1 and view.review_model.missing == {0}
+    # Only the missing passage is left, so Accept All explains instead of removing it.
+    accept_all.trigger()
+    wait_until(lambda: not doc.busy)
+    assert doc.original == expected and len(view.review_model.edits) == 1
+    assert doc.status.startswith('Accept All leaves passages missing from the AI draft for you.')
+    view.review(0, True)
+    assert doc.original == after and not view.review_model.edits

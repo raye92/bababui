@@ -134,18 +134,18 @@ def begin_document_review(state, text, *, exclude_off_record=True, full_document
     return joined_snapshot(head, head, undo)
 
 
-def auto_accept_document(state, *, disabled_rules):
+def auto_accept_document(state, *, disabled_rules, keep=None):
     from app.src.suggestion_filter import auto_accept
     if (state.review or {}).get('automatic_filter') == 1:
-        return auto_accept(state, disabled_rules=disabled_rules)
+        return auto_accept(state, disabled_rules=disabled_rules, keep=keep)
     a = state.body_position(state.original)
     if not a:
-        return auto_accept(state, disabled_rules=disabled_rules)
+        return auto_accept(state, disabled_rules=disabled_rules, keep=keep)
     b = state.body_position(state.incoming)
     left, original = split_revision(state.original, a)
     right, incoming = split_revision(state.incoming, b)
     local = SimpleNamespace(original=original, incoming=incoming,
                             review=remap_review(state.review, lambda p: max(0, p-a), lambda p: max(0, p-b)))
-    auto_accept(local, disabled_rules=disabled_rules)
+    auto_accept(local, disabled_rules=disabled_rules, keep=keep)
     state.original, state.incoming, state.review = joined_snapshot(left, right, (local.original, local.incoming, local.review))
     return state.review['automatic_changes']

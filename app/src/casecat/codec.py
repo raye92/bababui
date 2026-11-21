@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 from .anchors import AnchoredSpan, Revision
 from .rendering import TextRenderer, render_record
-from .elements import NativeElement, field_name
+from .elements import NativeElement, date_text, field_date, field_name
 from .caption import CAPTION_NAMES, cover_end, is_cell
 
 
@@ -110,7 +110,8 @@ def load_job(bundle, key):
     end_cover = cover_end(native)
     renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover))
     from .field_table import field_texts
-    has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
+    has_fields = any(raw[:2] == b'\x15\x07' and field_date(raw) is None
+                     for _, raw in records(native, start, start + length))
     try:
         definitions = field_texts(native)
         field_display = field_texts(native, display=True)
@@ -129,6 +130,7 @@ def load_job(bundle, key):
             renderer.cover_tables = False
         before, part_count = content_length, len(content)
         op = raw[0]
+        date = field_date(raw) if op == 0x15 else None
         if op == 0x13:
             byline = None
             flush()
@@ -173,8 +175,15 @@ def load_job(bundle, key):
         elif renderer.cover_tables and (is_cell(raw) or op in (9, 10)):
             content.append(render_record(renderer, raw, {}))
             formatting.append(raw.hex())
+        elif date:
+            content.append(renderer.literal(date_text(date)))
+            formatting.append(raw.hex())
         elif op == 0x15 and raw[1] == 7:
-            label = raw[10:].rstrip(b'\0').decode('cp1252')
+            try:
+                label = field_name(raw)
+            except ValueError:
+                raise ValueError(f'Unsupported CaseCAT field record at byte {offset}. '
+                                 'Bababui cannot read this kind of field yet.') from None
             if label in definitions:
                 value = definitions[label]
                 content.append(renderer.literal(field_display[label] or f'[!{label}]'))
@@ -193,9 +202,12 @@ def load_job(bundle, key):
             renderer.control(raw)
         after = before + (len(content[-1]) if len(content) > part_count else 0)
         content_length = after
-        if op == 0x15 and raw[1] == 7:
+        if date:
+            elements.append(NativeElement(position + before, position + after, 'date', raw.hex(),
+                                          source=offset, uppercase=renderer.uppercase))
+        elif op == 0x15 and raw[1] == 7:
             elements.append(NativeElement(position + before, position + after, 'field',
-                                          raw.hex(), field_name(raw), offset, value,
+                                          raw.hex(), label, offset, value,
                                           bool(end_cover) and label in CAPTION_NAMES, renderer.uppercase))
         elif op == 0x16 and int.from_bytes(raw[1:], 'little') in (2, 3):
             prefix = content[-1]

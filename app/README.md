@@ -16,8 +16,9 @@ Install FFmpeg and FFprobe on PATH, or set `FFMPEG_PATH` and `FFPROBE_PATH`.
 Copy `.env.example` to `.env` if needed. Set `GEMINI_API_KEY` for transcription
 and Gemini formatting; set `DEEPSEEK_API_KEY` for DeepSeek formatting.
 Environment variables take precedence over `app/.env`.
-Set `TESTING=TRUE` to save Gemini transcription responses and AI review logs in
-the system temp folder under `bababui-transcriptions`. The default is `FALSE`.
+Set `TESTING=TRUE` to save Gemini transcription responses and AI review logs,
+including the speaker, house spelling and spelling reviews, in the system temp folder under
+`bababui-transcriptions`. The default is `FALSE`.
 
 ## Audio workflow
 
@@ -28,6 +29,11 @@ Create a tab with **Ctrl+T** or **+**. Click the empty tab or drop a Case CATaly
 ZIP onto it. The editor uses the WAV in the job. You can also attach a WAV after
 import. Duplicating a tab keeps its transcript, pending revisions, audio, notice,
 and model settings.
+
+A CaseCAT date field, such as the date after "Dated this" in a certificate,
+shows as a date like November 19, 2026. CaseCAT keeps its own date format,
+and the field goes back into the ZIP unchanged. A field type Bababui cannot
+read stops the import and names its byte position.
 
 BABABUI validates the WAV, transcribes it with Gemini 3.5 Transcribe and speaker
 tags, and automatically saves the raw speaker-labeled text beside the WAV as
@@ -56,6 +62,23 @@ the proposal is dropped. Otherwise Gemini's label stays, the turn is formatted
 by that speaker's role and flagged, and a warning gives its audio time. When the
 exchange establishes only a role, such as an objection that either of two
 attorneys could have made, Gemini's label stays and the turn is flagged too.
+The audio check hears up to two turns before and after the disputed turn, so
+it can tell who was addressed, who answered, and who resumed.
+
+Before the speaker review, each voice keeps one label for the whole job. Gemini
+numbers the voices afresh in every chunk. Each chunk's voices are matched in
+the minute it shares with the previous chunk, against that chunk's job-wide
+labels: by 5 shared words, or by 2 that are the same word at the same moment of
+the WAV, such as "Okay. Now," before a new question. When Gemini put two voices
+under one number in the earlier chunk, only the better match keeps the label.
+A voice that did not speak in the shared minute gets a new, provisional label.
+It may be an attorney returning from an earlier chunk. Gemini compares the
+clearest clips of that voice with a clip of every earlier voice. When both of
+its clips match one earlier voice, its turns take that label. A voice is never
+matched because one label is left over. Recovery clips are matched the same
+way. A voice that stays unresolved is asked about once (see Speaker decisions).
+When the review gives such a label back to an earlier speaker by the exchange,
+that is renumbering, and it is not highlighted.
 
 A review card that gives words to a different speaker, such as Q to THE WITNESS:
 or a split that moves words from a Q to an A, is titled Speaker. When the speaker
@@ -64,6 +87,53 @@ reason and the checks. A corrected speaker label is yellow in Incoming, the inli
 view and the Accept All preview, even inside a green wording edit, and only on the
 reassigned part of a split turn. Converting a correct label to Q or A adds no
 highlight.
+
+After the speaker review and before formatting, BABABUI applies the house
+spelling reference, `app/assets/Spelling and Terminology.csv`. It is the only
+word list, and it ships with the app. To add or change a word, edit a row in the
+CSV and save it; the next run reads it again, with no code change. The House
+form column is the approved spelling, capitalization, hyphenation and spacing,
+and it wins over any other dictionary variant. Rows marked Whole-word spelling
+change a complete matching word or phrase automatically, such as xrays to
+X-rays. For rows marked Context, the review model reads each sentence with the
+row's example and scope and decides: "a follow up visit" becomes "a follow-up
+visit", but "I asked him to follow up" stays. Without AI review, the formatting
+model decides. A change keeps a plural or tense ending, a capital at the start
+of a sentence and an all-caps heading. Quoted words, a spelling given letter by
+letter on the record and a capitalized official name are not changed. The
+Candidate column's other forms are matched, and a phrase there such as "back up
+the file" contributes only the words that spell the house form. Notes and examples are
+instructions, never words to swap in. A word that already has the house form
+gets no edit and no highlight, and no dictionary is looked up. In the editor, a
+change to a house form stays a suggestion, green on the changed term only:
+automatic rules and the AI wording review leave it for you to accept. Words that
+are not in the CSV go through the review as before.
+
+After formatting, the AI review model also checks spellings. It reads the
+reporter's rough and every AI edit, with the confirmed notice names, the job
+vocabulary and the rough's named speakers. A word gets an orange wavy underline
+only when its exact spelling needs your judgment: several spellings fit what was
+said and nothing settles the choice, or the spelling conflicts with a reliable
+source for that person, organization or term. It checks people's names, including
+a surname used alone, organizations, facilities, locations, case names, named
+tests, medications, brands, acronyms and specialized terms. Being a name or a
+technical term is never enough, and neither is a missing dictionary entry. A
+spelling that the notice, the job vocabulary or a letter-by-letter spelling in
+the testimony confirms stays unmarked, and so does every word in the house
+spelling reference. A capitalized word that nearly matches a
+confirmed name, such as Meyer where the notice has Meier, is underlined even if
+the model missed it. Only the uncertain word is marked, so in Pacific
+Orthopaedic Associates only Orthopaedic is underlined when that is the only
+question.
+
+The same words are underlined in Original, Incoming, the inline view and the
+Accept All preview. Hover over an underlined word to see the other spellings and
+the reason. The underline stays visible over green, red and yellow edit colors.
+It never changes the transcript, and it is not copied, saved into the text or
+exported. The words to check stay with the tab after the review ends and while
+you edit, and an underline goes away when you change that word. If the check
+fails, the draft still arrives and the status says the spelling review could not
+run.
 
 BABABUI then formats the transcription and writes the
 result to Incoming. The current
@@ -75,6 +145,21 @@ for identical audio share transcription, then format independently. Background
 results and warnings stay in their own tabs. Wait for a tab to finish before
 closing it, and for all requests to finish before exiting.
 
+After formatting, BABABUI checks whom each turn addressed. It knows who spoke
+each turn from the labels the formatter was given, after the speaker review. It
+corrects a Q/A or colloquy label where a later reply settles whom a question was
+for. When the witness asks "Are you asking me or counsel?" and the examiner
+answers "Counsel, I'm sorry.", the question, the witness's question and the
+answer are colloquy under each speaker's label. Colloquy continues while the
+examiner addresses counsel. The first turn that addresses the witness, or that
+the witness answers, becomes Q after a BY line. A turn that thanks counsel and
+then addresses the witness is split at that sentence. When the answer names the
+witness, as in "You, Doctor.", the exchange is Q and A. Only labels and BY lines
+change. A revision that would change a word is discarded. In the editor, each
+corrected label is its own card titled **Q/A or colloquy**, with the reason.
+Accepting it leaves nearby wording suggestions pending. The status line counts
+the revised labels.
+
 WAVs can be up to 1 hour 57 minutes long. Speaker labels and word timing use up
 to four 30-minute chunks starting at minutes 0, 29, 58, and 87. With confirmed
 notice names, custom vocabulary uses up to two independent 60-minute chunks,
@@ -82,9 +167,18 @@ starting at minutes 0 and 59. A 60-minute recording needs one vocabulary
 request. Both schedules overlap by one minute.
 If a transcription request returns HTTP 429, the app waits 60 seconds and retries
 that chunk once. Word timestamps and tolerant text alignment match speakers and
-remove repeated words at each join. An unmatched speaker receives a new label.
+remove repeated words at each join. A speaker who does not speak in the shared
+minute receives a new, provisional label that the voice check resolves.
 If alignment is uncertain and both chunks have timestamps, the app joins them
-at the midpoint of the overlap. Review the warnings and resulting transcript.
+at the midpoint of the overlap. If a chunk's words end before that point, the
+next chunk is kept from where they end, and a warning names the gap.
+Review the warnings and resulting transcript.
+Gemini sometimes stops a chunk early or skips part of it. When steady speech is
+followed by more than 45 seconds with no words, the app transcribes that part
+again, from a minute before the gap, and joins it once. This covers the last
+chunk and gaps in the middle of a chunk. A pause announced as going off the
+record, a recess or a break is left alone. The extra request is cached with the
+chunk, and a warning names the part to review.
 Timestamps are used internally and do not appear in Incoming.
 
 ## Notice PDFs
@@ -150,6 +244,39 @@ objection or a turn that addresses counsel. If either supports the existing
 label, the label stays and no change appears. If either agrees with the AI tag,
 the change is suggested. Otherwise the card says Needs review, and Accept All
 asks before accepting it.
+
+### Speaker decisions
+
+The speaker list asks only what remains uncertain, one question per identity,
+with separate counts of unresolved identities and the turns they affect.
+Resolved speakers are collapsed under **Resolved speakers**.
+
+- **Unresolved voice** asks once about a voice with several turns. It shows the
+  clearest identifying sentence, the suggested participant when the rough
+  supports one, and how many turns are linked. Turns are linked only when the
+  voice check matched them to the identifying clip, or when Gemini grouped many
+  turns of one established voice. A shared Gemini number alone links nothing:
+  a turn by another voice under the same number is asked separately.
+- **Who said this?** asks about one turn, such as an "Okay." the audio check
+  could not attribute.
+
+Choose a participant, then **Assign this turn** or **Assign all N linked
+turns**. An assignment changes only the labels. The same label change is
+accepted into Original, and every wording change nearby stays pending. The
+assigned turn shows as Q for the examiner on the BY line, A for the witness,
+and colloquy for anyone else. **Review** goes to the identifying turn and plays
+it from four seconds earlier. **Undo** reverses the last assignment.
+
+Assignments are saved with the job and its WAV times. When the same job is
+processed again, each new turn whose audio overlaps an assigned turn gets that
+name, so a changed Gemini number cannot move a name to a different person. A
+review saved before voices were checked groups turns by Gemini's number and
+says so; process the job again to check the voices.
+
+A card titled **Missing from AI draft** marks a passage of at least 25 words
+that the AI draft lacks. The transcription probably missed that audio, so
+listen before accepting it. Accept All and its preview keep your text there and
+leave the card pending. A passage the draft only moved is not marked.
 
 Open the Settings tab for automated edits, AI models, and the Hotkeys reference.
 While reviewing a suggestion, **A** accepts it and **D** rejects it. With audio

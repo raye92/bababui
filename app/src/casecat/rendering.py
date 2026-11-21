@@ -7,6 +7,7 @@ reporter-provided reference. It is not a title-case or dictionary substitution.
 
 
 from .caption import is_cell
+from .elements import date_text, field_date
 
 
 class TextRenderer:
@@ -79,6 +80,8 @@ def render_record(renderer, raw, speakers):
         return renderer.paragraph(255)
     if renderer.cover_tables and op in (9, 10):
         return renderer.literal('\t') if op == 9 else renderer.paragraph(255)
+    if op == 0x15 and (date := field_date(raw)):
+        return renderer.literal(date_text(date))
     if op == 0x15 and raw[1] == 7:
         label = raw[10:].rstrip(b'\0').decode('cp1252')
         value = speakers.get(label)

@@ -91,7 +91,7 @@ These rules govern every decision. Nothing later in this prompt overrides them.
 1. Keep every speaker label, and every change of speaker, exactly as given. Who speaks each turn, and where each turn starts, is decided before formatting, not here. Do not renumber, swap, reassign, or merge labels, and do not replace them with names or titles such as MR. SMITH, THE WITNESS, or THE REPORTER. A label marked [unconfirmed] is provisional: write the label without the marker, format the turn by that speaker's role as usual, keep it as its own paragraph, and flag it (Section 15).
 2. Keep every word exactly as given, in its original order. Do not correct grammar, spelling, or punctuation, and do not remove filler words, false starts, or repetitions. The only changes allowed are spacing and the line structure this prompt describes.
 3. Speaker numbers do not imply roles. The witness may be any speaker number, and so may each attorney.
-4. Do not decide formatting from question marks, answer wording, or speaker number alone. Decide from each speaker's established role and the context of the entire deposition. Decide Q/A or colloquy for each turn separately: the examiner's question to the witness is Q, but the same examiner telling the witness "You may answer" is colloquy.
+4. Do not decide formatting from question marks, answer wording, or speaker number alone. Decide from each speaker's established role and the context of the entire deposition. Decide Q/A or colloquy for each turn separately: the examiner's question to the witness is Q, but the same examiner telling the witness "You may answer" is colloquy. For each turn, decide both who is speaking and whom the speaker is addressing. Read the turns that follow before you label a turn: a later reply can show whom an earlier question was addressed to (Section 6).
 5. Do not invent dialogue, speakers, speaker changes, objections, examinations, exhibits, or procedural events.
 6. When the evidence does not support a decision, choose the option that keeps the speaker label visible (colloquy) and flag the decision for review (Section 15).
  
@@ -365,6 +365,88 @@ BY SPEAKER 2:
      A    Then yes, I reviewed those records.
  
 RULE: The witness's clarifying question to the examiner remains A.
+ 
+### Example: the witness asks whom a question was for
+ 
+When the witness asks whom a question was for, the examiner's answer decides the labels of the question, the witness's clarification, and the answer.
+ 
+If the answer names counsel, the question was addressed to counsel. The question, the clarification, and the answer are colloquy under each speaker's label, even during an examination. Stay in colloquy while the examiner keeps addressing counsel. When the examiner clearly resumes questioning the witness, insert BY SPEAKER N: before that Q (Section 5). If one segment ends the remark to counsel and then addresses the witness, split it there (Section 11).
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, please turn to your report.
+ 
+SPEAKER 2:
+Okay.
+ 
+SPEAKER 1:
+What page are you on again, and what paragraph?
+ 
+SPEAKER 2:
+Are you asking me or counsel? Sorry.
+ 
+SPEAKER 1:
+Counsel, I'm sorry.
+ 
+SPEAKER 3:
+Page 12, paragraph 3.
+ 
+SPEAKER 1:
+Thank you. Doctor, do you see paragraph 3?
+ 
+SPEAKER 2:
+Yes, I do.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, please turn to your report.
+     A    Okay.
+ 
+     SPEAKER 1:  What page are you on again, and what paragraph?
+ 
+     SPEAKER 2:  Are you asking me or counsel?  Sorry.
+ 
+     SPEAKER 1:  Counsel, I'm sorry.
+ 
+     SPEAKER 3:  Page 12, paragraph 3.
+ 
+     SPEAKER 1:  Thank you.
+ 
+BY SPEAKER 1:
+     Q    Doctor, do you see paragraph 3?
+     A    Yes, I do.
+ 
+RULE: A question the examiner addressed to counsel is colloquy, even during an examination. The examiner's later answer to the witness shows whom it was for.
+ 
+### Example: the answer names the witness
+ 
+The same opening, but the examiner answers the witness.
+ 
+INPUT:
+ 
+SPEAKER 1:
+What page are you on again, and what paragraph?
+ 
+SPEAKER 2:
+Are you asking me or counsel? Sorry.
+ 
+SPEAKER 1:
+You, Doctor.
+ 
+SPEAKER 2:
+Page 12, paragraph 3.
+ 
+EXPECTED OUTPUT:
+ 
+     Q    What page are you on again, and what paragraph?
+     A    Are you asking me or counsel?  Sorry.
+     Q    You, Doctor.
+     A    Page 12, paragraph 3.
+ 
+RULE: When the answer names the witness, the question was part of the examination. The clarification is A and the examiner's answer is Q.
  
 ---
  
@@ -894,7 +976,7 @@ Before producing the output, verify:
 1. Every speaker label and change of speaker matches the input exactly, without the [unconfirmed] marker. None was renumbered, swapped, merged, or replaced with a name or title.
 2. Every word of the input appears, in order. Nothing was added except headings, BY lines, Q and A labels, speaker labels, parentheticals, and [REVIEW n] tags.
 3. The witness was identified from dialogue and context, not from a speaker number, and no attorney's turn is labeled A.
-4. Every Q comes from the active examiner, and every A comes from the witness.
+4. Every Q comes from the active examiner and is addressed to the witness, and every A comes from the witness. Where a later reply shows whom a question was for, its label follows that reply.
 5. Every attorney's first examination uses EXAMINATION. FURTHER EXAMINATION appears only when that attorney examined before and a different attorney examined in between.
 6. Every BY SPEAKER N: line is followed by a Q, and formal questioning that resumes after colloquy, an objection, or a break begins with BY SPEAKER N:.
 7. Objections, attorney-to-attorney discussion, procedural exchanges, and other participants' statements are colloquy.

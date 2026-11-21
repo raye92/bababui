@@ -269,8 +269,12 @@ def _delete_trailing(revision, side, review, records):
     return revision
 
 
-def auto_accept(state, *, disabled_rules=frozenset()):
-    """Apply one undoable native batch once per AI result, keeping an audit log."""
+def auto_accept(state, *, disabled_rules=frozenset(), keep=None):
+    """Apply one undoable native batch once per AI result, keeping an audit log.
+
+    `keep(change)`, when given, marks suggestions to leave pending, such as a
+    change to a house spelling that the reporter should see highlighted.
+    """
     from copy import deepcopy
     from app.src.suggestions import suggestions, resolve
     if (state.review or {}).get('automatic_filter') == 1:
@@ -286,7 +290,8 @@ def auto_accept(state, *, disabled_rules=frozenset()):
                 and original.definitions == incoming.definitions):
             incoming = original
     candidates = [(change, reason) for change in suggestions(original, incoming)
-                  if (reason := automatic_reason(change, disabled_rules=disabled_rules))]
+                  if (reason := automatic_reason(change, disabled_rules=disabled_rules))
+                  and not (keep and keep(change))]
     records = []
     # Descending positions preserve all earlier offsets. Resolve uses the same
     # anchored operations as an individual Accept, retaining destination audio.
@@ -729,3 +734,108 @@ def override_speaker(state, speaker, name):
         revision = revised
     state.incoming = revision
     state.review['overrides'][speaker] = name
+
+
+_QA_LABEL = re.compile(r'^[ \t]*[QA][ \t]*$')
+
+
+def _label_only(before, after):
+    """Whether a diff range changes nothing but a speaker label."""
+    if '\n' in before or '\n' in after:
+        return False
+    old, new = before.strip(' \t:'), after.strip(' \t:')
+    label = lambda text: _QA_LABEL.match(text) is not None or LABEL.fullmatch(text + ':') is not None
+    return bool(new) and (not old or label(old)) and label(new)
+
+
+def _accept_labels(original, incoming, spans):
+    """Accept only the label ranges inside `spans` (incoming offsets) into the original.
+    A range that also changes wording is left for the reporter."""
+    from app.src.suggestions import Suggestion, resolve, suggestions
+    ranges = [(a, b, c, d) for change in suggestions(original, incoming) for a, b, c, d in change.ranges
+              if any(c < end and d > start for start, end in spans)
+              and _label_only(original.text[a:b], incoming.text[c:d])]
+    if not ranges:
+        return original, incoming
+    return resolve(original, incoming, Suggestion(original, incoming, tuple(sorted(ranges)), 'text'), True)
+
+
+def _examiner(text, position):
+    """The examiner on the last BY line before `position`, as a name key."""
+    line = text.rfind('\nBY ', 0, position)
+    if line < 0 and text.startswith('BY '):
+        line = -1
+    if line < 0 and not text.startswith('BY '):
+        return None
+    end = text.find('\n', line + 1)
+    match = re.match(r'[ \t]*BY[ \t]+(?P<name>[^:\n]+?)[ \t]*:', text[line + 1:end if end >= 0 else len(text)])
+    return speaker_name_key(match['name']) if match else None
+
+
+def assign_speaker(state, name, location_ids=(), spans=(), *, times=(), answered=()):
+    """Give turns to a participant by changing only their labels.
+
+    `location_ids` are pending speaker label locations; `spans` are (start, end)
+    of Q or A labels of uncertain turns, in the draft. Each label changes in the
+    draft and the same label change is accepted into the original. Any wording
+    change nearby stays pending. `times` are the turns' (start, end) in the WAV,
+    kept so the decision survives a rerun. `answered` are the keys of the uncertain
+    turns this decides, so they are not asked again. Returns the assigned label spans.
+    """
+    choice = speaker_choices(state.original).get(speaker_name_key(name))
+    if choice is None:
+        raise ValueError('Choose an existing speaker label.')
+    name = choice.name
+    reference = choice.references[0] if choice.references else None
+    values = field_values(state.original) if reference else {}
+    revision, locations = state.incoming, state.review['locations']
+    wanted = set(location_ids)
+    targets = [('location', p['start'], p) for p in locations if p.get('id') in wanted and not p['resolved']]
+    targets += [('qa', start, (start, end)) for start, end in spans]
+    assigned = []
+    for kind, _, target in sorted(targets, key=lambda t: t[1], reverse=True):
+        if kind == 'location':
+            a, b = target['start'], target['end']
+            revised = revision if revision.text[a:b] == name else _replace_speaker(
+                revision, a, b, name, reference, values)
+        else:
+            label_start, label_end = target
+            line = revision.text.rfind('\n', 0, label_start) + 1
+            match = QA_PREFIX.match(revision.text[line:label_end + 8])
+            if not match or line + match.end() < label_end:
+                continue
+            a, b = line, line + match.end()
+            # Who spoke decides how the turn displays: the examiner's turn is Q,
+            # the witness's is A, and anyone else's is colloquy under their name.
+            shown = revision.text[label_start:label_end].strip()
+            wanted = ('Q' if speaker_name_key(name) == _examiner(revision.text, line) else
+                      'A' if speaker_name_key(name) == speaker_name_key('THE WITNESS') else None)
+            if wanted == shown:
+                revised, a, b = revision, a + 5, a + 6  # The draft is right; only the rough changes.
+            elif wanted:
+                revised = revision.replace(a, b, f'     {wanted}    ')
+                a, b = a + 5, a + 6
+            else:
+                revised = revision._replace(a, b, f'     {name}:  ')
+                a, b = a + 5, a + 5 + len(name)
+                if reference:
+                    revised = _replace_speaker(revised, a, b, name, reference, values)
+        delta = len(revised.text) - len(revision.text)
+        for other in locations:
+            if kind == 'location' and other is target:
+                other['end'] = b + delta
+            elif other['start'] >= b:
+                other['start'] += delta
+                other['end'] += delta
+        shifted = [(s + delta, e + delta) for s, e in assigned]
+        assigned = shifted + [(a, b + delta if kind == 'location' else b)]
+        revision = revised
+        if kind == 'location':
+            target.update(resolved=True, assigned=name)
+    state.original, state.incoming = _accept_labels(state.original, revision, assigned)
+    if answered:
+        state.review.setdefault('answered', []).extend(answered)
+    if times:
+        state.review.setdefault('assignments', []).append(
+            {'name': name, 'times': [[round(a, 1), round(b, 1)] for a, b in times if a is not None and b is not None]})
+    return assigned

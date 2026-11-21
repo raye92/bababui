@@ -441,3 +441,169 @@ def test_replaced_wav_cannot_populate_the_old_recording_cache(tmp_path, monkeypa
     with pytest.raises(ValueError, match='WAV changed'):
         pipeline.run(wav)
     assert not list(pipeline.cache.rglob('chunk-*.json'))
+
+
+def _steady(first, last, speaker='s1'):
+    """Steady speech: one word every two seconds."""
+    return [Word(f'w{t}', speaker, t, t + 1) for t in range(first, last, 2)]
+
+
+def test_when_a_chunk_stops_before_the_overlap_the_next_chunk_is_kept_from_there():
+    # 261109ponton: chunk 1 stopped at 28:04, and one early word claimed an end time
+    # of 30:00. The midpoint cut at 29:30 dropped chunk 2's first 30 seconds.
+    a = [Word('early', 's1', 407.9, 1800.0)] + _steady(1384, 1684) + [Word('Uh', 's2', 1684.8, 1684.8)]
+    said = 'You said that he required neurosurgery to relieve pressure. Right. No, I don\'t.'.split()
+    b = [Word(word, 'b1', 2.5 + i, 3 + i) for i, word in enumerate(said)]
+    stitched, warnings = stitch([a, b])
+    text = render(stitched)
+    assert text.endswith('Speaker 3: ' + ' '.join(said))
+    assert 'Uncertain overlap alignment: joined at 28:04. Review for missing or repeated words.' in warnings
+    assert ('No words were transcribed between 28:04 and 29:00. Check the audio there for missing testimony.'
+            in warnings)
+
+
+def test_a_chunk_that_stops_early_is_transcribed_again_and_joined_once(tmp_path, monkeypatch):
+    from app.src.audio_pipeline import AudioPipeline, media
+    wav = tmp_path / 'input.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: 3540)
+    prepared = []
+    monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(dict(segment)))
+    missing = "I don't have that information.".split()
+    answer = 'He said that he required neurosurgery.'.split()
+
+    def transcribe(path, progress=lambda message: None):
+        start = prepared[-1]['start']
+        if start == 0:  # Gemini stops at 28:04 of a 30-minute chunk.
+            return _steady(1384, 1684) + [Word('Uh', 's2', 1684.8, 1684.8)]
+        if start == 1624:  # The rest of chunk 1, from a minute before its last word.
+            return ([Word(w.text, 'x1', w.start - 1624, w.end - 1624) for w in _steady(1624, 1684)]
+                    + [Word('Uh', 'x3', 60.8, 60.8)]
+                    + [Word(word, 'x2', 70 + i, 70.5 + i) for i, word in enumerate(missing)]
+                    + [Word(word, 'x2', 160 + i, 160.5 + i) for i, word in enumerate(answer)])
+        return ([Word(word, 'b2', 44 + i, 44.5 + i) for i, word in enumerate(answer)]
+                + [Word(word, 'b1', 90 + i, 90.5 + i) for i, word in enumerate("No, I don't.".split())])
+    pipeline = AudioPipeline('fake', tmp_path / 'cache')
+    monkeypatch.setattr(pipeline, 'transcribe_segment', transcribe)
+    progress = []
+    result = pipeline.run(wav, progress.append)
+    assert prepared == [{'start': 0, 'end': 1800}, {'start': 1624, 'end': 1800}, {'start': 1740, 'end': 3540}]
+    assert result.text.count("I don't have that information.") == 1
+    assert result.text.count('He said that he required neurosurgery.') == 1
+    assert result.text.index('Uh') < result.text.index("I don't have") < result.text.index('He said')
+    assert any(w.startswith('Chunk 1 of the transcription stopped at 28:04, 1:55 before its end.')
+               for w in result.warnings)
+    assert 'Chunk 1 of the transcription stopped at 28:04. Transcribing the rest of that chunk...' in progress
+    # The rest is cached with the chunk, so a second run asks for nothing new.
+    assert pipeline.run(wav) == result and len(prepared) == 3
+
+
+def test_a_pause_before_the_chunk_end_is_not_transcribed_again(tmp_path, monkeypatch):
+    from app.src.audio_pipeline import AudioPipeline, media
+    wav = tmp_path / 'input.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: 3540)
+    prepared = []
+    monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(dict(segment)))
+    pipeline = AudioPipeline('fake', tmp_path / 'cache')
+    # A few words, then a long pause: speech had stopped, not the transcript.
+    monkeypatch.setattr(pipeline, 'transcribe_segment',
+                        lambda path, progress=None: [Word('Off', 's1', 1200, 1201), Word('record.', 's1', 1201, 1202)])
+    pipeline.run(wav)
+    assert prepared == [{'start': 0, 'end': 1800}, {'start': 1740, 'end': 3540}]
+
+
+def test_when_the_rest_cannot_be_transcribed_the_gap_is_reported(tmp_path, monkeypatch):
+    from app.src.audio_pipeline import AudioPipeline, media
+    wav = tmp_path / 'input.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: 3540)
+    prepared = []
+    monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(dict(segment)))
+
+    def transcribe(path, progress=lambda message: None):
+        if prepared[-1]['start'] == 1624:
+            raise ValueError('temporary failure')
+        return _steady(1384, 1684) + [Word('Uh', 's2', 1684.8, 1684.8)]
+    pipeline = AudioPipeline('fake', tmp_path / 'cache')
+    monkeypatch.setattr(pipeline, 'transcribe_segment', transcribe)
+    result = pipeline.run(wav)
+    assert ('Chunk 1 of the transcription stopped at 28:04, 1:55 before its end, and the rest could not be '
+            'transcribed. Words may be missing between 28:04 and 30:00.') in result.warnings
+
+
+def _one_chunk(tmp_path, monkeypatch, transcribe, length=1500):
+    from app.src.audio_pipeline import AudioPipeline, media
+    wav = tmp_path / 'input.wav'
+    wav.write_bytes(b'wav')
+    monkeypatch.setattr(media, 'probe', lambda _: length)
+    prepared = []
+    monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(dict(segment)))
+    pipeline = AudioPipeline('fake', tmp_path / 'cache')
+    monkeypatch.setattr(pipeline, 'transcribe_segment',
+                        lambda path, progress=None: transcribe(prepared[-1]['start']))
+    return pipeline, wav, prepared
+
+
+def test_the_last_chunk_that_stops_early_is_transcribed_again(tmp_path, monkeypatch):
+    missing = 'And that was the last visit.'.split()
+
+    def transcribe(start):
+        if start == 0:  # A one-chunk recording whose transcript stops at 16:38 of 25:00.
+            return _steady(0, 1000)
+        assert start == 938
+        return ([Word(w.text, 'x1', w.start - 938, w.end - 938) for w in _steady(938, 1000)]
+                + [Word(word, 'x1', 70 + i, 70.5 + i) for i, word in enumerate(missing)])
+    pipeline, wav, prepared = _one_chunk(tmp_path, monkeypatch, transcribe)
+    progress = []
+    result = pipeline.run(wav, progress.append)
+    assert prepared == [{'start': 0, 'end': 1500}, {'start': 938, 'end': 1500}]
+    assert result.text.count('w998') == 1
+    assert result.text.endswith('w998 ' + ' '.join(missing))
+    assert any(w.startswith('Chunk 1 of the transcription stopped at 16:38, 8:22 before its end.')
+               for w in result.warnings)
+    assert 'Chunk 1 of the transcription stopped at 16:38. Transcribing the rest of that chunk...' in progress
+    assert pipeline.run(wav) == result and len(prepared) == 2
+
+
+def test_a_gap_in_the_middle_of_a_chunk_is_transcribed_again_and_joined_once(tmp_path, monkeypatch):
+    missing = 'I saw him at the clinic twice.'.split()
+
+    def transcribe(start):
+        if start == 0:  # Gemini skips from 9:58 to 11:40, then carries on.
+            return _steady(0, 600) + _steady(700, 1500)
+        assert start == 538  # A minute before the gap to a minute after it.
+        return ([Word(w.text, 'x1', w.start - 538, w.end - 538) for w in _steady(538, 600)]
+                + [Word(word, 'x1', 70 + i, 70.5 + i) for i, word in enumerate(missing)]
+                + [Word(w.text, 'x1', w.start - 538, w.end - 538) for w in _steady(700, 760)])
+    pipeline, wav, prepared = _one_chunk(tmp_path, monkeypatch, transcribe)
+    progress = []
+    result = pipeline.run(wav, progress.append)
+    assert prepared == [{'start': 0, 'end': 1500}, {'start': 538, 'end': 760}]
+    text = result.text
+    assert text.count(' '.join(missing)) == 1 and text.count('w598 ') == 1 and text.count('w700 ') == 1
+    assert text.index('w598 ') < text.index(' '.join(missing)) < text.index('w700 ') < text.index('w1498')
+    assert ('Chunk 1 of the transcription skipped from 9:58 to 11:40. That part was transcribed again; '
+            'review it.') in result.warnings
+    assert 'Chunk 1 of the transcription skipped from 9:58 to 11:40. Transcribing that part again...' in progress
+
+
+def test_a_gap_after_going_off_the_record_is_not_transcribed_again(tmp_path, monkeypatch):
+    said = "Let's go off the record for a few minutes.".split()
+    words = (_steady(0, 600) + [Word(word, 's1', 600 + i, 600.5 + i) for i, word in enumerate(said)]
+             + _steady(900, 1500))
+    pipeline, wav, prepared = _one_chunk(tmp_path, monkeypatch, lambda start: words)
+    result = pipeline.run(wav)
+    assert prepared == [{'start': 0, 'end': 1500}]
+    assert not any('skipped' in w for w in result.warnings)
+
+
+def test_a_gap_where_nothing_more_was_said_keeps_the_chunk_as_it_was(tmp_path, monkeypatch):
+    def transcribe(start):
+        if start == 0:
+            return _steady(0, 600) + _steady(700, 1500)
+        return [Word(w.text, 'x1', w.start - 538, w.end - 538) for w in _steady(538, 600) + _steady(700, 760)]
+    pipeline, wav, prepared = _one_chunk(tmp_path, monkeypatch, transcribe)
+    result = pipeline.run(wav)
+    assert len(prepared) == 2 and not any('skipped' in w for w in result.warnings)
+    assert result.text.count('w598 ') == 1 and result.text.count('w700 ') == 1

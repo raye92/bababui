@@ -7,6 +7,7 @@ import json
 from app.src.audio_pipeline import Transcription, Word, render
 from app.tests.test_suggestions import revision
 from shared.speaker_review import PROMPT as SPEAKER_PROMPT, review_speakers
+from shared.spelling_review import PROMPT as SPELLING_PROMPT
 
 WORDS = tuple(Word(text, speaker, start, start + .3) for text, speaker, start in (
     ('Good', 'Speaker 1', 1.0), ('morning.', 'Speaker 1', 1.4),
@@ -45,6 +46,8 @@ def test_worker_reviews_speakers_before_formatting_and_keeps_the_gemini_baseline
             calls.append((self.model, prompt, text))
             if prompt == SPEAKER_PROMPT:
                 return json.dumps(DECISIONS)
+            if prompt == SPELLING_PROMPT:
+                return '{"words": []}'
             return FORMATTED
 
     request = Request('doc', str(wav), 'formatter', 'transcribe', 'rules', {}, original=revision(FORMATTED),
@@ -58,7 +61,10 @@ def test_worker_reviews_speakers_before_formatting_and_keeps_the_gemini_baseline
 
     assert not failed
     # The AI review model checks speakers on the stitched Gemini transcript first.
-    assert [(model, prompt == SPEAKER_PROMPT) for model, prompt, _ in calls] == [('reviewer', True), ('formatter', False)]
+    # Spellings are checked after formatting, on the rough and the draft.
+    assert [(model, prompt == SPEAKER_PROMPT) for model, prompt, _ in calls] == [
+        ('reviewer', True), ('formatter', False), ('reviewer', False)]
+    assert calls[2][1] == SPELLING_PROMPT
     sent = json.loads(calls[0][2])
     assert sent['case_context'] == 'Witness (deponent): Dr. Paul Chen.'
     assert calls[1][2] == ('Speaker 1: Good morning.\nSpeaker 2: Doctor, when did you examine him?\n'
@@ -67,7 +73,8 @@ def test_worker_reviews_speakers_before_formatting_and_keeps_the_gemini_baseline
     assert progress.index('Reviewing speakers and turn boundaries...') < progress.index('Formatting transcript...')
     _, result, warnings, _ = reviewed[0]
     assert warnings == []
-    assert result.summary.startswith('Speaker review: 1 label corrected, 1 turn split, 0 flagged. ')
+    assert result.summary.startswith('Speaker review: 1 label corrected, 1 turn split, 0 flagged. '
+                                     'Spelling review: no words to check. ')
     for snapshot in (result.before_rules, result.after_rules, result.after_ai):
         record = snapshot[2]['speaker_review']
         assert record['corrected'] and record['tokens'][:2] == ['good', 'morning']

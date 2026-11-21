@@ -306,6 +306,15 @@ formatted draft instead of the reviewed turns. Grade saved runs again with
 or from the folder given with `--env-dir`. The tests in
 `evaluation/tests/test_speaker_review.py` use canned model answers.
 
+## Spelling review
+
+`shared/spelling_review.py` finds the words whose exact spelling needs the
+reporter's judgment, for the editor's orange underlines. The tests in
+`evaluation/tests/test_spelling_review.py` use canned model answers. They check
+when an underline appears (an unconfirmed surname, a conflict with the notice,
+one uncertain word inside an organization's name, peroneal or perineal) and when
+a verified or unambiguous word stays unmarked.
+
 ## Persistence and retries
 
 `data/` holds datasets, prompt versions, and runs as UTF-8 JSON with generated

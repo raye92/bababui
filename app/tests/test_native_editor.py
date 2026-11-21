@@ -517,7 +517,8 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
     from app.src import jobs
     from app.src.audio_pipeline import Transcription
 
-    calls = []
+    from shared.spelling_review import PROMPT as SPELLING_PROMPT
+    calls, spelling = [], []
 
     class Pipeline:
         def __init__(self, *_, testing=False):
@@ -534,6 +535,9 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
             pass
 
         def complete(self, payload, prompt):
+            if prompt == SPELLING_PROMPT:
+                spelling.append(self.model)
+                return '{"words": []}'
             calls.append((self.model, payload))
             if len(calls) == 1:
                 return 'I saw a blue car?\nI saw a dog.'
@@ -570,6 +574,8 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
     assert not view.document.busy
     assert len(calls) == 2
     assert calls[1][0] == 'deepseek-v4-pro'
+    # The review model also checks spellings, once, before any edit is reviewed.
+    assert spelling == ['deepseek-v4-pro']
     assert [(edit['original_word'], edit['proposed_word']) for edit in json.loads(calls[1][1])] == [
         ('red', 'blue'), ('big', ''),
     ]

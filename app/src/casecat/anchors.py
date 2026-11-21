@@ -338,7 +338,7 @@ class Revision:
             for element in elements:
                 if (type(element.start) is not int or type(element.end) is not int
                         or not previous <= element.start <= element.end <= length
-                        or element.kind not in ('field', 'symbol') or not isinstance(element.name, str)
+                        or element.kind not in ('field', 'symbol', 'date') or not isinstance(element.name, str)
                         or not isinstance(element.raw, str)
                         or (element.value is not None and not isinstance(element.value, str))
                         or (element.source is not None and (type(element.source) is not int or element.source < 0))):

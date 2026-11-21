@@ -3,6 +3,7 @@
 Positions address logical text, never page numbers or Qt's display formatting.
 """
 from dataclasses import dataclass, replace
+import datetime
 from difflib import SequenceMatcher
 import re
 
@@ -29,6 +30,31 @@ def field_name(raw):
     if len(raw) < 11 or raw[-1] != 0:
         raise ValueError('Invalid native field record.')
     return raw[10:-1].decode('cp1252')
+
+
+MONTHS = ('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+          'September', 'October', 'November', 'December')
+
+
+def field_date(raw):
+    """The date stored in a CaseCAT date field record, or None for any other record.
+
+    A date field has no name: 15 07, a body length of 8, a 4-byte identifier, then
+    the date as a little-endian u32 written as YYYYMMDD. CATalyst 22.1 wrote one
+    after "Dated this" in a reporter's certificate. Its bytes are kept unchanged.
+    """
+    if raw[:6] != b'\x15\x07\x08\x00\x00\x00' or len(raw) != 14:
+        return None
+    value = int.from_bytes(raw[10:14], 'little')
+    try:
+        return datetime.date(value // 10000, value // 100 % 100, value % 100)
+    except ValueError:
+        return None
+
+
+def date_text(date):
+    """How Bababui shows a date field. CaseCAT applies its own date format."""
+    return f'{MONTHS[date.month - 1]} {date.day}, {date.year}'
 
 
 def speaker_number(name):
@@ -109,5 +135,11 @@ def validate_elements(revision, baseline):
                     label = 'BY '
             if label is None or text[element.start:element.end] != label:
                 raise ValueError('Invalid native symbol element.')
+        elif element.kind == 'date':
+            date = field_date(bytes.fromhex(element.raw))
+            shown = text[element.start:element.end]
+            if (date is None or shown.casefold() != date_text(date).casefold()
+                    or element.source is not None and (source is None or source.raw != element.raw)):
+                raise ValueError('Invalid native date field.')
         else:
             raise ValueError('Unsupported native element kind.')

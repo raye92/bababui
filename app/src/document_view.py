@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
 from app.src.accept_all_preview import AcceptAllPreviewEditor, AcceptAllPreviewTask, PreviewSignals
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
-from app.src.review_model import build_review, map_position
+from app.src.review_model import accept_all, build_review, map_position
 from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
@@ -15,10 +15,19 @@ from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, Playba
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
-from app.src.suggestion_filter import (override_speaker, track_decisions, questionable_speaker_defaults,
+from app.src.suggestion_filter import (assign_speaker, override_speaker, track_decisions, questionable_speaker_defaults,
                                        flagged_attributions)
 from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
+
+
+def _house_keep():
+    """Leave changes to house spellings pending and green; None when the reference is unreadable."""
+    from app.src import house_spelling
+    try:
+        return house_spelling.load().protects
+    except (OSError, ValueError, UnicodeError):
+        return None
 
 
 class ImportView(QWidget):
@@ -42,6 +51,10 @@ class ImportView(QWidget):
     def undo_review(self): pass
     def redo_review(self): pass
     def edited(self): self.changed.emit()
+
+
+# Seconds of audio played before an identifying clip, so the exchange around it is heard.
+QUESTION_LEAD_IN = 4.0
 
 
 class ReviewPreviewWorker(QThread):
@@ -117,6 +130,9 @@ class DocumentView(QWidget):
         self.diff_view.selected.connect(self.select_suggestion)
         self.diff_view.navigated.connect(self._seek_selected_suggestion)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
+        self.diff_view.assign_requested.connect(self.assign_question)
+        self.diff_view.question_review_requested.connect(self.review_question)
+        self.diff_view.speaker_undo_requested.connect(self.undo_review)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
             editor.whole_text_set.connect(lambda text, s=side, e=editor: self._native_whole_text(s, e, text))
@@ -300,7 +316,10 @@ class DocumentView(QWidget):
             side, offset = source_position
             target = 'original' if editor is self.editor else 'incoming'
             offset = self.review_model.position_on(side, offset, target)
-            position = len(getattr(self.document, target)[:offset].encode('utf-16-le')) // 2
+            text = getattr(self.document, target)
+            if editor is self.preview_editor:
+                offset, text = editor.to_preview(offset), editor.toPlainText()
+            position = len(text[:offset].encode('utf-16-le')) // 2
             lines = editor.page_lines()
             editor.scroll_to_center_line(bisect_right([line.position for line in lines], position) - 1)
         if source_position is not None:
@@ -323,7 +342,10 @@ class DocumentView(QWidget):
         side = 'original' if editor is self.editor else 'incoming'
         lines = editor.page_lines()
         position = lines[editor.center_line()].position if lines else 0
-        return side, utf16_index(editor.toPlainText(), position)
+        position = utf16_index(editor.toPlainText(), position)
+        if editor is self.preview_editor:
+            position = editor.to_incoming(position)
+        return side, position
 
     def _restore_review_position(self, anchor, before):
         side, position = anchor
@@ -485,8 +507,13 @@ class DocumentView(QWidget):
         self._set_text(self.incoming_editor, doc.incoming, previews.get('incoming'))
         self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
         self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
+        if hasattr(self.diff_view, 'undo_button'):
+            self.diff_view.undo_button.setEnabled(bool(self._review_undo))
+        spelling = doc.native.spelling if doc.native else None
+        for editor in (self.editor, self.incoming_editor, self.preview_editor):
+            editor.set_spelling(spelling)
         self.inline_editor.set_model(
-            self.review_model, unmatched_speakers=self.diff_view.speaker_label_ranges)
+            self.review_model, unmatched_speakers=self.diff_view.speaker_label_ranges, spelling=spelling)
         self._update_original_page()
         self.inline_page.fit_page()
         self.original_page.fit_page()
@@ -573,8 +600,11 @@ class DocumentView(QWidget):
         else:
             side, editor = 'original', self.editor
         start = span[2 if side == 'incoming' else 0]
+        text = getattr(self.document, side)
+        if editor is self.preview_editor:
+            start, text = editor.to_preview(start), editor.toPlainText()
         cursor = editor.textCursor()
-        cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
+        cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
         editor.setTextCursor(cursor)
         editor.ensureCursorVisible()
         lines = editor.page_lines()
@@ -611,7 +641,12 @@ class DocumentView(QWidget):
                     return
                 if (self.review_model.original, self.review_model.incoming) != before[:2]:
                     raise ValueError('These suggestions are stale. Refresh the review.')
-                ranges = self.review_model.ranges
+                model = self.review_model
+                # Accept All never removes a passage missing from the AI draft.
+                ranges = model.accept_all_ranges if accept else model.ranges
+                if accept and not ranges:
+                    raise ValueError('Accept All leaves passages missing from the AI draft for you. '
+                                     'Listen, then accept or reject each one.')
                 questionable = questionable_speaker_defaults(before[2], ranges) if accept else []
                 flagged = flagged_attributions(before[2], ranges) if accept else 0
                 if questionable or flagged:
@@ -628,7 +663,7 @@ class DocumentView(QWidget):
                             '\n\n'.join(parts) + '\n\nAccept all suggestions anyway?',
                             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
                         return
-                decision = lambda: resolve_all(*before[:2], ranges, accept)
+                decision = (lambda: accept_all(model)) if accept else (lambda: resolve_all(*before[:2], ranges, accept))
             else:
                 change = self.diff_view.changes[index]
                 ranges = change.ranges
@@ -722,6 +757,53 @@ class DocumentView(QWidget):
         self.refresh()
         self.edited()
 
+    def assign_question(self, question, name, every):
+        """Give a turn, or every turn linked to its voice, to a participant. Only labels change."""
+        from app.src.speaker_questions import location_times
+        if self._review_worker is not None or self.document.busy or not name:
+            return
+        state = self.document.native
+        ids = question.locations if every else ((question.current,) if question.current is not None else ())
+        spans = () if ids else (question.label,)
+        times = location_times(state.review, state.incoming.text, ids, None if ids else question.label)
+        before = state.original, state.incoming, deepcopy(state.review)
+        try:
+            assign_speaker(state, name, ids, spans, times=times, answered=() if ids else (question.key,))
+        except ValueError as exc:
+            self.document.status = str(exc)
+            self.changed.emit()
+            return
+        self._review_undo.append(before)
+        self._review_redo.clear()
+        turns = max(1, len(ids) or len(spans))
+        self.document.status = f'Assigned {turns} {"turn" if turns == 1 else "turns"} to {name}. Wording suggestions stay pending.'
+        self.refresh()
+        self.edited()
+
+    def review_question(self, question):
+        """Go to the question's identifying turn and play it with the exchange around it."""
+        index = next((i for i, change in enumerate(self.diff_view.changes)
+                      if any(c < question.label[1] and d > question.label[0] or c == d == question.label[0]
+                             for _, _, c, d in change.ranges)), None)
+        if index is not None:
+            self.diff_view.select(index)
+        else:
+            self._focus_passage((0, 0, question.label[0], question.label[1]))
+        if self.playback and question.time is not None:
+            self.playback.seek(int(max(0.0, question.time - QUESTION_LEAD_IN) * 1000))
+            self.playback.player.play()
+
+    def _reapply_assignments(self, previous):
+        """Keep the reporter's speaker assignments when the same job is processed again."""
+        from app.src.speaker_questions import reapply
+        state = self.document.native
+        assignments = list((previous or {}).get('assignments', ()))
+        if not assignments or state.review is None:
+            return
+        reapply(state, assignments,
+                lambda name, ids, spans, keys: assign_speaker(state, name, ids, spans, answered=keys))
+        state.review['assignments'] = assignments
+
     def _review_history(self, source, target):
         if source and not self.document.busy:
             state = self.document.native
@@ -773,6 +855,7 @@ class DocumentView(QWidget):
 
     def receive(self, text, warnings, alignment=None):
         self.capture_position()
+        previous = self.document.native.review
         try:
             automatic_before = begin_document_review(self.document.native, text,
                                             exclude_off_record='off_record' not in self.disabled_auto_accept_rules,
@@ -785,6 +868,7 @@ class DocumentView(QWidget):
         self._review_redo.clear()
         self.document.status = 'Incoming updated. Review the suggested revisions.'
         self._automatic_review(automatic_before)
+        self._reapply_assignments(previous)
         self._finish_receive(warnings, alignment)
 
     def receive_reviewed(self, result, warnings, alignment=None):
@@ -796,13 +880,17 @@ class DocumentView(QWidget):
         self.capture_position()
         self._review_undo.clear()
         self._review_redo.clear()
+        previous = state.review
         state.original, state.incoming, state.review = result.after_rules
         before_original, before_incoming, _ = result.before_rules
         self._record_automatic_review(result.off_record_undo, before_original, before_incoming,
                                       state.review['automatic_changes'])
         state.original, state.incoming, state.review = result.after_ai
+        # Words to check stay with the document after the review ends and while it is edited.
+        state.spelling = result.spelling
         if result.after_ai[:2] != result.after_rules[:2]:
             self._review_undo.append(result.after_rules)
+        self._reapply_assignments(previous)
         self.document.status = f'AI-assisted review. {result.summary}'
         self._finish_receive(warnings, alignment)
 
@@ -827,7 +915,8 @@ class DocumentView(QWidget):
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
         original, incoming = state.original, state.incoming
-        records = auto_accept_document(state, disabled_rules=self.disabled_auto_accept_rules)
+        records = auto_accept_document(state, disabled_rules=self.disabled_auto_accept_rules,
+                                       keep=_house_keep())
         self._record_automatic_review(automatic_before, original, incoming, records)
 
     def _record_automatic_review(self, automatic_before, original, incoming, records):
