@@ -190,6 +190,119 @@ default. Holdout evaluation requires explicit selection and should be reserved
 for a final check after tuning. Temperature zero reduces variation but does not
 guarantee deterministic model responses.
 
+## AI draft grading (ASR to AI draft)
+
+`evaluation/draft_grading.py` grades the step that turns Gemini's speaker-labeled
+transcript into the AI draft. This step sees Gemini's text and any supplied case
+context. It never sees the reporter's steno rough, so there is no voting here.
+Every edit is tracked against Gemini's original text.
+
+Each case is hand graded: Gemini's text, the expected draft, the names and terms to
+check, and a contextual clue for each decision. The grader compares an AI draft
+with the expected draft in four areas, and every speech paragraph, boundary, and
+term counts as evaluated, including the ones that should stay unchanged:
+
+- **Wording:** corrections the evidence supports, kept testimony, self-corrections,
+  and gaps that need audio review.
+- **Speakers:** who is speaking, then the Q/A or colloquy form.
+- **Paragraphs:** joined artificial breaks, new turns, same-speaker paragraphs,
+  and testimony order.
+- **Names, organizations and terms:** the whole phrase, checked against spellings,
+  repeated references, and case documents.
+
+Failures are reported per area as missed corrections, incorrect edits,
+unnecessary review flags, and highlight errors. Each shows Gemini's excerpt, the
+contextual clue, the expected result, and the actual result.
+
+Highlights follow the edits against Gemini's text. Restored or corrected words get
+a green background. A changed speaker label gets a yellow background. A corrected
+name, organization, or term also gets an orange underline. Words removed from
+Gemini's text are struck through in grey. Unchanged text and punctuation, case,
+number style, or paragraph-only changes get no highlight.
+
+Fillers, empty lead-ins ("and," "so," "well"), and immediate repeats count either
+way. A case can mark other optional words, such as an abandoned start, with
+brackets inside a phrase that locates them: `"look [on page] on the medical"`.
+
+Run it on a folder of cases:
+
+```powershell
+evaluation/.venv/Scripts/python.exe -m evaluation.draft_grading evaluation/data/draft_cases --html report.html --json results.json
+```
+
+A case is a `*.json` file in the folder or a `case.json` file in a subfolder:
+
+```json
+{
+  "id": "example",
+  "witness": "SPEAKER 2",
+  "context": "What the drafting step was given.",
+  "asr_file": "asr.txt",
+  "expected_file": "expected.txt",
+  "terms": ["Broussard", {"term": "xerostomia", "heard": ["zerostoma"]}],
+  "optional": [{"asr": "look [on page] on the medical", "reason": "Abandoned start."}],
+  "checkpoints": [{"area": "names", "asr": "zerostoma", "clue": "The dental diagnosis that sounds the same."}],
+  "exclude": [{"asr": "phrase in Gemini's text", "areas": ["speakers"], "reason": "Why it is not graded."}],
+  "drafts": {"saved draft": {"file": "draft.txt", "reporter_file": "reporter.txt", "flags_visible": false}}
+}
+```
+
+`asr.txt` holds Gemini's turns as `Speaker N: text`. The expected draft uses the
+deposition layout with `SPEAKER N` labels, `[REVIEW n]` tags, and a `REVIEW NOTES`
+section. Start a note with its area, such as `Name spelling:` or `Speaker uncertain:`.
+
+A draft saved after BABABUI review is not pure AI output. Review restores the
+reporter's wording wherever an edit was rejected. With `reporter_file`, spots where
+the saved draft matches the reporter instead of Gemini are listed as not graded.
+Rejected edits back to Gemini's own words cannot be seen. Review can also drop
+inserted `[REVIEW n]` tags, so set `flags_visible` to false for saved drafts. To
+grade flags, keep the formatting model's raw output before review.
+
+Keep real cases under `evaluation/data/`, which Git ignores. The tests in
+`evaluation/tests/test_draft_grading.py` use synthetic cases to check the grader
+itself. They are not reviewed benchmarks.
+
+## Speaker review grading
+
+`evaluation/speaker_review_grading.py` grades the editor's speaker attribution and
+turn-boundary review. That review runs on Gemini's stitched transcript before Q/A
+and colloquy formatting. It sees Gemini's words and any case context, never the
+reporter's steno rough. The editor and this grader both run the same code in
+`shared/speaker_review.py`.
+
+Each case is graded in four separate areas:
+
+- **Speaker identity:** who speaks each part of every turn, including parts that
+  keep Gemini's label.
+- **Split points:** the exact word where a turn changes speaker, for every turn.
+  A split at the wrong word reports how many words early or late it is.
+- **Review status:** whether each turn is unchanged, corrected, or flagged for
+  review, and whether each flag has its audio time.
+- **Highlight placement:** which labels are yellow. Only a corrected label is
+  yellow, and only on the reassigned part of a split turn. Q/A conversion of a
+  correct label is not highlighted.
+
+`evaluation/speaker_review_cases/` holds four hand-graded cases from the
+specification: the doctor's answer inside the examiner's turn, a witness's
+clarifying question, ambiguous objections, and Gemini renumbering speakers at a
+chunk boundary. Each case gives Gemini's `Speaker N:` lines, optionally with an
+audio time such as `[0:29:08]`, the case context, the stitching notes, the
+expected draft, and the phrases that must be flagged. The expected speaker of
+each word comes from the expected draft: Q is the examiner on the BY line in
+effect, A is the witness, and colloquy is its label.
+
+Run the live review on the cases. This makes paid API calls:
+
+```powershell
+evaluation/.venv/Scripts/python.exe -m evaluation.speaker_review_grading --model gemini-4-argon --save evaluation/data/speaker_runs
+```
+
+Add `--format-prompt app/src/bababui_prompt.md` to grade highlights on the
+formatted draft instead of the reviewed turns. Grade saved runs again with
+`--saved evaluation/data/speaker_runs`. The API keys come from `evaluation/.env`,
+or from the folder given with `--env-dir`. The tests in
+`evaluation/tests/test_speaker_review.py` use canned model answers.
+
 ## Persistence and retries
 
 `data/` holds datasets, prompt versions, and runs as UTF-8 JSON with generated

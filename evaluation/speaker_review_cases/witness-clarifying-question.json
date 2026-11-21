@@ -1,0 +1,13 @@
+{
+  "id": "witness-clarifying-question",
+  "title": "A witness asks a clarifying question",
+  "context": "Witness (deponent): Dr. Maria Lopez.\nApplicant attorney: Sam Patel, Patel & Ward.\nDeposition noticed by the applicant side.",
+  "witness": "SPEAKER 1",
+  "asr": "[0:11:55] Speaker 3: Doctor, as I mentioned, I'm Sam Patel for the applicant. Did you review the MRI before you wrote your report?\n[0:12:03] Speaker 1: Which MRI do you mean, the lumbar or the cervical? The lumbar MRI from June. Yes, I reviewed it before I wrote the report.\n[0:12:15] Speaker 3: Did it change your diagnosis?\n[0:12:18] Speaker 1: No. It confirmed it.",
+  "expected": "BY SPEAKER 3:\n     Q    Doctor, as I mentioned, I'm Sam Patel for the applicant.  Did you review the MRI before you wrote your report?\n     A    Which MRI do you mean, the lumbar or the cervical?\n     Q    The lumbar MRI from June.\n     A    Yes, I reviewed it before I wrote the report.\n     Q    Did it change your diagnosis?\n     A    No.  It confirmed it.",
+  "clues": [
+    {"asr": "Which MRI do you mean, the lumbar or the cervical", "clue": "The witness asks which MRI the pending question means. A question from the witness stays with the witness."},
+    {"asr": "The lumbar MRI from June", "clue": "The examiner answers the witness's clarifying question, and the witness then answers the original question."},
+    {"asr": "Yes, I reviewed it before I wrote the report", "clue": "Only the witness wrote the report, so this answer returns to the witness."}
+  ]
+}

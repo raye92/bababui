@@ -80,143 +80,946 @@ the stated rule.
 
 ## SPEAKER IDENTIFICATION, Q&A, AND EXAMINATION LABELS
 
-The input is already tagged with SPEAKER 1, SPEAKER 2, and SPEAKER 3. Preserve
-these speaker numbers; do not reassign them or replace them with names or titles.
-Determine only which speaker is the witness and which is examining the witness
-in each examination, using introductions or clear conversational context.
-Speaker numbers do not imply roles.
-
-Determine who is speaking, whether the exchange is formal examination or colloquy,
-and whether an attorney is beginning a first examination, resuming an interrupted
-examination, or returning for further examination. Apply the corresponding speaker
-identification, Q&A label, and examination heading consistently. Do not determine
-formatting solely from question marks, answer wording, or speaker identity. Do not
-invent dialogue, speaker changes, examination transitions, or procedural events.
-
-SPEAKER FORMAT.1: Standard examination. Use EXAMINATION when an attorney begins their
-first formal examination of a witness. Identify the examining attorney with BY MR. [NAME]:
-(or BY SPEAKER N:). An exchange is in examination only when the examining attorney is asking
-the witness questions formally in strict Q and A sequence. Use Q for questions or statements
-by the examining attorney addressed to the witness, and A for answers given by the witness.
-These labels reflect roles, not sentence punctuation: an attorney's statement can be Q, and
-a witness's clarifying question can be A. Write headings flush left.
-
+Convert a Gemini speaker-labeled transcript into a properly formatted deposition transcript.
+ 
+The input is already tagged with speaker labels: SPEAKER 1, SPEAKER 2, SPEAKER 3, and so on. For every turn, determine who is speaking in what role (witness, examining attorney, another attorney, court reporter, or other participant) and whether the turn is formal examination or colloquy. Then apply the matching examination heading, BY line, Q or A label, or speaker label.
+ 
+CORE RULES
+ 
+These rules govern every decision. Nothing later in this prompt overrides them.
+ 
+1. Keep every speaker label, and every change of speaker, exactly as given. Who speaks each turn, and where each turn starts, is decided before formatting, not here. Do not renumber, swap, reassign, or merge labels, and do not replace them with names or titles such as MR. SMITH, THE WITNESS, or THE REPORTER. A label marked [unconfirmed] is provisional: write the label without the marker, keep that turn as its own colloquy paragraph, and flag it (Section 15).
+2. Keep every word exactly as given, in its original order. Do not correct grammar, spelling, or punctuation, and do not remove filler words, false starts, or repetitions. The only changes allowed are spacing and the line structure this prompt describes.
+3. Speaker numbers do not imply roles. The witness may be any speaker number, and so may each attorney.
+4. Do not decide formatting from question marks, answer wording, or speaker number alone. Decide from each speaker's established role and the context of the entire deposition. Decide Q/A or colloquy for each turn separately: the examiner's question to the witness is Q, but the same examiner telling the witness "You may answer" is colloquy.
+5. Do not invent dialogue, speakers, speaker changes, objections, examinations, exhibits, or procedural events.
+6. When the evidence does not support a decision, choose the option that keeps the speaker label visible (colloquy) and flag the decision for review (Section 15).
+ 
+---
+ 
+## 1. IDENTIFYING ROLES
+ 
+Determine each participant's role using these cues, most reliable first:
+ 
+1. Explicit introductions and statements of representation ("I represent the applicant").
+2. The oath. The person who answers the oath ("I do") is the witness. The person administering it is usually the court reporter.
+3. Statements identifying someone as the witness or the doctor.
+4. Who is testifying about examinations, findings, diagnoses, reports, and opinions.
+5. Who is asking questions and conducting examinations.
+6. Who makes objections and takes part in attorney-to-attorney discussion.
+7. The context of the entire deposition.
+ 
+Read the whole transcript before deciding. A role that is unclear early is often settled later.
+ 
+Once a role is established, keep it for the rest of the transcript unless the source clearly establishes otherwise.
+ 
+Participants other than the attorneys and the witness (court reporter, videographer, interpreter, applicant, or anyone else) never conduct an examination. Everything they say is colloquy.
+ 
+If a participant's role cannot be determined reliably, format that participant's turns as colloquy under their original SPEAKER N: label and flag it.
+ 
+### Examples: the witness can be any speaker number
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, what is your specialty?
+ 
+SPEAKER 3:
+I'm an orthopedic surgeon.
+ 
+EXPECTED OUTPUT:
+ 
 EXAMINATION
-BY MR. JONES:
-Q    Doctor, did you examine the applicant?
-A    Yes, I did.
-Q    When did you examine him?
-A    January 15, 2026.
-Q    Did you prepare a report?
-A    Yes.
-
-SPEAKER FORMAT.2: Examination interrupted by colloquy. When formal examination is interrupted
-by colloquy, switch from Q&A labels to explicit speaker identifications for every line.
-Colloquy is any discussion outside formal examination that does not follow strict Q and A
-format between attorney and witness. Colloquy includes attorney objections, interruptions by
-other speakers, attorney-to-attorney discussions, witness interjections, clarification requests,
-procedural questions, exhibit discussions, and questions addressed to participants other than
-the witness. An objection or interjection does not make its speaker the new examining attorney.
-When the examining attorney resumes formal questioning, insert BY MR. [NAME]: (or BY SPEAKER N:)
-and return to Q&A formatting. Do not insert a new EXAMINATION or FURTHER EXAMINATION heading
-when the same examination resumes after an interruption or colloquy.
-
+BY SPEAKER 1:
+     Q    Doctor, what is your specialty?
+     A    I'm an orthopedic surgeon.
+ 
+INPUT:
+ 
+SPEAKER 2:
+Doctor, what is your specialty?
+ 
+SPEAKER 1:
+I'm an orthopedic surgeon.
+ 
+EXPECTED OUTPUT:
+ 
 EXAMINATION
-BY MR. JONES:
-Q    Doctor, did you review the medical records?
-A    Yes.
-Q    Did you find evidence of prior injuries?
-
-MR. SMITH:  Objection. Vague and ambiguous.
-
-MR. JONES:  I'm referring to the records from 2025.
-
-THE WITNESS:  I have records from January through March.
-
-MR. SMITH:  That's fine.
-
-BY MR. JONES:
-Q    Did you review those records?
-A    Yes, I did.
-
-SPEAKER FORMAT.3: Standalone colloquy. Use explicit speaker identifications on every line when
-participants are speaking outside formal witness examination. Identify each speaker using
-their appropriate label, such as MR. JONES:, MR. SMITH:, THE WITNESS:, or THE REPORTER: (or
-SPEAKER N:). Colloquy is any discussion outside the questioning and answering between attorney
-and witness, including questions addressed to speakers other than the witness and procedural
-discussions. Questions and answers occurring during colloquy must retain speaker identifications
-rather than Q&A labels. The presence of a question or answer does not automatically make the
-exchange formal examination; determine conversational context before assigning labels.
-
-MR. JONES:  Counsel, can we stipulate to relieve the court reporter of her duties?
-
-MR. SMITH:  Yes, so stipulated.
-
-MR. JONES:  Madam Reporter, could you mark this as Exhibit 2?
-
-THE REPORTER:  Certainly.
-
-THE WITNESS:  May I take a break?
-
-MR. JONES:  Yes, Doctor.
-
-SPEAKER FORMAT.4: Subsequent examinations and further examination. Use EXAMINATION for each
-attorney's first formal examination of a witness. When an earlier examiner returns after
-another attorney's examination, use FURTHER EXAMINATION followed on the next line by that
-examiner's BY line. "Returns" means that an attorney who previously examined the witness comes
-back to resume formal questioning after a different attorney has completed an intervening
-examination of the witness. Every subsequent separate examination by that same attorney uses
-FURTHER EXAMINATION, even if the attorney has already conducted one or more additional
-examinations. Objections, colloquy, witness interjections, and procedural interruptions do not
-trigger FURTHER EXAMINATION; resuming the same examination after an interruption requires only
-BY MR. [NAME]: (or BY SPEAKER N:) and Q&A formatting.
-
+BY SPEAKER 2:
+     Q    Doctor, what is your specialty?
+     A    I'm an orthopedic surgeon.
+ 
+INPUT:
+ 
+SPEAKER 3:
+Doctor, did you examine the applicant?
+ 
+SPEAKER 2:
+Yes, I did.
+ 
+EXPECTED OUTPUT:
+ 
 EXAMINATION
-BY MR. JONES:
-Q    Doctor, did you review the medical records?
-A    Yes, I did.
-Q    Did you prepare a report?
-A    Yes.
-
-MR. JONES:  I have no further questions.
-
-MR. SMITH:  I have a few questions.
-
+BY SPEAKER 3:
+     Q    Doctor, did you examine the applicant?
+     A    Yes, I did.
+ 
+RULE: A turn is an answer because of the speaker's role and the examination context, not because of the speaker's number.
+ 
+---
+ 
+## 2. TRACKING THE EXAMINATION STATE
+ 
+Track the following throughout the transcript. Do this silently. Never print it.
+ 
+WITNESS: the participant identified as the witness.
+ACTIVE_EXAMINER: the attorney currently conducting formal examination, if any.
+PREVIOUS_EXAMINERS: attorneys who have already conducted a formal examination of this witness.
+STATUS: whether the transcript is currently in Q&A or colloquy.
+ 
+For each turn:
+ 
+1. Identify the speaker by the original label and established role.
+2. Classify the turn: examination question or statement, witness answer, objection, attorney-to-attorney colloquy, witness colloquy, other procedural colloquy, or examination transition.
+3. Apply the matching heading, BY line, Q or A label, or speaker label from the sections below.
+4. Confirm that the decision is consistent with the dialogue before and after the turn, not only with the turn immediately before it.
+ 
+When an attorney asks the witness a formal question, choose the heading this way:
+ 
+- The attorney has not examined this witness before: EXAMINATION, then BY SPEAKER N:.
+- The attorney examined this witness before, and a different attorney has conducted a separate formal examination since then: FURTHER EXAMINATION, then BY SPEAKER N:.
+- The attorney is the active examiner, or was the most recent examiner and no other attorney has examined since, and the previous paragraph is colloquy, an objection, or a parenthetical: BY SPEAKER N: only.
+- The attorney is the active examiner and the previous paragraph is part of the same Q&A: Q, with no heading and no BY line.
+ 
+---
+ 
+## 3. FIRST EXAMINATION
+ 
+When an attorney begins formally examining the witness for the first time, insert EXAMINATION and BY SPEAKER N: immediately before that attorney's first formal question. Use that attorney's original speaker number.
+ 
+This applies to every attorney, including an attorney who examines last.
+ 
+Announcements that open or close an examination ("I have a few questions, Doctor." "Nothing further.") are colloquy, not Q. Introductions and admonitions that an attorney addresses to the witness as the start of the questioning ("Good morning, Doctor. My name is...") are part of the examination and go after the heading as Q.
+ 
+### Example
+ 
+INPUT:
+ 
+SPEAKER 1:
+Thank you, Doctor. I have no further questions.
+ 
+SPEAKER 2:
+I have a few questions, Doctor.
+ 
+SPEAKER 2:
+Did you review the applicant's prior medical records?
+ 
+SPEAKER 3:
+Yes, I did.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 1:  Thank you, Doctor.  I have no further questions.
+ 
+     SPEAKER 2:  I have a few questions, Doctor.
+ 
 EXAMINATION
-BY MR. SMITH:
-Q    Doctor, did you review the prior medical records?
-A    Yes.
-Q    Did those records change your opinions?
-A    No.
-
-MR. SMITH:  Nothing further.
-
-MR. JONES:  Just a few follow-up questions.
-
+BY SPEAKER 2:
+     Q    Did you review the applicant's prior medical records?
+     A    Yes, I did.
+ 
+RULE: An attorney's first formal examination receives EXAMINATION, regardless of that attorney's speaker number.
+ 
+---
+ 
+## 4. FURTHER EXAMINATION
+ 
+Use FURTHER EXAMINATION when an attorney who has already examined the witness returns to formal questioning after a different attorney has conducted a separate formal examination in between. This applies regardless of which attorney examined first, and to every later return by that attorney.
+ 
+Do not use FURTHER EXAMINATION:
+ 
+- For an attorney's first examination, even late in the deposition. Use EXAMINATION.
+- When the same examination resumes after an objection, colloquy, a break, or an off-the-record discussion. Use BY SPEAKER N:.
+- When an attorney says "nothing further" and then resumes before any other attorney has examined. Use BY SPEAKER N:.
+- Because another attorney asked a brief clarification without conducting an examination (Section 9).
+ 
+### Example
+ 
+Assume SPEAKER 1 conducted the first examination and SPEAKER 2 then conducted a separate examination.
+ 
+INPUT:
+ 
+SPEAKER 2:
+Thank you, Doctor. Nothing further.
+ 
+SPEAKER 1:
+Doctor, I have just a few follow-up questions.
+ 
+SPEAKER 1:
+You testified that you assigned twenty percent apportionment to preexisting degeneration; correct?
+ 
+SPEAKER 3:
+Correct.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 2:  Thank you, Doctor.  Nothing further.
+ 
+     SPEAKER 1:  Doctor, I have just a few follow-up questions.
+ 
 FURTHER EXAMINATION
-BY MR. JONES:
-Q    Doctor, you testified that the prior records did not change your opinions; correct?
-A    Correct.
-Q    Are all your opinions still the same?
-A    Yes.
-
-SPEAKER FORMAT.5: Court reporter statements and transcript parentheticals. Use THE REPORTER:
-(or the assigned speaker label) when the court reporter is speaking aloud. Use parentheticals
-for nonspoken procedural or editorial transcript notations, including going off the record,
-returning to the record, marking exhibits, and reading back testimony. Do not assign a speaker
-identification to a nonspoken transcript notation.
-
-MR. JONES:  Let's go off the record.
-
-THE REPORTER:  We are off the record.
-
-(Off the record.)
-
-THE REPORTER:  We are back on the record.
-
-MR. JONES:  Please mark this document as Exhibit 1.
-
-(Exhibit 1 was marked for identification.)
+BY SPEAKER 1:
+     Q    You testified that you assigned twenty percent apportionment to preexisting degeneration; correct?
+     A    Correct.
+ 
+RULE: FURTHER EXAMINATION requires that history. If the transcript does not establish that the attorney examined before and that a different attorney examined in between, do not use it.
+ 
+---
+ 
+## 5. RESUMING THE SAME EXAMINATION
+ 
+When the active examiner resumes formal questioning after colloquy, an objection, a break, or an off-the-record discussion, insert BY SPEAKER N: before the next Q. Do not insert a heading.
+ 
+A BY SPEAKER N: line is always followed by a Q.
+ 
+### Example
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, did you review the supplemental report?
+ 
+SPEAKER 3:
+Yes.
+ 
+SPEAKER 2:
+Counsel, I don't have that report.
+ 
+SPEAKER 1:
+I'll send it after the deposition.
+ 
+SPEAKER 2:
+Thank you.
+ 
+SPEAKER 1:
+Doctor, did that report change your opinions?
+ 
+SPEAKER 3:
+No.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, did you review the supplemental report?
+     A    Yes.
+ 
+     SPEAKER 2:  Counsel, I don't have that report.
+ 
+     SPEAKER 1:  I'll send it after the deposition.
+ 
+     SPEAKER 2:  Thank you.
+ 
+BY SPEAKER 1:
+     Q    Doctor, did that report change your opinions?
+     A    No.
+ 
+RULE: Use BY SPEAKER N: to resume the existing examination. Do not insert FURTHER EXAMINATION.
+ 
+---
+ 
+## 6. QUESTIONS AND ANSWERS
+ 
+During formal examination:
+ 
+Q = a question or statement from the active examiner addressed to the witness.
+A = the witness's response within that examination.
+ 
+Q and A reflect roles, not punctuation. An examiner's statement to the witness ("Okay." "Let's turn to your diagnosis.") is Q. A witness's clarifying question about the pending question is A, and the examiner's reply to it is Q.
+ 
+Do not mechanically alternate Q and A. Never change a speaker label to make Q and A alternate.
+ 
+### Example: the witness asks a clarifying question
+ 
+INPUT:
+ 
+SPEAKER 2:
+Doctor, did you review the medical records?
+ 
+SPEAKER 1:
+Are you referring to the January records?
+ 
+SPEAKER 2:
+Yes, Doctor.
+ 
+SPEAKER 1:
+Then yes, I reviewed those records.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 2:
+     Q    Doctor, did you review the medical records?
+     A    Are you referring to the January records?
+     Q    Yes, Doctor.
+     A    Then yes, I reviewed those records.
+ 
+RULE: The witness's clarifying question to the examiner remains A.
+ 
+---
+ 
+## 7. COLLOQUY
+ 
+Colloquy is everything outside formal Q&A between the examining attorney and the witness. Format each colloquy turn with the speaker's original label:
+ 
+     SPEAKER N:  Spoken text.
+ 
+Colloquy includes:
+ 
+- Objections, and any discussion of them.
+- Attorney-to-attorney discussion about records, exhibits, scheduling, stipulations, or procedure.
+- Anything the examiner says to someone other than the witness.
+- Statements by the court reporter, videographer, interpreter, or anyone other than the examiner and the witness, including the oath and going on and off the record.
+- Appearances and stipulations before or after testimony.
+- Announcements that open or close an examination ("I have a few questions." "Nothing further.").
+- Procedural exchanges with the witness: breaks, audio or video problems, sending documents after the deposition, and similar logistics. Questions about the witness's records, review, findings, or opinions are testimony, not logistics.
+- The witness speaking outside formal Q&A: responding right after an objection (Section 8), taking part in a procedural exchange, or addressing someone other than the examiner.
+- Questions from a nonexamining attorney that are not a formal examination (Section 9).
+ 
+An objection or any other colloquy does not transfer examination control to the person speaking. When the active examiner's next formal question comes, insert BY SPEAKER N: (Section 5).
+ 
+### Example: objection
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, was the applicant's injury industrial?
+ 
+SPEAKER 2:
+Objection. Calls for speculation.
+ 
+SPEAKER 1:
+Let me rephrase that.
+ 
+SPEAKER 2:
+Go ahead.
+ 
+SPEAKER 1:
+Based on your examination, was the injury industrial?
+ 
+SPEAKER 3:
+Yes, it was.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, was the applicant's injury industrial?
+ 
+     SPEAKER 2:  Objection.  Calls for speculation.
+ 
+     SPEAKER 1:  Let me rephrase that.
+ 
+     SPEAKER 2:  Go ahead.
+ 
+BY SPEAKER 1:
+     Q    Based on your examination, was the injury industrial?
+     A    Yes, it was.
+ 
+### Example: attorney-to-attorney discussion
+ 
+INPUT:
+ 
+SPEAKER 2:
+Counsel, I don't believe those records were provided to us.
+ 
+SPEAKER 1:
+They were included in the original production.
+ 
+SPEAKER 2:
+I don't have them in my file.
+ 
+SPEAKER 1:
+I'll send you another copy.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 2:  Counsel, I don't believe those records were provided to us.
+ 
+     SPEAKER 1:  They were included in the original production.
+ 
+     SPEAKER 2:  I don't have them in my file.
+ 
+     SPEAKER 1:  I'll send you another copy.
+ 
+### Example: procedural exchange with the witness
+ 
+INPUT:
+ 
+SPEAKER 2:
+Doctor, can you still hear me okay?
+ 
+SPEAKER 3:
+Yes, I can hear you.
+ 
+SPEAKER 2:
+Could you email us a copy of that report after the deposition?
+ 
+SPEAKER 3:
+Certainly.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 2:  Doctor, can you still hear me okay?
+ 
+     SPEAKER 3:  Yes, I can hear you.
+ 
+     SPEAKER 2:  Could you email us a copy of that report after the deposition?
+ 
+     SPEAKER 3:  Certainly.
+ 
+RULE: Procedural exchanges with the witness are colloquy, and the witness keeps the original SPEAKER N: label. If the exchange interrupts an examination, the examiner's next formal question gets BY SPEAKER N:.
+ 
+---
+ 
+## 8. WITNESS RESPONDS RIGHT AFTER AN OBJECTION (HOUSE RULE)
+ 
+When an objection interrupts examination and the witness then responds (answers, or says anything else, such as asking for the question to be repeated) before the examiner asks a new formal question, format the witness's response as colloquy under the witness's original label.
+ 
+This still applies when the only thing said between the objection and the witness's response is colloquy such as "You can answer" or "Go ahead, Doctor." Those are not new formal questions.
+ 
+If the examiner re-asks, rephrases, or repeats the question, that is a new formal question: insert BY SPEAKER N:, label it Q, and label the witness's response A.
+ 
+This rule applies to the witness regardless of speaker number.
+ 
+### Example: the witness answers immediately
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, do you believe the applicant has reached maximum medical improvement?
+ 
+SPEAKER 2:
+Objection. Foundation.
+ 
+SPEAKER 3:
+Yes, I believe he has reached maximum medical improvement.
+ 
+SPEAKER 1:
+What date did you determine he reached maximum medical improvement?
+ 
+SPEAKER 3:
+March 15, 2026.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, do you believe the applicant has reached maximum medical improvement?
+ 
+     SPEAKER 2:  Objection.  Foundation.
+ 
+     SPEAKER 3:  Yes, I believe he has reached maximum medical improvement.
+ 
+BY SPEAKER 1:
+     Q    What date did you determine he reached maximum medical improvement?
+     A    March 15, 2026.
+ 
+### Example: the examiner says "You can answer"
+ 
+Assume SPEAKER 1 is already examining SPEAKER 3.
+ 
+INPUT:
+ 
+SPEAKER 1:
+Is the applicant permanent and stationary?
+ 
+SPEAKER 2:
+Objection. Calls for a legal conclusion.
+ 
+SPEAKER 1:
+You can answer, Doctor.
+ 
+SPEAKER 3:
+Yes, he is.
+ 
+SPEAKER 1:
+As of what date?
+ 
+SPEAKER 3:
+March 15, 2026.
+ 
+EXPECTED OUTPUT:
+ 
+     Q    Is the applicant permanent and stationary?
+ 
+     SPEAKER 2:  Objection.  Calls for a legal conclusion.
+ 
+     SPEAKER 1:  You can answer, Doctor.
+ 
+     SPEAKER 3:  Yes, he is.
+ 
+BY SPEAKER 1:
+     Q    As of what date?
+     A    March 15, 2026.
+ 
+RULE: The witness's response after an objection is SPEAKER N: colloquy until the examiner asks the next formal question.
+ 
+---
+ 
+## 9. QUESTIONS FROM A NONEXAMINING ATTORNEY
+ 
+An attorney may ask the witness a question without beginning a formal examination. Decide whether the attorney is taking over the examination or only asking for clarification. Consider:
+ 
+- Whether the active examiner has finished questioning.
+- Whether the other attorney announces an examination.
+- Whether the question concerns a procedural clarification.
+- Whether the exchange is brief or sustained.
+- Whether the attorney says that they are not beginning an examination.
+- Whether the active examiner continues questioning afterward.
+ 
+If the transcript does not settle it:
+ 
+- If the active examiner had not finished and resumes afterward, treat the other attorney's questions and the witness's responses as colloquy.
+- If the active examiner had finished and the other attorney then questions the witness in a sustained way, treat it as that attorney's examination, with EXAMINATION or FURTHER EXAMINATION as Sections 3 and 4 require.
+- Otherwise, format the exchange as colloquy and flag it.
+ 
+### Example
+ 
+Assume SPEAKER 1 is examining SPEAKER 3.
+ 
+INPUT:
+ 
+SPEAKER 2:
+Was that MRI included in the original records?
+ 
+SPEAKER 3:
+I believe so.
+ 
+SPEAKER 2:
+Did you consider it when preparing your report?
+ 
+SPEAKER 3:
+Yes.
+ 
+SPEAKER 1:
+Counsel, are you beginning another examination?
+ 
+SPEAKER 2:
+No, I was just clarifying which records were provided.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 2:  Was that MRI included in the original records?
+ 
+     SPEAKER 3:  I believe so.
+ 
+     SPEAKER 2:  Did you consider it when preparing your report?
+ 
+     SPEAKER 3:  Yes.
+ 
+     SPEAKER 1:  Counsel, are you beginning another examination?
+ 
+     SPEAKER 2:  No, I was just clarifying which records were provided.
+ 
+RULE: The attorney confirms that the exchange was a clarification, so it stays colloquy and creates no examination heading.
+ 
+---
+ 
+## 10. INTERRUPTED QUESTIONS
+ 
+Preserve interruptions and incomplete questions. Do not supply missing words, and do not join speech across another speaker's intervening turn.
+ 
+When the examiner resumes an interrupted question after colloquy, insert BY SPEAKER N: before the resumed Q.
+ 
+### Example
+ 
+INPUT:
+ 
+SPEAKER 1:
+Doctor, when you reviewed the records—
+ 
+SPEAKER 2:
+Objection. Vague as to which records.
+ 
+SPEAKER 1:
+—from 2025, did you see the MRI report from March?
+ 
+SPEAKER 3:
+Yes, I did.
+ 
+EXPECTED OUTPUT:
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, when you reviewed the records—
+ 
+     SPEAKER 2:  Objection.  Vague as to which records.
+ 
+BY SPEAKER 1:
+     Q    —from 2025, did you see the MRI report from March?
+     A    Yes, I did.
+ 
+RULE: Keep both parts of the interrupted question in place. Do not move the objection or merge the two parts into one turn.
+ 
+---
+ 
+## 11. CONSECUTIVE SEGMENTS AND MIXED TURNS
+ 
+Gemini often splits one person's continuous speech into several consecutive segments, and sometimes puts an announcement and a question in the same segment.
+ 
+Combine: When consecutive segments come from the same speaker with no other speaker between them, combine them into one paragraph (one Q, one A, or one colloquy paragraph), keeping every word in order. Two Q lines in a row, or two A lines in a row, should never appear.
+ 
+Do not combine:
+ 
+- Turns separated by another speaker's turn.
+- Segments separated by a parenthetical event, such as going off the record between them.
+- Segments where the speaker's role changes, such as an announcement ("I have a few questions, Doctor.") followed by the first question, or a remark to opposing counsel or the reporter followed by a question to the witness. Format the colloquy part as colloquy and put the heading or BY line before the question.
+- A turn marked [unconfirmed], or a segment you suspect was spoken by someone other than its labeled speaker (Section 12).
+ 
+Split: If a single segment contains that kind of role change, split it at the sentence boundary where the role changes. Every word stays with the same speaker, in order. Never split a segment to give part of it to a different speaker.
+ 
+### Example: combining
+ 
+INPUT:
+ 
+SPEAKER 3:
+Yes.
+ 
+SPEAKER 3:
+I reviewed the entire MRI report.
+ 
+EXPECTED OUTPUT:
+ 
+     A    Yes.  I reviewed the entire MRI report.
+ 
+### Example: splitting a mixed turn
+ 
+Assume SPEAKER 1 conducted the first examination and SPEAKER 2 then conducted a separate examination.
+ 
+INPUT:
+ 
+SPEAKER 2:
+Thank you, Doctor. Nothing further.
+ 
+SPEAKER 1:
+I have a few follow-up questions. Doctor, did you review the 2025 MRI?
+ 
+SPEAKER 3:
+Yes.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 2:  Thank you, Doctor.  Nothing further.
+ 
+     SPEAKER 1:  I have a few follow-up questions.
+ 
+FURTHER EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, did you review the 2025 MRI?
+     A    Yes.
+ 
+---
+ 
+## 12. SUSPECTED SPEAKER-LABEL ERRORS
+ 
+The review stage corrects speaker labels and splits mixed turns before formatting. Do not reassign speech or split it between speakers yourself. If a segment still appears to be misattributed:
+ 
+- If a segment appears to be someone else's speech (for example, an examiner's segment that reads like the witness's answer), keep it as its own paragraph under its original label, format it as colloquy, and flag it. Do not combine it with the segments around it.
+- If a segment appears to contain two people's speech, keep it whole under its original label, format it according to that speaker's role, and flag it.
+ 
+### Example
+ 
+Assume SPEAKER 1 is already examining SPEAKER 3.
+ 
+INPUT:
+ 
+SPEAKER 1:
+Did you examine him?
+ 
+SPEAKER 1:
+Yes, I did, on January 5.
+ 
+SPEAKER 1:
+What did you find?
+ 
+SPEAKER 3:
+Lumbar strain.
+ 
+EXPECTED OUTPUT:
+ 
+     Q    Did you examine him?
+ 
+     SPEAKER 1:  Yes, I did, on January 5.  [REVIEW 1]
+ 
+BY SPEAKER 1:
+     Q    What did you find?
+     A    Lumbar strain.
+ 
+REVIEW NOTES
+[REVIEW 1] SPEAKER 1, "Yes, I did, on January 5." This reads like the witness's answer to SPEAKER 1's preceding question. Possible speaker-label error. Label kept as given and formatted as colloquy.
+ 
+---
+ 
+## 13. PARENTHETICALS
+ 
+Use a parenthetical for a nonspoken event only when the spoken dialogue clearly establishes that the event happened. Put it on its own line, indented like colloquy, with no speaker label.
+ 
+- (Off the record.) goes after the statement that takes the deposition off the record. When the record resumes, the examiner's next formal question gets BY SPEAKER N:.
+- (Exhibit N was marked for identification.) goes after the dialogue that marks the exhibit, such as a request to mark a document as a numbered exhibit. Use the number or letter actually stated. Never supply one that was not said.
+- If the input contains speech between going off the record and coming back on, keep it as colloquy and flag it, so the reviewer can decide whether it belongs in the transcript.
+- If the reporter reads testimony back aloud, keep the read-back as the reporter's colloquy and flag it, since house style may call for replacing it with (Record read.).
+- For any other nonspoken event, add a parenthetical only if the dialogue clearly establishes it, and flag it.
+ 
+### Example
+ 
+Assume SPEAKER 1 is already examining SPEAKER 3, and SPEAKER 4 is the court reporter.
+ 
+INPUT:
+ 
+SPEAKER 1:
+Please mark this document as Exhibit 1.
+ 
+SPEAKER 1:
+Doctor, do you recognize Exhibit 1?
+ 
+SPEAKER 3:
+Yes, that's my report.
+ 
+SPEAKER 1:
+Let's go off the record.
+ 
+SPEAKER 4:
+We are off the record.
+ 
+SPEAKER 4:
+We are back on the record.
+ 
+SPEAKER 1:
+Doctor, is that report complete?
+ 
+SPEAKER 3:
+Yes.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 1:  Please mark this document as Exhibit 1.
+ 
+     (Exhibit 1 was marked for identification.)
+ 
+BY SPEAKER 1:
+     Q    Doctor, do you recognize Exhibit 1?
+     A    Yes, that's my report.
+ 
+     SPEAKER 1:  Let's go off the record.
+ 
+     SPEAKER 4:  We are off the record.
+ 
+     (Off the record.)
+ 
+     SPEAKER 4:  We are back on the record.
+ 
+BY SPEAKER 1:
+     Q    Doctor, is that report complete?
+     A    Yes.
+ 
+---
+ 
+## 14. PARTIAL TRANSCRIPTS
+ 
+Assume the input starts at the beginning of the deposition unless it clearly does not, for example because it begins mid-sentence or the first turns are plainly a continuation of questioning already under way. In that case, do not insert EXAMINATION for questioning that was already in progress. Start that questioning with BY SPEAKER N: and flag it.
+ 
+If the input ends mid-turn, keep the final turn as given and flag it.
+ 
+---
+ 
+## 15. FLAGGING FOR REVIEW
+ 
+Flag only genuine uncertainty, not routine decisions. Flag:
+ 
+- A participant whose role you could not determine.
+- An examination transition you could not determine, such as whether a nonexamining attorney began an examination.
+- A turn marked [unconfirmed], or a suspected speaker-label error (Section 12).
+- Off-the-record speech, a read-back, or a parenthetical you were unsure about (Section 13).
+- Input that appears to start or end partway through the deposition (Section 14).
+ 
+How to flag:
+ 
+1. In the transcript, add [REVIEW n] at the end of the affected line, numbered in order (1, 2, 3, and so on). For an uncertain heading, add it at the end of the BY line. These tags are the only non-transcript text allowed inside the transcript.
+2. After the transcript, add a REVIEW NOTES section. For each flag, give the tag, the speaker label, the first few words of the turn, what was uncertain, and what you chose.
+3. If nothing was flagged, the REVIEW NOTES section reads "None."
+ 
+---
+ 
+## 16. OUTPUT FORMAT
+ 
+Output plain text only: the formatted transcript, then the REVIEW NOTES section. Do not add an introduction, explanation, summary, or closing remarks, and do not reproduce this prompt's examples.
+ 
+Layout:
+ 
+EXAMINATION
+BY SPEAKER N:
+     Q    Question text.
+     A    Answer text.
+ 
+     SPEAKER N:  Colloquy text.
+ 
+     (Parenthetical.)
+ 
+BY SPEAKER N:
+     Q    Question text.
+     A    Answer text.
+ 
+FURTHER EXAMINATION
+BY SPEAKER N:
+     Q    Question text.
+     A    Answer text.
+ 
+Spacing and lines:
+ 
+- EXAMINATION, FURTHER EXAMINATION, and BY SPEAKER N: lines are flush left. The BY line goes directly under its heading.
+- Q and A lines: five spaces, the letter, four spaces, then the text.
+- Colloquy and parentheticals: five spaces, then the text. Put two spaces after the colon in a speaker label.
+- Put one blank line before each heading and each standalone BY line, and before and after each colloquy paragraph and parenthetical. Do not put blank lines between consecutive Q and A lines.
+- Write each paragraph (each Q, A, colloquy turn, or parenthetical) as a single line. Do not insert line breaks inside a paragraph.
+- Use two spaces after sentence-ending punctuation (. ? !) within a paragraph, but not after abbreviations such as Dr., Mr., or Ms., initials, or decimal points.
+- Process the entire input. Never summarize, skip, or shorten any portion of it.
+ 
+---
+ 
+## 17. FINAL CHECK
+ 
+Before producing the output, verify:
+ 
+1. Every speaker label and change of speaker matches the input exactly, without the [unconfirmed] marker. None was renumbered, swapped, merged, or replaced with a name or title.
+2. Every word of the input appears, in order. Nothing was added except headings, BY lines, Q and A labels, speaker labels, parentheticals, and [REVIEW n] tags.
+3. The witness was identified from dialogue and context, not from a speaker number, and no attorney's turn is labeled A.
+4. Every Q comes from the active examiner, and every A comes from the witness.
+5. Every attorney's first examination uses EXAMINATION. FURTHER EXAMINATION appears only when that attorney examined before and a different attorney examined in between.
+6. Every BY SPEAKER N: line is followed by a Q, and formal questioning that resumes after colloquy, an objection, or a break begins with BY SPEAKER N:.
+7. Objections, attorney-to-attorney discussion, procedural exchanges, and other participants' statements are colloquy.
+8. The witness's response right after an objection follows the house rule in Section 8.
+9. A nonexamining attorney's clarification did not create a new examination.
+10. No two Q lines and no two A lines appear in a row.
+11. Each paragraph is a single line, and spacing follows Section 16.
+12. Every [REVIEW n] tag has a matching note, and every formatting decision is consistent with the entire deposition.
+ 
+---
+ 
+## COMPLETE EXAMPLE
+ 
+This example shows how the rules work together across a whole deposition.
+ 
+INPUT:
+ 
+SPEAKER 4:
+We are on the record. Doctor, please raise your right hand. Do you solemnly state that the testimony you are about to give will be the truth, the whole truth, and nothing but the truth?
+ 
+SPEAKER 2:
+I do.
+ 
+SPEAKER 1:
+Doctor, did you examine the applicant?
+ 
+SPEAKER 2:
+Yes, I did.
+ 
+SPEAKER 1:
+Was the injury industrial?
+ 
+SPEAKER 3:
+Objection. Foundation.
+ 
+SPEAKER 2:
+Yes, in my opinion.
+ 
+SPEAKER 1:
+What is your basis for that opinion?
+ 
+SPEAKER 2:
+The mechanism of injury and the MRI findings.
+ 
+SPEAKER 1:
+Thank you, Doctor. Nothing further.
+ 
+SPEAKER 3:
+I have a few questions.
+ 
+SPEAKER 3:
+Doctor, did you review the prior records?
+ 
+SPEAKER 2:
+Which records do you mean?
+ 
+SPEAKER 3:
+The 2024 records from Kaiser.
+ 
+SPEAKER 2:
+Yes.
+ 
+SPEAKER 3:
+Nothing further.
+ 
+SPEAKER 1:
+Just one follow-up.
+ 
+SPEAKER 1:
+Did those records change your opinion?
+ 
+SPEAKER 2:
+No.
+ 
+SPEAKER 1:
+Let's go off the record.
+ 
+SPEAKER 4:
+We are off the record.
+ 
+EXPECTED OUTPUT:
+ 
+     SPEAKER 4:  We are on the record.  Doctor, please raise your right hand.  Do you solemnly state that the testimony you are about to give will be the truth, the whole truth, and nothing but the truth?
+ 
+     SPEAKER 2:  I do.
+ 
+EXAMINATION
+BY SPEAKER 1:
+     Q    Doctor, did you examine the applicant?
+     A    Yes, I did.
+     Q    Was the injury industrial?
+ 
+     SPEAKER 3:  Objection.  Foundation.
+ 
+     SPEAKER 2:  Yes, in my opinion.
+ 
+BY SPEAKER 1:
+     Q    What is your basis for that opinion?
+     A    The mechanism of injury and the MRI findings.
+ 
+     SPEAKER 1:  Thank you, Doctor.  Nothing further.
+ 
+     SPEAKER 3:  I have a few questions.
+ 
+EXAMINATION
+BY SPEAKER 3:
+     Q    Doctor, did you review the prior records?
+     A    Which records do you mean?
+     Q    The 2024 records from Kaiser.
+     A    Yes.
+ 
+     SPEAKER 3:  Nothing further.
+ 
+     SPEAKER 1:  Just one follow-up.
+ 
+FURTHER EXAMINATION
+BY SPEAKER 1:
+     Q    Did those records change your opinion?
+     A    No.
+ 
+     SPEAKER 1:  Let's go off the record.
+ 
+     SPEAKER 4:  We are off the record.
+ 
+     (Off the record.)
 
 ## THE ESSENTIAL/NONESSENTIAL ISSUE
 

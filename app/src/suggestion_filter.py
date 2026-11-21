@@ -9,6 +9,10 @@
    evidence, and ambiguous native field identities remain unresolved.
 4. Speaker overrides affect only unresolved occurrences. Evidence is frozen for
    the AI result; these counts measure agreement, not verified speaker identity.
+   When only the AI label disputes an existing label, speaker_votes asks the
+   voice and the context. Support for the existing label keeps it; agreement
+   with the AI label suggests the change; anything else is "Needs review".
+   Overrides never replace a kept label.
 5. Examination headings use the native Centered Paragraph Style at export and
    in preview. No padding is stored (test_native_structure covers export).
 6. Keep Original's leading indentation and generated Q/A spacing on aligned
@@ -42,6 +46,7 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import re
 
+from app.src import speaker_votes
 from app.src.casecat.elements import NativeElement, speaker_number
 from app.src.casecat.fields import field_values
 from app.src.number_forms import equivalent_integer
@@ -419,7 +424,7 @@ def _restore_trailing(original, text, *, labels=LABEL):
     return text
 
 
-def prepare(original, text, *, evidence=None, overrides=None, index_fields=None):
+def prepare(original, text, *, evidence=None, overrides=None, index_fields=None, voice=None):
     """Return a structured proposal and JSON-safe, frozen speaker evidence."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     labels = _label_pattern(index_fields)
@@ -427,6 +432,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
     fields = _field_ranges(original)
     choices = _speaker_choices(old, fields, index_fields)
     paired = {j: i for i, j in pairs}
+    fresh = evidence is None
     if evidence is None:
         counts, occurrences = {}, []
         unaligned = Counter()
@@ -461,6 +467,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
         evidence = {'speakers': summaries, 'occurrences': occurrences}
     mappings = {key: value['mapped'] for key, value in evidence['speakers'].items()}
     mappings.update(overrides or {})
+    occurrences = {(o['start'], o['end']): o for o in evidence['occurrences']}
     edits = []
     for j, paragraph in enumerate(new):
         label = paragraph[2]
@@ -471,6 +478,16 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
                 raise ValueError('Choose an existing speaker label.')
             prior = old[paired[j]][2] if j in paired else None
             display = prior['name'] if prior and speaker_name_key(prior['name']) == key else choice.name
+            occurrence = occurrences.get(_label_range(paragraph))
+            if (occurrence is not None and prior and speaker_name_key(prior['name']) != key
+                    and speaker_name_key(prior['name']) in choices):
+                # Gemini alone disputes an existing label. Ask the voice and context.
+                if fresh:
+                    decision, votes = speaker_votes.checks(old, paired[j], prior['name'].strip(),
+                                                           choice.name, voice=voice)
+                    occurrence.update(decision=decision, votes=votes)
+                if occurrence.get('decision') == speaker_votes.KEEP:
+                    display = prior['name']
             edits.append((*_label_range(paragraph), display))
     for a, b, name in reversed(edits):
         text = text[:a] + name + text[b:]
@@ -520,8 +537,11 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
     return revision, evidence
 
 
-def begin_review(state, text, *, exclude_off_record=True, index_fields=None):
-    """Freeze evidence and return an optional pre-exclusion undo snapshot."""
+def begin_review(state, text, *, exclude_off_record=True, index_fields=None, voice=None):
+    """Freeze evidence and return an optional pre-exclusion undo snapshot.
+
+    `voice` is an optional speaker_votes.VoiceCheck for state.original.
+    """
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     undo, excluded = None, []
     if exclude_off_record:
@@ -532,11 +552,11 @@ def begin_review(state, text, *, exclude_off_record=True, index_fields=None):
             # Build raw speaker evidence only for Undo, never use it to vote in
             # the filtered proposal. It has different paragraph offsets.
             raw = SimpleNamespace(original=state.original)
-            begin_review(raw, text, exclude_off_record=False, index_fields=index_fields)
+            begin_review(raw, text, exclude_off_record=False, index_fields=index_fields, voice=voice)
             raw.review.update(automatic_filter=1, automatic_changes=[])
             undo = (state.original, raw.incoming, raw.review)
             text = filtered
-    incoming, evidence = prepare(state.original, text, index_fields=index_fields)
+    incoming, evidence = prepare(state.original, text, index_fields=index_fields, voice=voice)
     if (incoming.text == state.original.text and incoming.elements == state.original.elements
             and incoming.definitions == state.original.definitions):
         incoming = state.original
@@ -583,6 +603,12 @@ def validate_review(review, text):
             if (location['speaker'] not in speakers or type(location['start']) is not int
                     or type(location['end']) is not int or type(location['resolved']) is not bool
                     or not 0 <= location['start'] <= location['end'] <= len(text)):
+                raise ValueError()
+            if 'decision' in location and location['decision'] not in speaker_votes.DECISIONS:
+                raise ValueError()
+            votes = location.get('votes', {})
+            if not isinstance(votes, dict) or any(not isinstance(k, str) or (v is not None and not isinstance(v, str))
+                                                  for k, v in votes.items()):
                 raise ValueError()
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ValueError('Invalid speaker review evidence.') from exc
@@ -631,6 +657,15 @@ def questionable_speaker_defaults(review, ranges):
             and (not summaries[speaker]['counts'].get(name) or uses[name.casefold()] > 1)]
 
 
+def flagged_attributions(review, ranges):
+    """Count pending label changes that only the AI label supports."""
+    if not review:
+        return 0
+    return sum(1 for location in review['locations']
+               if not location['resolved'] and location.get('decision') == speaker_votes.FLAG
+               and any(c < location['end'] and d > location['start'] for _, _, c, d in ranges))
+
+
 def override_speaker(state, speaker, name):
     """Change pending attributions without replaying completed decisions."""
     if state.review is None or speaker not in state.review['evidence']['speakers']:
@@ -645,7 +680,10 @@ def override_speaker(state, speaker, name):
     values = field_values(state.original) if reference else {}
     revision = state.incoming
     locations = state.review['locations']
-    for loc in sorted((p for p in locations if p['speaker'] == speaker and not p['resolved']), key=lambda p:p['start'], reverse=True):
+    # A kept label had voice or context support for this paragraph, whatever
+    # name the AI speaker tag maps to.
+    for loc in sorted((p for p in locations if p['speaker'] == speaker and not p['resolved']
+                       and p.get('decision') != speaker_votes.KEEP), key=lambda p:p['start'], reverse=True):
         a, b = loc['start'], loc['end']
         value = name or speaker
         if revision.text[a:b] == value:

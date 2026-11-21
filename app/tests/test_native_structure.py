@@ -203,6 +203,21 @@ def test_heading_before_native_byline_does_not_duplicate_paragraph_boundary():
     start=codec.u32(after.native_bytes,532)
     assert bytes.fromhex('160700') in after.native_bytes[start:]
 
+@pytest.mark.parametrize('inserted, opening', [
+    ('EXAMINATION\n', '160700'), ('Preamble.\n', '16ff00'), ('\n', '16ff00'),
+], ids=['heading', 'plain', 'blank'])
+def test_paragraphs_inserted_above_a_standalone_opening_control(inserted, opening):
+    # A document that opens with its own paragraph control, separate from any
+    # label element, as in 261119pe.
+    files = container_files(('\x16\xff\x00Hello ', 'world.'))
+    before, after = rewritten_job(files, lambda r: r._replace(0, 0, inserted))
+    assert before.text == 'Hello world.'
+    assert after.text == inserted + 'Hello world.'
+    start = codec.u32(after.native_bytes, 532)
+    stream = codec.records(after.native_bytes, start, start + codec.u32(after.native_bytes, 536))
+    controls = [raw for _, raw in stream if raw[0] == 0x16]
+    assert controls == [bytes.fromhex(opening), b'\x16\xff\x00']
+
 @pytest.mark.parametrize('prefix',['\n     Q','\n     A','\n     MS.'])
 def test_blank_paragraph_before_native_label_survives(prefix):
     from app.tests.test_native_fields import field_files
@@ -223,3 +238,72 @@ def test_accept_insertion_uses_destination_clock_not_repeated_word_source():
     _,after=rewritten_job(container_files(('First. ', 'Second. ', 'Third.')),edit)
     assert after.text=='First. Second. Extra Third.'
     assert after.baseline.spans[-1].content=='Extra Third.'
+
+
+def image_entry(number, offset, size, name=b'Pasted Image'):
+    # Observed CATalyst 22.1 image data index entry: number, data offset,
+    # data size, identifier, reserved, 260-byte name, width, height, padding.
+    return (struct.pack('<5I', number, offset, size, 0x2c65eca9, 0)
+            + name.ljust(260, b'\0') + struct.pack('<HH', 1247, 1244) + bytes(20))
+
+
+def image_files(entries=None, images=(b'II*\0first', b'II*\0second')):
+    files = container_files()
+    native = bytearray(files['jobs/example.sgngl'])
+    data = b''.join(images)
+    if entries is None:
+        entries, offset = [], 0
+        for number, image in enumerate(images, 1):
+            entries.append(image_entry(number, offset, len(image)))
+            offset += len(image)
+    struct.pack_into('<II', native, 548, len(native), len(data))
+    native += data
+    table = b''.join(entries)
+    struct.pack_into('<II', native, 612, len(native), len(table))
+    struct.pack_into('<I', native, 620, len(entries))
+    native += table
+    files['jobs/example.sgngl'] = bytes(native)
+    return files
+
+
+def test_pasted_images_move_with_their_sections():
+    files = image_files()
+    before, after = rewritten_job(files, lambda r: r.replace(0, 5, 'Hello there,'))
+    assert after.text == 'Hello there, world.'
+    delta = len(after.native_bytes) - len(before.native_bytes)
+    assert delta
+    for field in (548, 612):
+        old, new = codec.u32(before.native_bytes, field), codec.u32(after.native_bytes, field)
+        size = codec.u32(before.native_bytes, field + 4)
+        assert new == old + delta
+        assert after.native_bytes[new:new + size] == before.native_bytes[old:old + size]
+    assert codec.u32(after.native_bytes, 620) == 2
+
+
+@pytest.mark.parametrize('entry', [
+    image_entry(2, 0, 9), image_entry(1, 4, 9), image_entry(1, 0, 0),
+    image_entry(1, 0, 9)[:16] + b'\1\0\0\0' + image_entry(1, 0, 9)[20:],
+    image_entry(1, 0, 9)[:-1] + b'\1', image_entry(1, 0, 9, b'x' * 260),
+], ids=['number', 'bounds', 'empty', 'reserved', 'padding', 'unterminated-name'])
+def test_unrecognized_image_entry_fails_closed(entry):
+    with pytest.raises(ValueError, match='unsupported CaseCAT image entry'):
+        rewritten_job(image_files([entry], images=(b'II*\0image',)), lambda r: r.replace(0, 5, 'Hi'))
+
+
+def test_image_index_size_must_match_its_count():
+    files = image_files()
+    native = bytearray(files['jobs/example.sgngl'])
+    struct.pack_into('<I', native, 620, 3)
+    files['jobs/example.sgngl'] = bytes(native)
+    with pytest.raises(ValueError, match='unsupported CaseCAT image index'):
+        rewritten_job(files, lambda r: r.replace(0, 5, 'Hi'))
+
+
+@pytest.mark.parametrize('field', [596, 600, 608])
+def test_other_unknown_sections_still_fail_closed(field):
+    files = image_files()
+    native = bytearray(files['jobs/example.sgngl'])
+    struct.pack_into('<I', native, field, 1)
+    files['jobs/example.sgngl'] = bytes(native)
+    with pytest.raises(ValueError, match='unresolved native sections'):
+        rewritten_job(files, lambda r: r.replace(0, 5, 'Hi'))

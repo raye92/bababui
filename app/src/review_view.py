@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context, preview_ranges
+from shared.speaker_review import label_highlights
 
 
 def visible_text(text, empty):
@@ -85,8 +86,12 @@ class SpeakerCombo(QComboBox):
         event.ignore()
 
 
-def _attribution_edits(model, locations, needs_check):
-    """Find pending label replacements and uncertain labels in the actual diff."""
+def _attribution_edits(model, locations, needs_check, flagged=None):
+    """Find pending label replacements and uncertain labels in the actual diff.
+
+    Edits at labels that only the AI disputes, without voice or context
+    agreement, are added to `flagged` when a set is given.
+    """
     pending = sorted((p for p in locations if not p['resolved'] and p['start'] < p['end']),
                      key=lambda p: p['start'])
     if not pending:
@@ -121,6 +126,9 @@ def _attribution_edits(model, locations, needs_check):
                         mismatch = True
                 if mismatch or speaker in needs_check:
                     by_speaker.setdefault(speaker, set()).add(index)
+                if flagged is not None and location.get('decision') == 'flag':
+                    by_speaker.setdefault(speaker, set()).add(index)
+                    flagged.add(index)
     return by_speaker
 
 
@@ -140,6 +148,8 @@ class ReviewView(QWidget):
         self.speaker_edits = {}
         self.needs_review = frozenset()
         self.unmatched_speaker_ranges = ()
+        self.corrected_speaker_ranges = ()
+        self.speaker_label_ranges = ()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 4, 8, 4)
         self.count = QLabel()
@@ -211,6 +221,10 @@ class ReviewView(QWidget):
         self.review = review
         original, incoming = model.original, model.incoming
         self._speakers(original)
+        # Yellow labels: speakers the AI review corrected against Gemini, plus unmatched labels.
+        self.corrected_speaker_ranges = label_highlights((review or {}).get('speaker_review'), incoming.text)
+        self.speaker_label_ranges = tuple(sorted(set(self.unmatched_speaker_ranges)
+                                                 | set(self.corrected_speaker_ranges)))
         attribution = set().union(*self.speaker_edits.values())
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -291,9 +305,10 @@ class ReviewView(QWidget):
             if matches < 2 or (speaker not in overrides and uses[mapped] > 1):
                 needs_check.add(speaker)
         locations = (self.review or {}).get('locations', ())
-        self.speaker_edits = _attribution_edits(self.model, locations, needs_check)
+        flagged = set()
+        self.speaker_edits = _attribution_edits(self.model, locations, needs_check, flagged)
         self.needs_review = frozenset(index for speaker in needs_check
-                                      for index in self.speaker_edits.get(speaker, ()))
+                                      for index in self.speaker_edits.get(speaker, ())) | flagged
         self.unmatched_speaker_ranges = tuple(sorted(
             (p['start'], p['end']) for p in locations
             if not p['resolved'] and p['start'] < p['end'] and mappings.get(p['speaker']) is None))

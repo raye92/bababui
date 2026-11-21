@@ -717,7 +717,9 @@ class TranscriptEditor(QMainWindow):
                               bundle=doc.native.bundle, job=doc.native.job,
                               body_start=doc.native.body_position(doc.native.original),
                               vocabulary=(doc.native.notice.details.with_current_names(doc.native.original).vocabulary()
-                                          if doc.native.notice else ()))
+                                          if doc.native.notice else ()),
+                              context=(doc.native.notice.details.with_current_names(doc.native.original).speaker_context()
+                                       if doc.native.notice else ''))
             view.set_busy(True)
             doc.status = 'Starting...'
             doc.update_warnings()

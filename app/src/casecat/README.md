@@ -128,6 +128,15 @@ numbering are not fully rendered. See
 `C:/Users/caray/Documents/Code/REA/research/casecat_native/current-status.md`
 for exact evidence and boundaries.
 
+Pasted images are stored in section 548 with an image data index in section 612;
+header field 620 counts the entries. Each 304-byte entry holds an image number,
+the offset and size of its bytes within section 548, an identifier, a name, and
+the pixel size. No entry refers to a transcript position, so export moves both
+sections unchanged. Only that observed entry form is accepted. One sample job
+(`261106laimins_Scoped`, one 1247 x 1244 TIFF with no reference in the text stream)
+exported with identical image bytes and index. A placed image has not been
+checked, and the export has not yet been reopened in CaseCAT.
+
 The field/symbol check opened an exported sample in CaseCAT 22.1. Its Fill In Field
 dialog recognized both renamed and newly inserted EZ Speaker fields. Reveal Codes
 showed the inserted By-line, Orphan Control 2 lines, Field, and Question records.

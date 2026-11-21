@@ -1,0 +1,16 @@
+{
+  "id": "chunk-boundary-renumbering",
+  "title": "Gemini renumbers the examiner and the witness after a chunk boundary",
+  "context": "Witness (deponent): Dr. Ravi Shah.\nDefendant attorney: Lena Ortiz, Ortiz Law.\nApplicant attorney: Tom Grant, Grant Legal.\nDeposition noticed by the defendant side.",
+  "notes": [
+    "Unmatched speaker in chunk 2 assigned Speaker 4; review the identity.",
+    "Unmatched speaker in chunk 2 assigned Speaker 5; review the identity."
+  ],
+  "witness": "SPEAKER 1",
+  "asr": "[0:28:31] Speaker 2: And the second MRI was taken in June?\n[0:28:35] Speaker 1: Yes, on June 12.\n[0:28:39] Speaker 2: Did it show any change from the first one?\n[0:28:44] Speaker 1: A small increase in the disc bulge at L4-5.\n[0:28:51] Speaker 3: Counsel, can we take a short break after this line of questions?\n[0:28:55] Speaker 2: Sure, Tom.\n[0:29:08] Speaker 4: Doctor, did that increase change your impairment rating?\n[0:29:13] Speaker 5: No, it did not.\n[0:29:16] Speaker 4: Why not?\n[0:29:18] Speaker 5: The increase was within the normal range of measurement.",
+  "expected": "BY SPEAKER 2:\n     Q    And the second MRI was taken in June?\n     A    Yes, on June 12.\n     Q    Did it show any change from the first one?\n     A    A small increase in the disc bulge at L4-5.\n\n     SPEAKER 3:  Counsel, can we take a short break after this line of questions?\n\n     SPEAKER 2:  Sure, Tom.\n\nBY SPEAKER 2:\n     Q    Doctor, did that increase change your impairment rating?\n     A    No, it did not.\n     Q    Why not?\n     A    The increase was within the normal range of measurement.",
+  "clues": [
+    {"asr": "Doctor, did that increase change your impairment rating", "clue": "After the chunk boundary at 0:29:00, the examiner continues the same line of questions about the June MRI. SPEAKER 4 is SPEAKER 2 renumbered."},
+    {"asr": "No, it did not", "clue": "Only the doctor can say whether his own rating changed. SPEAKER 5 is SPEAKER 1 renumbered."}
+  ]
+}

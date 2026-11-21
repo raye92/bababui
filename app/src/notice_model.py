@@ -95,6 +95,22 @@ class NoticeDetails:
                 terms.setdefault(term.casefold(), term)
         return tuple(terms.values())
 
+    def speaker_context(self):
+        """Confirmed participants and parties, for reviewing who speaks each turn."""
+        lines = []
+        sentence = lambda text: text if text.endswith('.') else text + '.'
+        if self.deponent:
+            lines.append(sentence(f'Witness (deponent): {self.deponent}'))
+        for row in self.appearances:
+            if row.attorney or row.firm:
+                lines.append(sentence(f'{row.side} attorney: ' + ', '.join(x for x in (row.attorney, row.firm) if x)))
+        if self.taking_side:
+            lines.append(f'Deposition noticed by the {self.taking_side.lower()} side.')
+        for role, party in (('Plaintiff or applicant', self.plaintiff), ('Defendant', self.defendant)):
+            if party:
+                lines.append(sentence(f'{role}: {party}'))
+        return '\n'.join(lines)
+
     def with_current_names(self, revision):
         values = field_values(revision)
         appearances = sorted(self.appearances, key=lambda row: row.side != 'Applicant')

@@ -2,9 +2,12 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
+import tempfile
 from threading import Lock
 from types import SimpleNamespace
+from uuid import uuid4
 import wave
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -16,6 +19,7 @@ from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept, begin_review
+from shared.speaker_review import review_speakers
 from shared.storage import atomic_bytes
 
 
@@ -95,6 +99,7 @@ class Request:
     job: object = None
     vocabulary: tuple[str, ...] = ()
     body_start: int = 0
+    context: str = ''
 
 
 class ProcessingWorker(QThread):
@@ -126,6 +131,12 @@ class ProcessingWorker(QThread):
             text, warnings = transcription.text, list(transcription.warnings)
             report('Saving raw transcription...')
             save_raw_transcription(request.wav_path, text)
+            speakers = None
+            if request.review_model is not None and transcription.words:
+                # The raw export stays Gemini's stitched transcript, the baseline for these changes.
+                speakers = self._review_speakers(transcription, report)
+                text = speakers.text
+                warnings.extend(speakers.warnings)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
             alignment = None
@@ -141,7 +152,7 @@ class ProcessingWorker(QThread):
             if request.review_model is None:
                 self.succeeded.emit(request.document_id, result, warnings, alignment)
             else:
-                reviewed = self._review(result, report)
+                reviewed = self._review(result, report, alignment, speakers)
                 self.reviewed.emit(request.document_id, reviewed, warnings, alignment)
         except Exception as exc:
             message = str(exc) if isinstance(exc, (ValueError, OSError)) else 'API request failed. Check credentials, model access, or quota, then retry.'
@@ -149,6 +160,28 @@ class ProcessingWorker(QThread):
                 if request.config.get(key):
                     message = message.replace(request.config[key], '[REDACTED]')
             self.failed.emit(request.document_id, message)
+
+    def _review_speakers(self, transcription, report):
+        request = self.request
+
+        def complete(payload, prompt):
+            return self.processor_factory(request.config, request.review_model).complete(payload, prompt)
+
+        testing = request.config.get('testing', False)
+        folder = Path(tempfile.gettempdir())/'bababui-transcriptions'
+        name = f'speaker-review-{uuid4().hex}'
+
+        def save(entry):
+            atomic_bytes(folder/f'{name}-{entry["batch"]}.json',
+                         json.dumps(entry, ensure_ascii=False, indent=2).encode('utf-8'))
+        # Stitching notes say where a speaker number may have changed at a chunk join.
+        notes = [w for w in transcription.warnings if 'speaker' in w.casefold()]
+        result = review_speakers(transcription.words, complete, context=request.context, notes=notes,
+                                 progress=report, log=save if testing else None)
+        if testing:
+            atomic_bytes(folder/f'{name}-result.json',
+                         json.dumps(result.to_json(), ensure_ascii=False, indent=2).encode('utf-8'))
+        return result
 
     def _align(self, transcription):
         request = self.request
@@ -164,9 +197,10 @@ class ProcessingWorker(QThread):
         return align_speech(original, times, transcription.words,
                             transcription.duration_ms, transcription.wav_sha256)
 
-    def _review(self, text, report):
+    def _review(self, text, report, alignment=None, speakers=None):
         request = self.request
         from app.src.notice_review import split_revision, joined_snapshot, response_body
+        from app.src.speaker_votes import VoiceCheck
         from app.src.suggestion_filter import index_speaker_fields
         head = None
         original = request.original
@@ -174,8 +208,17 @@ class ProcessingWorker(QThread):
             head, original = split_revision(original, request.body_start)
             text = response_body(head.text, text)
         state = SimpleNamespace(original=original)
+        report('Checking disputed speaker labels...')
         off_record_undo = begin_review(state, text, exclude_off_record='off_record' not in request.disabled_rules,
-                                       index_fields=index_speaker_fields(head) if head is not None else None)
+                                       index_fields=index_speaker_fields(head) if head is not None else None,
+                                       voice=VoiceCheck.create(original, alignment, request.wav_path)
+                                       if alignment is not None else None)
+        if speakers is not None:
+            # Corrected-label highlights travel with every review snapshot, including Undo.
+            record = speakers.record()
+            state.review['speaker_review'] = record
+            if off_record_undo is not None:
+                off_record_undo = (*off_record_undo[:2], {**off_record_undo[2], 'speaker_review': record})
         before_rules = state.original, state.incoming, state.review
         auto_accept(state, disabled_rules=request.disabled_rules)
         after_rules = state.original, state.incoming, state.review
@@ -193,6 +236,8 @@ class ProcessingWorker(QThread):
         except (OSError, ValueError):
             after_ai = after_rules
             summary = 'AI-assisted review could not be applied and recorded. Edits remain pending.'
+        if speakers is not None:
+            summary = f'{speakers.summary} {summary}'
         if head is not None:
             off_record_undo, before_rules, after_rules, after_ai = (
                 joined_snapshot(head, head, snapshot) for snapshot in (off_record_undo, before_rules, after_rules, after_ai))

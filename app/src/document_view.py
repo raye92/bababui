@@ -15,7 +15,8 @@ from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, Playba
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
-from app.src.suggestion_filter import override_speaker, track_decisions, questionable_speaker_defaults
+from app.src.suggestion_filter import (override_speaker, track_decisions, questionable_speaker_defaults,
+                                       flagged_attributions)
 from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
 
@@ -484,7 +485,7 @@ class DocumentView(QWidget):
         self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
         self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
         self.inline_editor.set_model(
-            self.review_model, unmatched_speakers=self.diff_view.unmatched_speaker_ranges)
+            self.review_model, unmatched_speakers=self.diff_view.speaker_label_ranges)
         self._update_original_page()
         self.inline_page.fit_page()
         self.original_page.fit_page()
@@ -524,7 +525,7 @@ class DocumentView(QWidget):
                         mark.format.setFontUnderline(True)
                     marks.append(mark)
             if side == 'incoming' or not self.diff_view.has_changes:
-                for start, end in self.diff_view.unmatched_speaker_ranges:
+                for start, end in self.diff_view.speaker_label_ranges:
                     mark = QTextEdit.ExtraSelection()
                     mark.cursor = QTextCursor(editor.document())
                     mark.cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
@@ -611,12 +612,19 @@ class DocumentView(QWidget):
                     raise ValueError('These suggestions are stale. Refresh the review.')
                 ranges = self.review_model.ranges
                 questionable = questionable_speaker_defaults(before[2], ranges) if accept else []
-                if questionable:
-                    names = '\n'.join(f'{speaker} → {name}' for speaker, name in questionable)
+                flagged = flagged_attributions(before[2], ranges) if accept else 0
+                if questionable or flagged:
+                    parts = []
+                    if questionable:
+                        names = '\n'.join(f'{speaker} → {name}' for speaker, name in questionable)
+                        parts.append('These automatic names have zero matching passages or are shared by multiple speaker tags.\n\n'
+                                     f'{names}')
+                    if flagged:
+                        parts.append(f'{flagged} speaker {"change rests" if flagged == 1 else "changes rest"} on the AI '
+                                     'speaker label alone. They are marked Needs review.')
                     if QMessageBox.question(
                             self, 'Check speaker names',
-                            'These automatic names have zero matching passages or are shared by multiple speaker tags.\n\n'
-                            f'{names}\n\nAccept all suggestions with these names?',
+                            '\n\n'.join(parts) + '\n\nAccept all suggestions anyway?',
                             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
                         return
                 decision = lambda: resolve_all(*before[:2], ranges, accept)
@@ -766,7 +774,8 @@ class DocumentView(QWidget):
         self.capture_position()
         try:
             automatic_before = begin_document_review(self.document.native, text,
-                                            exclude_off_record='off_record' not in self.disabled_auto_accept_rules)
+                                            exclude_off_record='off_record' not in self.disabled_auto_accept_rules,
+                                            alignment=alignment, wav_path=self.document.wav_path)
         except ValueError as exc:
             self.document.status = str(exc)
             self.changed.emit()

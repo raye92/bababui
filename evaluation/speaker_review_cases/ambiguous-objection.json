@@ -1,0 +1,17 @@
+{
+  "id": "ambiguous-objection",
+  "title": "Objections that either of two attorneys may have made",
+  "context": "Witness (deponent): Dr. Helen Brooks.\nDefendant attorney: Ana Ruiz, Ruiz Law Group.\nApplicant attorney: Mark Lee, Lee & Associates.\nDefendant attorney: Omar Diaz, Diaz Partners.\nDeposition noticed by the defendant side.",
+  "witness": "SPEAKER 1",
+  "asr": "[0:00:03] Speaker 2: Good morning, Doctor. Ana Ruiz for the defendant, Acme Corporation.\n[0:00:08] Speaker 3: Mark Lee for the applicant.\n[0:00:11] Speaker 4: Omar Diaz for the codefendant, Valley Staffing.\n[0:00:15] Speaker 2: Doctor, is the applicant's back injury industrial?\n[0:00:19] Speaker 3: Objection. Foundation.\n[0:00:21] Speaker 2: You may answer, Doctor.\n[0:00:23] Speaker 1: I believe it is industrial.\n[0:00:27] Speaker 2: What is that opinion based on? Objection. Calls for speculation.\n[0:00:33] Speaker 1: It is based on the mechanism of injury he described.",
+  "expected": "     SPEAKER 2:  Good morning, Doctor.  Ana Ruiz for the defendant, Acme Corporation.\n\n     SPEAKER 3:  Mark Lee for the applicant.\n\n     SPEAKER 4:  Omar Diaz for the codefendant, Valley Staffing.\n\nEXAMINATION\nBY SPEAKER 2:\n     Q    Doctor, is the applicant's back injury industrial?\n\n     SPEAKER 3:  Objection.  Foundation.  [REVIEW 1]\n\n     SPEAKER 2:  You may answer, Doctor.\n\n     SPEAKER 1:  I believe it is industrial.\n\nBY SPEAKER 2:\n     Q    What is that opinion based on?\n\n     SPEAKER 2:  Objection.  Calls for speculation.  [REVIEW 2]\n\n     SPEAKER 1:  It is based on the mechanism of injury he described.\n\nREVIEW NOTES\n[REVIEW 1] SPEAKER 3, \"Objection. Foundation.\" Attorney colloquy, but SPEAKER 3 or SPEAKER 4 may have said it. Label kept as given.\n[REVIEW 2] SPEAKER 2, \"Objection. Calls for speculation.\" The examiner does not object to her own question, and SPEAKER 3 or SPEAKER 4 may have said it. Label kept as given.",
+  "flags": [
+    {"asr": "Objection. Foundation.", "reason": "Attorney colloquy that either nonexamining attorney may have made."},
+    {"asr": "Objection. Calls for speculation.", "reason": "A clear change of speaker, but either nonexamining attorney may have made it."}
+  ],
+  "clues": [
+    {"asr": "Objection. Foundation.", "clue": "An objection identifies attorney colloquy, not which attorney. SPEAKER 3 and SPEAKER 4 both do not examine."},
+    {"asr": "You may answer, Doctor", "clue": "The examiner tells the witness to answer. Same speaker as the question, formatted as colloquy instead of Q."},
+    {"asr": "Objection. Calls for speculation.", "clue": "The examiner does not object to her own question, so another person starts speaking at \"Objection\", but the objector is not established."}
+  ]
+}

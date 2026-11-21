@@ -1,0 +1,12 @@
+{
+  "id": "answer-inside-question",
+  "title": "The doctor's answer inside the examiner's turn",
+  "context": "Witness (deponent): Dr. Paul Chen.\nDefendant attorney: Ana Ruiz, Ruiz Law Group.\nDeposition noticed by the defendant side.",
+  "witness": "SPEAKER 1",
+  "asr": "[0:00:04] Speaker 2: Good morning, Doctor. My name is Ana Ruiz, and I represent the defendant. I'll be asking you some questions today.\n[0:00:12] Speaker 1: Good morning. I'm Dr. Paul Chen, the orthopedic evaluator in this case.\n[0:00:18] Speaker 2: Doctor, when did you examine him? I first examined him in March.\n[0:00:24] Speaker 2: What did you find at that March examination?\n[0:00:28] Speaker 1: Tenderness in the lower back and a reduced range of motion.",
+  "expected": "EXAMINATION\nBY SPEAKER 2:\n     Q    Good morning, Doctor.  My name is Ana Ruiz, and I represent the defendant.  I'll be asking you some questions today.\n     A    Good morning.  I'm Dr. Paul Chen, the orthopedic evaluator in this case.\n     Q    Doctor, when did you examine him?\n     A    I first examined him in March.\n     Q    What did you find at that March examination?\n     A    Tenderness in the lower back and a reduced range of motion.",
+  "clues": [
+    {"asr": "I first examined him in March", "clue": "The introductions make SPEAKER 2 the examiner and SPEAKER 1 the doctor. The doctor answers when he examined the applicant, so the split comes right before \"I first examined him\"."},
+    {"asr": "What did you find at that March examination", "clue": "The examiner follows up on the March examination the doctor just named."}
+  ]
+}

@@ -401,7 +401,14 @@ def test_bulk_review_resolves_remaining_suggestions_in_one_history_step(
     actions = {action.text(): action for action in native_window.edit_btn.menu().actions()}
     assert not {b.text() for b in native_window.findChildren(QPushButton)} & {'Accept All', 'Reject All'}
     assert actions[caption].isVisible() and actions[caption].isEnabled()
+    from PySide6.QtWidgets import QMessageBox
+    prompts = []
+    monkeypatch.setattr(QMessageBox, 'question',
+                        lambda *args, **kwargs: prompts.append(args[2]) or QMessageBox.Yes)
     actions[caption].trigger()
+    # Only the AI label disputes the two MR. LEISER lines, so accepting them is confirmed.
+    assert ['2 speaker changes rest on the AI speaker label alone' in p for p in prompts] == (
+        [True] if caption == 'Accept All' else [])
     if view._review_worker is not None:
         assert view._review_worker.wait(5000)
         app.processEvents()

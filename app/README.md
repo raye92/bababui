@@ -34,7 +34,22 @@ tags, and automatically saves the raw speaker-labeled text beside the WAV as
 `<wav-name>.raw.txt` before calling the editing model. This file is also written
 when cached transcription is reused, and remains available if editing fails.
 Each run replaces this raw export; save review edits in a separate file. The WAV
-folder must be writable. BABABUI then formats the transcription and writes the
+folder must be writable.
+
+With AI-assisted review on, the AI review model then checks speaker attribution
+and turn boundaries on the stitched Gemini transcript, before Q/A and colloquy
+formatting. It reviews every turn, using introductions, the current examiner, who
+is addressed, the preceding question, the following response, and the confirmed
+notice. It splits a turn at the first word the next person speaks and corrects a
+label when the exchange identifies one participant. Words, their order and their
+audio times never change, and the raw export stays Gemini's own transcript. When
+the exchange establishes only a role, such as an objection that either of two
+attorneys could have made, Gemini's label stays, the turn is formatted as its own
+colloquy paragraph, and a warning gives its audio time. In Incoming, a corrected
+speaker label is yellow, and only the reassigned part of a split turn. Converting a
+correct label to Q or A adds no highlight, and wording highlights are unchanged.
+
+BABABUI then formats the transcription and writes the
 result to Incoming. The current
 transcript is never sent to the model and stays unchanged until revisions are
 accepted. Only that tab is locked during processing; scrolling and view switching
@@ -111,6 +126,14 @@ speaker turns are matched in order. Changed words are highlighted inside
 paired passages. Accept and Reject apply to those passages. Numbered documents
 are wrapped and numbered again after each decision. Formatting alone does not
 create a pending change.
+
+When only the AI speaker tag disagrees with an existing speaker label, BABABUI
+checks two more sources. The voice check compares the turn's pitch with this
+job's own speakers, and the wording check uses reliable cues such as an
+objection or a turn that addresses counsel. If either supports the existing
+label, the label stays and no change appears. If either agrees with the AI tag,
+the change is suggested. Otherwise the card says Needs review, and Accept All
+asks before accepting it.
 
 Open the Settings tab for automated edits, AI models, and the Hotkeys reference.
 While reviewing a suggestion, **A** accepts it and **D** rejects it. With audio

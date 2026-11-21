@@ -207,6 +207,16 @@ def rewrite_group(tokens, target, *, paragraph_start=False, atoms=None):
     result, position = [], 0
     for token in tokens:
         if not token.text:
+            if (paragraph_start and not position and token.raw[:1] == b'\x16'
+                    and insertions.get(0, '').endswith('\n')):
+                # The control that opens the document renders no break. Whole
+                # paragraphs inserted above it go first, and the retained control
+                # supplies their closing boundary, as for a retained control below.
+                leading = encode_text(insertions.pop(0)[:-1], paragraph_start=True, atoms=atoms)
+                if not leading.startswith(b'\x16'):
+                    leading = b'\x16\xff\x00' + leading
+                result.append((token, leading, token.raw))
+                continue
             result.append((token, b'', token.raw))
             continue
         end = position + len(token.text)
@@ -257,6 +267,35 @@ def repair_history(stream):
     return bytes(result)
 
 
+IMAGE_ENTRY = 304
+
+
+def check_images(native):
+    """Accept pasted images only in the observed CATalyst 22.1 form.
+
+    Section 548 holds the image bytes and section 612 is the image data index;
+    header field 620 counts its entries. Each 304-byte entry holds a 1-based
+    image number, the offset and size of its bytes within section 548, a
+    four-byte identifier, a 260-byte name, and the pixel width and height. No
+    entry value is a transcript stream position, so both sections move as
+    whole blocks. Any other entry form fails closed.
+    """
+    count = u32(native, 620)
+    if not count:
+        return
+    data, data_size = u32(native, 548), u32(native, 552)
+    table, table_size = u32(native, 612), u32(native, 616)
+    if (not data or not table or table_size != count * IMAGE_ENTRY
+            or data + data_size > len(native) or table + table_size > len(native)):
+        raise ValueError('This job contains an unsupported CaseCAT image index.')
+    for number in range(1, count + 1):
+        entry = native[table + (number - 1) * IMAGE_ENTRY:table + number * IMAGE_ENTRY]
+        offset, image_size = u32(entry, 4), u32(entry, 8)
+        if (u32(entry, 0) != number or not image_size or offset + image_size > data_size
+                or u32(entry, 16) or 0 not in entry[20:280] or any(entry[284:])):
+            raise ValueError('This job contains an unsupported CaseCAT image entry.')
+
+
 def relocate(native, stream, positions):
     """Relocate the known section directory and every position-index entry.
 
@@ -267,8 +306,9 @@ def relocate(native, stream, positions):
     end, index, size = start + length, u32(native, 588), u32(native, 592)
     if start != 1024 or end > len(native) or index < end or index + size > len(native):
         raise ValueError('Unsupported native section layout.')
-    if any(u32(native, field) for field in (596, 600, 608, 620)):
+    if any(u32(native, field) for field in (596, 600, 608)):
         raise ValueError('This job contains unresolved native sections.')
+    check_images(native)
     # Header pairs written by the native 22.1 container writer. Their order on
     # disk is independent of their order in the header.
     section_fields = (540, 548, 556, 564, 572, 580, 588, 612, 632, 644)
