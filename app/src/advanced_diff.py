@@ -102,12 +102,13 @@ def text_edits(original, incoming):
     return result
 
 
-def paragraph_ops(left, right):
+def paragraph_ops(left, right, *, edits=None):
     """Map paragraphs using the advanced engine's inner correspondence.
 
     Paragraphs connected by an inner change or surviving text share one span.
     This retains split/join spans while exposing independent neighboring turns
     even when advanced diff displays them in the same outer comparison hunk.
+    Callers with exact native edit ranges can reuse that correspondence.
     """
     if not left:
         return [('insert', 0, 0, 0, len(right))] if right else []
@@ -140,9 +141,10 @@ def paragraph_ops(left, right):
                 connect(i, j)
             x, z = x + take, z + take
 
-    edits = text_edits(a, b)
+    if edits is None:
+        edits = text_edits(a, b)
     previous_a = previous_b = 0
-    for x, y, z, w in edits + [(len(a), len(a), len(b), len(b))]:
+    for x, y, z, w in [*edits, (len(a), len(a), len(b), len(b))]:
         equal(previous_a, x, previous_b)
         previous_a, previous_b = y, w
     for x, y, z, w in edits:

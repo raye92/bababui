@@ -10,8 +10,8 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
-from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
-from app.src.suggestions import preview_ranges
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND, draw_focus_outlines
+from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start
 
 
 def _qt(text):
@@ -59,73 +59,24 @@ class BoundaryMark:
     empty: bool
 
 
-def _common_ranges(model):
-    """Map common source text using the existing decisions, never a new diff."""
-    left, right = model.original.text, model.incoming.text
-    result, a, c = [], 0, 0
-    ranges = sorted({span for edit in model.edits for span in edit.ranges})
-    for x, y, z, w in ranges + [(len(left), len(left), len(right), len(right))]:
-        if a <= x and c <= z and left[a:x] == right[c:z]:
-            result.append((a, x, c, z))
-        a, c = y, w
-    return result
-
-
-def _row_groups(model, old_rows, new_rows, common):
-    """Use matched native rows as display anchors around local changed groups.
-
-    Correspondence comes from source offsets, so repeated wording cannot align
-    with the wrong occurrence. A changed wrap can span several rows until the
-    source layouts meet again. This grouping never creates review decisions.
-    """
-    def extent(row, text):
-        end = row.source_end
-        return end+1 if end < len(text) and text[end] == '\n' else end
-
-    anchors = []
-    for index, row in enumerate(old_rows):
-        end = extent(row, model.original.text)
-        for a, b, c, d in common:
-            if a <= row.source_start <= end <= b:
-                anchors.append((index, c+row.source_start-a, c+end-a))
-                break
-
-    def incoming_rows(start, end, reference):
-        result = []
-        for row in new_rows:
+def _row_groups(model, old_rows, new_rows):
+    pairs = model.compare_rows([(r.source_start, r.source_end) for r in old_rows],
+                               [(r.source_start, r.source_end) for r in new_rows])
+    for old_slice, new_slice, section in pairs:
+        original = old_rows[old_slice]
+        start, end = section.incoming_range
+        if not section.edit_indices:
+            yield original, [], section
+            continue
+        incoming = []
+        for row in new_rows[new_slice]:
             a, b = max(start, row.source_start), min(end, row.source_end)
-            # Empty native rows belong only to their actual source boundary.
-            # The clipped start can equal this group's start even when the
-            # empty row is far earlier in the transcript.
-            if a >= b and not (row.source_start == row.source_end
-                               and start <= row.source_start < end):
+            if a >= b and not (row.source_start == row.source_end and start <= row.source_start <= end):
                 continue
-            result.append(replace(row, source_start=a, source_end=b,
-                                  text=row.text[a-row.source_start:b-row.source_start],
-                                  x=reference.x if not result and reference else row.x))
-        return result
-
-    old_index = incoming_position = 0
-    for x, y, end in anchors + [(len(old_rows), len(model.incoming.text), len(model.incoming.text))]:
-        if x > old_index or y > incoming_position:
-            a = old_rows[old_index].source_start if old_index < len(old_rows) else len(model.original.text)
-            b = old_rows[x].source_start if x < len(old_rows) else len(model.original.text)
-            c, d = incoming_position, y
-            indices = tuple(index for index, edit in enumerate(model.edits) if any(
-                (a < q and b > p) or (c < s and d > r)
-                or (p == q and a <= p <= b) or (r == s and c <= r <= d)
-                for p, q, r, s in edit.ranges))
-            old_group = old_rows[old_index:x]
-            yield old_group, incoming_rows(c, d, old_group[0] if old_group else None), indices, False
-        if x < len(old_rows):
-            # The Original page supplies shared row breaks. A shorter proposal
-            # must not duplicate every following line merely because its own
-            # preview can fit another word on the preceding line.
-            row = old_rows[x]
-            matched = replace(row, kind='incoming', source_start=y,
-                              source_end=y+row.source_end-row.source_start)
-            yield [row], [matched], (), True
-        old_index, incoming_position = x+1, end
+            incoming.append(replace(row, source_start=a, source_end=b,
+                                    text=row.text[a-row.source_start:b-row.source_start],
+                                    x=original[0].x if original and not incoming else row.x))
+        yield original, incoming, section
 
 
 def _compact(row):
@@ -206,11 +157,12 @@ class InlineReviewEditor(QTextEdit):
     def __init__(self, font=None, parent=None):
         super().__init__(parent)
         self.model = None
-        self.rows, self.pages, self.shared_ranges = [], [], []
+        self.rows, self.pages = [], []
         self.boundary_marks = []
         self.source_editors = None
         self._external_sources = False
         self._current_edit = -1
+        self._focus_rects = []
         self._source_highlight = None
         self._page_width, self._page_height = 800., 1200.
         self._font = QFont(font or QFont('Courier New', 12))
@@ -239,6 +191,7 @@ class InlineReviewEditor(QTextEdit):
     def set_model(self, model, *, unmatched_speakers=()):
         anchor = self.source_position() if self.rows else ('original', 0)
         self.model = model
+        self._highlight_ranges = [preview_ranges(edit) for edit in model.edits]
         original, incoming = self._sources(model)
         self._page_width, self._page_height = original._page_width, original._page_height
         self._left, self._right = original._left, original._right
@@ -246,28 +199,28 @@ class InlineReviewEditor(QTextEdit):
         self._line_height = original._line_height
         self.setFont(original.font())
         self.document().setDefaultFont(original.font())
-        self.rows, self.shared_ranges = [], []
+        self.rows = []
         old_rows, new_rows = _native_rows(original, 'original'), _native_rows(incoming, 'incoming')
-        self.shared_ranges = _common_ranges(model)
         native_geometry = {(row.source_start, row.source_end): (row.y, row.pitch) for row in old_rows}
 
         extra = [0.] * max(1, original.document().pageCount())
         old_index, added_height = 0, 0.
 
-        def append_original(row, section_index=-1, edits=(), matched=None):
+        def append_original(row, section_index=-1, edits=(), incoming_start=None):
             row.kind = 'original' if section_index >= 0 else 'equal'
             row.section, row.edit_indices = section_index, edits
             row.y += added_height
             if row.kind == 'equal':
-                row.incoming_start = matched.source_start
+                row.incoming_start = incoming_start
             self.rows.append(row)
 
-        for section_index, (old_group, new_group, edits, shared) in enumerate(
-                _row_groups(model, old_rows, new_rows, self.shared_ranges)):
-            if shared:
-                append_original(old_group[0], matched=new_group[0])
+        for section_index, (old_group, new_group, section) in enumerate(_row_groups(model, old_rows, new_rows)):
+            edits = section.edit_indices
+            if not edits:
+                append_original(old_group[0], incoming_start=section.incoming_range[0])
                 old_index += 1
                 continue
+            first_row = len(self.rows)
             reference = (old_group[-1] if old_group else
                          old_rows[min(old_index, len(old_rows)-1)]) if old_rows else None
             page = reference.page if reference else 1
@@ -285,7 +238,7 @@ class InlineReviewEditor(QTextEdit):
                     old_index += 1
                 y += added_height
             else:
-                a = reference.source_start if reference else len(model.original.text)
+                a = section.original_range[0]
                 y = reference.y+added_height if reference else self._top+added_height
                 baseline_end = y
                 row = _compact(ReviewRow('original', a, a, '', page, 0, page, 0,
@@ -305,8 +258,7 @@ class InlineReviewEditor(QTextEdit):
                 self.rows.append(projected)
                 y += row.pitch
             if not new_group:
-                c = next((span[2]+reference.source_end-span[0] for span in self.shared_ranges
-                          if span[0] <= reference.source_end <= span[1]), len(model.incoming.text))
+                c = section.incoming_range[0]
                 row = _compact(ReviewRow('incoming', c, c, '', page, 0, page, 0,
                                         y, self._left, self._line_height,
                                         reference.leading if reference else 0, incoming.font(),
@@ -314,6 +266,18 @@ class InlineReviewEditor(QTextEdit):
                                         glyph_height=reference.glyph_height if reference else 0))
                 self.rows.append(row)
                 y += row.pitch
+            if len(edits) > 1:
+                for row in self.rows[first_row:]:
+                    text = getattr(model, row.kind).text
+                    # Both lines touch an edited paragraph separator. Context
+                    # elsewhere in the pair belongs to its nearest decision.
+                    start, end = row.source_start, row.source_end
+                    start -= int(start > 0 and text[start - 1] == '\n')
+                    end += int(end < len(text) and text[end] == '\n')
+                    distances = {i: distance_to_ranges(self._highlight_ranges[i], row.kind, start, end)
+                                 for i in edits}
+                    nearest = min(distances.values())
+                    row.edit_indices = tuple(i for i in edits if distances[i] == nearest)
             amount = max(0, y-baseline_end)
             added_height += amount
             extra[page-1] += amount
@@ -343,7 +307,7 @@ class InlineReviewEditor(QTextEdit):
         self._render_document(unmatched_speakers)
         self.boundary_marks = []
         for index, edit in enumerate(model.edits):
-            preview = preview_ranges(edit)
+            preview = self._highlight_ranges[index]
             for span in edit.ranges:
                 a, b, c, d = span
                 for side, start, end in (('original', a, b), ('incoming', c, d)):
@@ -352,7 +316,7 @@ class InlineReviewEditor(QTextEdit):
                     content = getattr(model, side).text[start:end]
                     if start != end and (content.strip() or '\n' not in content):
                         continue
-                    position = self.display_position(side, start)
+                    position = self.display_position(side, start, edit_index=index)
                     if position is not None:
                         self.boundary_marks.append(BoundaryMark(side, index, position, start == end))
         side, position = anchor
@@ -399,7 +363,7 @@ class InlineReviewEditor(QTextEdit):
                 cursor.setCharFormat(char)
                 if row.kind != 'equal':
                     for index in row.edit_indices:
-                        for a, b, c, d in preview_ranges(self.model.edits[index]):
+                        for a, b, c, d in self._highlight_ranges[index]:
                             start, end = (a, b) if row.kind == 'original' else (c, d)
                             start, end = max(start, row.source_start), min(end, row.source_end)
                             if start >= end:
@@ -434,21 +398,24 @@ class InlineReviewEditor(QTextEdit):
                 measured.append((row, layout.lineAt(0).y(), block.blockFormat().lineHeight()))
             # Batch margin updates so Qt lays out the full review only once.
             cursor.beginEditBlock()
-            previous_origin = previous_height = 0
+            previous_bottom = 0
             for index, (row, leading, height) in enumerate(measured):
-                origin = row.y-leading
+                # A changed table can put both caption columns in reading order.
+                # Qt stacks those blocks, even when their native rows share a y.
+                origin = max(previous_bottom, row.y - leading)
+                row.y = origin + leading
                 cursor.setPosition(row.display_start)
                 block = cursor.blockFormat()
                 if index == 0:
                     fmt = frame.frameFormat()
-                    fmt.setTopMargin(max(0, origin))
+                    fmt.setTopMargin(origin)
                     frame.setFrameFormat(fmt)
                 else:
-                    block.setTopMargin(max(0, origin-previous_origin-previous_height))
+                    block.setTopMargin(origin - previous_bottom)
                 cursor.setBlockFormat(block)
-                previous_origin, previous_height = origin, height
+                previous_bottom = origin + height
             fmt = frame.frameFormat()
-            bottom = (self.pages[-1].top+self.pages[-1].height-previous_origin-previous_height
+            bottom = (self.pages[-1].top+self.pages[-1].height-previous_bottom
                       if self.pages else self._bottom)
             fmt.setBottomMargin(max(0, bottom))
             frame.setFrameFormat(fmt)
@@ -477,9 +444,11 @@ class InlineReviewEditor(QTextEdit):
     def source_position(self):
         return self._source_at(self.textCursor().position())
 
-    def display_position(self, side, position):
+    def display_position(self, side, position, *, edit_index=None):
         candidates = []
         for row in self.rows:
+            if edit_index is not None and edit_index not in row.edit_indices:
+                continue
             if row.caption_cell:
                 column, original, incoming, length = row.caption_cell
                 cell_start = original if side == 'original' else incoming
@@ -492,15 +461,17 @@ class InlineReviewEditor(QTextEdit):
             else:
                 continue
             end = start + (row.source_end - row.source_start if row.caption_cell else len(row.text))
-            if start <= position <= end:
-                candidates.append((position == end and start != end,
-                                   row.display_start+_qt(row.text[:position-start])))
+            local = max(start, min(position, end))
+            if local == position or edit_index is not None:
+                # A changed separator can sit just before its owned empty row.
+                candidates.append((abs(local - position), local == end and start != end,
+                                   row.display_start + _qt(row.text[:local - start])))
         if candidates:
-            return min(candidates)[1]
+            return min(candidates)[2]
         return None
 
-    def set_source_position(self, side, position, keep_anchor=False):
-        display = self.display_position(side, position)
+    def set_source_position(self, side, position, keep_anchor=False, *, edit_index=None):
+        display = self.display_position(side, position, edit_index=edit_index)
         if display is None:
             return False
         cursor = self.textCursor()
@@ -567,34 +538,30 @@ class InlineReviewEditor(QTextEdit):
                 break
         row = self._row_at(caret)
         if index is None and row and row.edit_indices:
-            side, position = self._source_at(caret)
-            candidates = []
-            for candidate in row.edit_indices:
-                for a, b, c, d in self.model.edits[candidate].ranges:
-                    start, end = (a, b) if side == 'original' else (c, d)
-                    distance = max(start-position, position-end, 0)
-                    candidates.append((distance, candidate))
-            if candidates:
-                index = min(candidates)[1]
+            side, position = playback
+            index = min(row.edit_indices, key=lambda i: distance_to_ranges(
+                self.model.edits[i].ranges, side, position, position))
         if index is not None:
-            self._current_edit = index
-            self._refresh_selections()
             self.selected.emit(index)
         self.source_activated.emit(*playback)
+
+    def highlight_edit(self, index):
+        if self._current_edit != index:
+            self._current_edit = index
+            self._refresh_selections()
 
     def focus_edit(self, index):
         if self.model is None or not 0 <= index < len(self.model.edits):
             return
-        self._current_edit = index
+        self.highlight_edit(index)
         change = self.model.edits[index]
         if change.ranges:
-            a, b, c, d = change.ranges[0]
-            side, position = ('original', a) if a != b else ('incoming', c)
-            if self.set_source_position(side, position):
+            a, b, _, _ = change.ranges[0]
+            side = 'original' if a != b else 'incoming'
+            if self.set_source_position(side, preview_start(change, side), edit_index=index):
                 self.ensureCursorVisible()
                 rect = self.cursorRect()
                 self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().value()+rect.y()-self.viewport().height()//2))
-        self._refresh_selections()
 
     def set_source_highlight(self, side, start, end):
         self._source_highlight = side, start, end
@@ -606,13 +573,9 @@ class InlineReviewEditor(QTextEdit):
 
     def _refresh_selections(self):
         marks = []
-        intervals = []
-        if self.model is not None and 0 <= self._current_edit < len(self.model.edits):
-            for a, b, c, d in preview_ranges(self.model.edits[self._current_edit]):
-                intervals.extend([('original', a, b, False), ('incoming', c, d, False)])
+        focused_rows = {i for i, row in enumerate(self.rows) if self._current_edit in row.edit_indices}
         if self._source_highlight:
-            intervals.append((*self._source_highlight, True))
-        for side, start, end, audio in intervals:
+            side, start, end = self._source_highlight
             for row in self.rows:
                 if side == 'incoming' and row.kind == 'equal' and row.incoming_start is not None:
                     source_start = row.incoming_start
@@ -627,12 +590,18 @@ class InlineReviewEditor(QTextEdit):
                 mark.cursor = QTextCursor(self.document())
                 mark.cursor.setPosition(row.display_start+_qt(row.text[:left-source_start]))
                 mark.cursor.setPosition(row.display_start+_qt(row.text[:right-source_start]), QTextCursor.KeepAnchor)
-                if audio:
-                    mark.format.setBackground(QColor(120, 165, 220, 85))
-                else:
-                    mark.format.setFontUnderline(True)
+                mark.format.setBackground(QColor(120, 165, 220, 85))
                 marks.append(mark)
         super().setExtraSelections(marks)
+        self._focus_rects = []
+        for index in sorted(focused_rows):
+            row = self.rows[index]
+            band = QRectF(row.x, row.y, self._page_width - row.x, row.pitch)
+            if index - 1 in focused_rows and self.rows[index - 1].page == row.page:
+                self._focus_rects[-1] = self._focus_rects[-1].united(band)
+            else:
+                self._focus_rects.append(band)
+        self.viewport().update()
 
     def _update_scroll_range(self):
         if self.pages:
@@ -717,6 +686,7 @@ class InlineReviewEditor(QTextEdit):
             painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else ADDITION_BACKGROUND))
             painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
             painter.drawText(rect, Qt.AlignCenter, '↵')
+        draw_focus_outlines(painter, self, self._focus_rects)
 
     def boundary_rect(self, marker):
         cursor = QTextCursor(self.document())

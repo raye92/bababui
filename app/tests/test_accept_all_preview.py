@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtCore import QPointF, Qt, QUrl
 from PySide6.QtGui import QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QLabel
 
 from app.tests.test_inline_integration import audio_review
 from app.tests.test_native_editor import native_window, source_zip
@@ -31,6 +32,29 @@ def visible_preview(view):
     wait_until(lambda: view.active_view() not in ordinary_views
                and view.active_view().toPlainText() == view.document.incoming)
     return view.active_view()
+
+
+def has_outline_edge(image, x, y):
+    scale = image.devicePixelRatio()
+    xs = range(round((x - 2) * scale), round((x + 2) * scale) + 1)
+    for dy in range(-2, 3):
+        row = round((y + dy) * scale)
+        if not any(image.pixelColor(px, row).name() == '#d4a000' for px in xs):
+            return False
+    return True
+
+
+def outline_edges(preview, word):
+    selection = preview.document().find(word)
+    assert selection.hasSelection()
+    cursor = QTextCursor(preview.document())
+    cursor.setPosition(selection.selectionStart())
+    first = preview.cursorRect(cursor)
+    cursor.setPosition(selection.selectionEnd())
+    last = preview.cursorRect(cursor)
+    image = preview.viewport().grab().toImage()
+    center = first.center().y()
+    return has_outline_edge(image, first.x(), center), has_outline_edge(image, last.x(), center)
 
 
 def test_preview_matches_accepted_native_layout_and_highlights_only_changes(native_window):
@@ -64,7 +88,9 @@ def test_preview_matches_accepted_native_layout_and_highlights_only_changes(nati
     assert all(fmt.background().style() == Qt.NoBrush for fmt in formats)
     marks = [mark for mark in preview.extraSelections() if mark.format.background().style() != Qt.NoBrush]
     assert 'information' in [mark.cursor.selectedText() for mark in marks]
+    assert outline_edges(preview, 'information') == (True, True)
     assert {mark.format.background().color().name() for mark in marks} == {'#9edcb0'}
+    assert not any(mark.format.fontUnderline() for mark in marks)
     assert all(not mark.format.boolProperty(QTextFormat.FullWidthSelection) for mark in marks)
 
     accept_all = next(a for a in native_window.edit_btn.menu().actions() if a.text() == 'Accept All')
@@ -104,6 +130,79 @@ def test_preview_option_is_per_tab_and_accessible_from_incoming(native_window, t
     assert view.active_view() is view.inline_editor
 
 
+def test_preview_draws_one_outline_across_wraps_and_paragraphs(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('Opening.\nClosing.')
+    added = 'The half-pink form was included with the other signed forms. ' * 3
+    view.receive('Opening.\n' + added.rstrip() + '\n\nA short final line.\nClosing.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    assert len(view.review_model.edits) == 1
+    lines = []
+    for number in (1, 2, 3):
+        block = preview.document().findBlockByNumber(number)
+        bounds = preview.document().documentLayout().blockBoundingRect(block)
+        layout = block.layout()
+        lines.extend(layout.lineAt(i).naturalTextRect().translated(bounds.topLeft())
+                     for i in range(layout.lineCount()))
+    assert len(lines) > 3
+    left = min(rect.left() for rect in lines if rect.width()) - preview.horizontalScrollBar().value()
+    right = max(rect.right() for rect in lines) - preview.horizontalScrollBar().value()
+    image = preview.viewport().grab().toImage()
+    for line in lines:
+        y = line.center().y() - preview.verticalScrollBar().value()
+        assert has_outline_edge(image, left, y) and has_outline_edge(image, right, y)
+    scale = image.devicePixelRatio()
+    middle = round((left + right) / 2 * scale)
+    border = [image.pixelColor(middle, y).name() == '#d4a000' for y in range(image.height())]
+    assert sum(on and not previous for previous, on in zip([False] + border, border)) == 2
+
+
+def test_preview_outlines_the_green_word_at_a_text_direction_change(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('שלום black example.')
+    view.receive('שלום pink example.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    image = preview.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    y = preview.cursorRect(preview.document().find('pink')).center().y()
+    colors = [image.pixelColor(x, round(y * scale)).name() for x in range(image.width())]
+    green = [i for i, color in enumerate(colors) if color == '#9edcb0']
+    yellow = [i for i, color in enumerate(colors) if color == '#d4a000']
+    assert 0 < min(green) - min(yellow) <= 4 * scale
+    assert 0 < max(yellow) - max(green) <= 4 * scale
+
+
+@pytest.mark.parametrize('original,proposal', [
+    ('ready for review', '"ready for review"'),
+    ('"ready for review"', 'ready for review'),
+    ('"ready for review"', 'ready for review!'),
+])
+def test_preview_uses_one_outline_for_both_ends_of_a_quotation(native_window, tmp_path, original, proposal):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText(f'He said {original}, then left.')
+    view.receive(f'He said {proposal}, then left.', [])
+    change, = view.review_model.edits
+    assert len(change.ranges) == 2
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    image = preview.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    cursor = QTextCursor(preview.document())
+    cursor.setPosition(change.ranges[0][2])
+    first = preview.cursorRect(cursor)
+    cursor.setPosition(change.ranges[-1][3])
+    last = preview.cursorRect(cursor)
+    y = first.center().y()
+    assert has_outline_edge(image, first.x(), y) and has_outline_edge(image, last.x(), y)
+    interior = range(round((first.x() + 4) * scale), round((last.x() - 4) * scale))
+    assert all(image.pixelColor(x, round(y * scale)).name() != '#d4a000' for x in interior)
+
+
 @pytest.mark.parametrize('accepted', [True, False])
 def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_window, audio_review, accepted, request):
     view = audio_review
@@ -112,6 +211,8 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     action.trigger()
     preview = visible_preview(view)
     assert view.diff_view.current == 0
+    assert outline_edges(preview, 'Orange') == (True, True)
+    assert outline_edges(preview, 'copper') == (False, False)
     player = view.playback.player
     request.addfinalizer(lambda: player.setSource(QUrl()))
     player.setPosition(20000)
@@ -130,6 +231,8 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     projected = page.mapFromScene(page.proxy.mapToScene(QPointF(surface_point)))
     QTest.mouseClick(page.viewport(), Qt.LeftButton, pos=projected)
     assert view.diff_view.current == 1
+    assert outline_edges(preview, 'Orange') == (False, False)
+    assert outline_edges(preview, 'copper') == (True, True)
     assert 10840 <= player.position() <= 11040
     assert not player.isPlaying()
     before = doc.original, doc.incoming
@@ -169,6 +272,58 @@ def test_switching_preview_keeps_the_visible_passage(native_window, tmp_path):
     wait_until(lambda: editor.page_lines()[editor.center_line()].text == anchor)
 
 
+def test_speaker_card_follows_the_displayed_page_and_line(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    original = ('MS. LIN: This testimony refers to the signed contract.\n'
+                'MS. LIN: The schedule was attached to the last page.\n'
+                'MS. LIN JONES: Everyone received a copy the next morning.')
+    view.editor.setPlainText(original)
+    extra = ''.join(f'Additional testimony {i}.\n' for i in range(28))
+    view.receive(extra + original.replace('MS. LIN:', 'SPEAKER 1:')
+                 .replace('MS. LIN JONES:', 'SPEAKER 1:'), [])
+    sidebar = view.diff_view
+    sidebar.filter_speaker('SPEAKER 1')
+    assert len(sidebar.visible_indices) == 1
+
+    def location(editor):
+        line = next(line for line in editor.page_lines() if 'Everyone received' in line.text)
+        return f'Page {line.page}, line {line.number}'
+
+    def heading():
+        return sidebar.cards[sidebar.current].findChild(QLabel).text()
+
+    original_location = location(view.editor)
+    assert original_location in heading()
+    action = preview_action(native_window)
+    action.trigger()
+    preview_location = location(visible_preview(view))
+    assert preview_location != original_location
+    assert preview_location in heading()
+    native_window.toggle_view_btn.click()
+    assert location(view.incoming_editor) in heading()
+    native_window.toggle_view_btn.click()
+    assert preview_location in heading()
+    action.trigger()
+    assert original_location in heading()
+
+
+def test_preview_locates_first_visible_addition_after_a_page_break(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    original = '\n'.join(f'Testimony {i}.' for i in range(25))
+    view.editor.setPlainText(original)
+    view.receive(original + '\nMS. LIN: Good afternoon.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    view.diff_view.select(0)
+
+    line = next(line for line in preview.page_lines() if 'Good afternoon.' in line.text)
+    assert (line.page, line.number) == (2, 1)
+    assert 'Page 2, line 1' in view.diff_view.cards[0].findChild(QLabel).text()
+    assert preview.textCursor().position() == line.position
+
+
 @pytest.mark.parametrize('change', ['paragraph break', 'deletion', 'metadata'])
 def test_preview_keeps_suggestions_without_added_text_in_the_sidebar(native_window, tmp_path, change):
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
@@ -188,6 +343,7 @@ def test_preview_keeps_suggestions_without_added_text_in_the_sidebar(native_wind
     preview = visible_preview(view)
     assert not any(mark.format.background().style() != Qt.NoBrush for mark in preview.extraSelections())
     assert len(view.review_model.edits) == 1 and view.diff_view.has_current
+    assert not preview._focus_rect().isEmpty()
     view.diff_view.decision_buttons[0].click()
     wait_until(lambda: not view.document.busy)
     assert not view.review_model.edits

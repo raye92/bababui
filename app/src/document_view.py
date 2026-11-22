@@ -14,7 +14,7 @@ from app.src.page_view import PageView
 from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, PlaybackBar
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
-from app.src.suggestions import preview_ranges, resolve, resolve_all, text_edits
+from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start, resolve, resolve_all, text_edits
 from app.src.suggestion_filter import override_speaker, track_decisions, questionable_speaker_defaults
 from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
@@ -113,6 +113,7 @@ class DocumentView(QWidget):
         self.preview_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.diff_view = ReviewView()
         self.diff_view.requested.connect(self._start_review)
+        self.diff_view.selection_changed.connect(self.highlight_suggestions)
         self.diff_view.selected.connect(self.select_suggestion)
         self.diff_view.navigated.connect(self._seek_selected_suggestion)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
@@ -153,8 +154,8 @@ class DocumentView(QWidget):
             self.setup_playback(layout)
         self.editor.textChanged.connect(self._original_changed)
         self.incoming_editor.textChanged.connect(self._incoming_changed)
-        self.refresh()
         self.stack.setCurrentIndex(document.view)
+        self.refresh()
         self.schedule_restore()
 
     def offer_notice(self):
@@ -444,6 +445,12 @@ class DocumentView(QWidget):
             if (self.playback and not self.stack.currentIndex()
                     and self.preview_page in (previous, page)):
                 self.playback.show_position(self.playback.player.position())
+        if self.diff_view.has_changes:
+            editor = self.active_view()
+            if editor is self.inline_editor:
+                editor = self.editor
+            side = 'original' if editor is self.editor else 'incoming'
+            self.diff_view.set_page_lines(editor.page_lines() if editor is not None else (), side)
 
     @Slot(object, object, str)
     def _finish_accept_all_preview(self, model, result, error):
@@ -458,7 +465,8 @@ class DocumentView(QWidget):
             self.set_accept_all_preview(False)
             return
         job, prepared = result
-        self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, self.diff_view.current)
+        selected = self.diff_view.current if self.diff_view.has_current else -1
+        self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, selected)
         self._preview_model = model
         self._update_original_page()
         if not self.stack.currentIndex():
@@ -482,7 +490,7 @@ class DocumentView(QWidget):
         self._set_text(self.editor, doc.original, previews.get('original'))
         self._set_text(self.incoming_editor, doc.incoming, previews.get('incoming'))
         self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
-        self.diff_view.set_model(self.review_model, review=doc.native.review, page_lines=self.editor.page_lines())
+        self.diff_view.set_model(self.review_model, review=doc.native.review)
         self.inline_editor.set_model(
             self.review_model, unmatched_speakers=self.diff_view.unmatched_speaker_ranges)
         self._update_original_page()
@@ -490,20 +498,24 @@ class DocumentView(QWidget):
         self.original_page.fit_page()
         self.incoming_page.fit_page()
         self.diff_view.setVisible(self.diff_view.has_changes or bool((doc.native.review or {}).get('evidence', {}).get('speakers')))
-        self.highlight_suggestions()
         self._updating = False
+        self.highlight_suggestions()
         self.set_busy(doc.busy)
         if anchor is not None and not self._preview_matches(previous_model):
             self._restore_review_position(anchor, (previous_model.original, previous_model.incoming))
 
     def highlight_suggestions(self):
+        if self._updating:
+            return
+        selected = self.diff_view.current if self.diff_view.has_current else -1
+        self.inline_editor.highlight_edit(selected)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             text = getattr(self.document, side)
             marks, insertions = [], []
             for index, change in enumerate(self.diff_view.changes):
                 for a, b, c, d in preview_ranges(change):
                     start, end = (a, b) if side == 'original' else (c, d)
-                    if index == self.diff_view.current:
+                    if index == selected:
                         focus = QTextEdit.ExtraSelection()
                         focus.cursor = QTextCursor(editor.document())
                         focus.cursor.setPosition(len(text[:start].encode('utf-16-le')) // 2)
@@ -519,9 +531,8 @@ class DocumentView(QWidget):
                     mark.cursor.setPosition(len(text[:end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
                     mark.format.setBackground(QColor('#ffd7d5' if side == 'original' else '#ccffd8'))
                     mark.format.setForeground(QColor('#82071e' if side == 'original' else '#116329'))
-                    if index == self.diff_view.current:
+                    if index == selected:
                         mark.format.setBackground(QColor('#ffaaa5' if side == 'original' else '#7ee2a8'))
-                        mark.format.setFontUnderline(True)
                     marks.append(mark)
             if side == 'incoming' or not self.diff_view.has_changes:
                 for start, end in self.diff_view.unmatched_speaker_ranges:
@@ -532,10 +543,10 @@ class DocumentView(QWidget):
                     mark.format.setBackground(QColor(CHECK_BACKGROUND))
                     mark.format.setForeground(QColor(CHECK_FOREGROUND))
                     marks.append(mark)
-            editor._selected_review = self.diff_view.current
+            editor._selected_review = selected
             editor.set_review_marks(marks, insertions)
         if self._preview_matches(self._preview_model):
-            self.preview_editor.highlight_edit(self.diff_view.current)
+            self.preview_editor.highlight_edit(selected)
 
     def select_inline(self, index):
         if self._review_worker is not None:
@@ -553,16 +564,15 @@ class DocumentView(QWidget):
         inline_selection = getattr(self, '_inline_selection', False)
         if not inline_selection:
             self.inline_editor.focus_edit(index)
-        self.highlight_suggestions()
         if change.ranges and not (inline_selection and self._showing_accept_all_preview()):
-            self._focus_passage(change.ranges[0])
+            self._focus_passage(preview_start(change, 'original'), preview_start(change, 'incoming'))
 
-    def _focus_passage(self, span):
+    def _focus_passage(self, original_start, incoming_start):
+        self._restore_timer.stop()
+        self._restore_source = None
+        self._position_pending = False
         if self._showing_accept_all_preview():
-            self._restore_timer.stop()
-            self._restore_source = None
-            self._position_pending = False
-            self._preview_anchor = ('incoming', span[2])
+            self._preview_anchor = ('incoming', incoming_start)
             if self.active_view() is None:
                 return
             side, editor = 'incoming', self.preview_editor
@@ -570,7 +580,7 @@ class DocumentView(QWidget):
             side, editor = 'incoming', self.incoming_editor
         else:
             side, editor = 'original', self.editor
-        start = span[2 if side == 'incoming' else 0]
+        start = incoming_start if side == 'incoming' else original_start
         cursor = editor.textCursor()
         cursor.setPosition(len(getattr(self.document, side)[:start].encode('utf-16-le')) // 2)
         editor.setTextCursor(cursor)
@@ -584,12 +594,16 @@ class DocumentView(QWidget):
         if self._review_worker is not None:
             return
         position = utf16_index(getattr(self.document, side), editor.textCursor().position())
+        at_end = None
+        offset = 0 if side == 'original' else 2
         for index, change in enumerate(self.diff_view.changes):
-            for a, b, c, d in change.ranges:
-                start, end = (a, b) if side == 'original' else (c, d)
-                if start <= position <= end:
-                    self.diff_view.select(index)
-                    return
+            if distance_to_ranges(change.ranges, side, position, position) == 0:
+                self.diff_view.select(index)
+                return
+            if at_end is None and any(span[offset + 1] == position for span in change.ranges):
+                at_end = index
+        if at_end is not None:
+            self.diff_view.select(at_end)
 
     def edited(self):
         self.document.dirty = True
@@ -692,7 +706,7 @@ class DocumentView(QWidget):
             if self.playback and ranges and tuple(span[side] for span in ranges) != next_ranges:
                 self._seek_selected_suggestion()
         elif not self.diff_view.changes and ranges:
-            self._focus_passage(ranges[0])
+            self._focus_passage(ranges[0][0], ranges[0][2])
             if self.playback:
                 self.playback.seek_from_cursor()
         self.edited()

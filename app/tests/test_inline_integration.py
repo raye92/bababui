@@ -168,3 +168,93 @@ def test_unmatched_speaker_marks_only_the_label_and_keeps_the_diff(native_window
 
     view.change_speaker_mapping('SPEAKER 4', 'THE WITNESS')
     assert color_at('incoming', state.incoming.text, 'THE WITNESS:  Correct') == '#9edcb0'
+
+
+def outlined_rows(editor):
+    image = editor.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    rows = []
+    cursor = QTextCursor(editor.document())
+    for row in editor.rows:
+        cursor.setPosition(row.display_start)
+        y = round(editor.cursorRect(cursor).center().y() * scale)
+        if 0 <= y < image.height():
+            if any(image.pixelColor(x, y).name() == '#d4a000' for x in range(image.width())):
+                rows.append(row.text)
+    return rows
+
+
+def test_yellow_outline_follows_the_selected_pair_of_lines(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('The car is red.\nShared testimony.\nThe house is old.')
+    view.receive('The car is blue.\nShared testimony.\nThe house is new.', [])
+    editor = view.inline_editor
+    QApplication.processEvents()
+
+    assert outlined_rows(editor) == ['The car is red.', 'The car is blue.']
+    view.diff_view.navigate(1)
+    assert outlined_rows(editor) == ['The house is old.', 'The house is new.']
+    view.diff_view.filter_speaker('SPEAKER 4')
+    assert not view.diff_view.has_current
+    assert outlined_rows(editor) == []
+
+
+@pytest.mark.parametrize('original,incoming,expected', [
+    ('Kept.', 'Kept.\nAdded.', ['', 'Added.']),
+    ('Removed.\nKept.', 'Kept.', ['Removed.', '']),
+])
+def test_yellow_outline_includes_the_empty_side_of_a_change(native_window, tmp_path, original, incoming, expected):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText(original)
+    view.receive(incoming, [])
+    QApplication.processEvents()
+    assert outlined_rows(view.inline_editor) == expected
+
+
+def test_click_during_a_decision_keeps_the_next_suggestion_outlined(native_window, tmp_path, monkeypatch):
+    from app.src.document_view import ReviewPreviewWorker
+
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('The car is red.\nShared testimony.\nThe house is old.')
+    view.receive('The car is blue.\nShared testimony.\nThe house is new.', [])
+    editor = view.inline_editor
+    QApplication.processEvents()
+    with monkeypatch.context() as patch:
+        patch.setattr(ReviewPreviewWorker, 'start', lambda worker: None)
+        view.diff_view.request_current(True)
+    worker = view._review_worker
+    try:
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(editor.display_position('original', 4))
+        QTest.mouseClick(editor.viewport(), Qt.LeftButton, pos=editor.cursorRect(cursor).center())
+        assert view.diff_view.current == 1
+        assert outlined_rows(editor) == ['The house is old.', 'The house is new.']
+    finally:
+        worker.start()
+        assert worker.wait(5000)
+        QApplication.processEvents()
+
+
+@pytest.mark.parametrize('before,after', [('ADJ18095652', 'ADJ99999999'), ('Question?', 'Where?')])
+def test_outline_and_line_number_align_with_text_in_a_job_with_a_cover(native_window, before, after):
+    from app.src.documents import import_casecat
+    from app.tests.test_native_notice_cover import covered, details, field_files
+
+    _, _, bundle, _, _, _ = covered(field_files(), details())
+    view = native_window.add_document(import_casecat(bundle))
+    state = view.document.native
+    start = state.original.text.index(before)
+    state.incoming = state.original.replace(start, start + len(before), after)
+    view.refresh()
+    view.diff_view.select(0)
+    editor = view.inline_editor
+    QApplication.processEvents()
+    original_row, incoming_row = outlined_rows(editor)
+    assert before in original_row and after in incoming_row
+    line = next(line for line in editor.page_lines() if before in line.text)
+    cursor = QTextCursor(editor.document())
+    cursor.setPosition(line.position)
+    assert abs(editor.cursorRect(cursor).top() + editor.verticalScrollBar().value() - line.y) <= 1

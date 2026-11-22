@@ -1,7 +1,8 @@
 """One immutable source of review decisions and logical display sections."""
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
-from app.src.suggestions import Suggestion, suggestions
+from app.src.suggestions import Suggestion, preview_ranges, suggestions
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,13 @@ class ReviewModel:
     incoming: object
     edits: tuple[Suggestion, ...]
     sections: tuple[ReviewSection, ...]
+    comparison_spans: tuple | None = None
+
+    def compare_rows(self, original_rows, incoming_rows):
+        spans = self.comparison_spans
+        if spans is None:
+            spans = _display_spans(self.original, self.incoming, self.edits)
+        return _compare_rows(self.original.text, self.incoming.text, spans, original_rows, incoming_rows)
 
     @property
     def ranges(self):
@@ -43,46 +51,147 @@ def map_position(position, ranges):
     return position + shift
 
 
-def _paragraph_bounds(text, start, end):
-    first = text.rfind('\n', 0, start) + 1
-    last = text.find('\n', max(start, end - 1))
-    return first, len(text) if last < 0 else last + 1
+def _paragraph_rows(text):
+    rows, start = [], 0
+    for paragraph in text.split('\n'):
+        end = start + len(paragraph)
+        rows.append((start, end))
+        start = end + 1
+    return rows
+
+
+def _display_spans(original, incoming, edits):
+    """Keep exact decision owners, including both sides of a related passage."""
+    from app.src.advanced_diff import paragraph_ops
+    from app.src.related_suggestions import related_groups
+    old, new = original.text, incoming.text
+    entries = []
+    for group in related_groups(original, incoming, edits):
+        raw = [span for i in group for span in edits[i].ranges]
+        visible = [span for i in group for span in preview_ranges(edits[i])]
+        if len(group) > 1 or len(raw) != len(visible):
+            raw = [(raw[0][0], raw[-1][1], raw[0][2], raw[-1][3])]
+            visible = [(visible[0][0], visible[-1][1], visible[0][2], visible[-1][3])]
+        for (a, b, c, d), (x, y, z, w) in zip(raw, visible):
+            entries.append((a, b, c, d, group, max(a - x, c - z), max(y - b, w - d)))
+    entries.sort()
+    spans = []
+    previous_b = previous_d = 0
+    for index, (a, b, c, d, owners, front, back) in enumerate(entries):
+        # Extend whole words only through the exact common gap. Matching
+        # letters across a nearby insertion can belong to different words.
+        front = max(0, min(front, a - previous_b, c - previous_d))
+        if index + 1 < len(entries):
+            following = entries[index + 1]
+            back = max(0, min(back, following[0] - b, following[2] - d))
+        previous_b, previous_d = max(previous_b, b), max(previous_d, d)
+        a, b, c, d = a - front, b + back, c - front, d + back
+        if spans and (a < spans[-1][1] or c < spans[-1][3]):
+            x, y, z, w, others = spans.pop()
+            spans.append((min(x, a), max(y, b), min(z, c), max(w, d), tuple(sorted(set(others + owners)))))
+        else:
+            spans.append((a, b, c, d, owners))
+    if not any(len(owners) == 1 and '\n' in old[a:b] and '\n' in new[c:d] for a, b, c, d, owners in spans):
+        return tuple(spans)
+
+    # The inner diff can include a retained paragraph break in one decision.
+    # Only split its display where both neighboring paragraphs have their
+    # own counterpart according to the same alignment used by the importer.
+    raw = sorted(span for edit in edits for span in edit.ranges)
+    ops = paragraph_ops(old.split('\n'), new.split('\n'), edits=raw)
+    old_rows, new_rows = _paragraph_rows(old), _paragraph_rows(new)
+    matched = {(a, c) for _, a, b, c, d in ops if b - a == d - c == 1}
+    boundaries = sorted((old_rows[i][1], new_rows[j][1]) for i, j in matched if (i + 1, j + 1) in matched)
+    result = []
+    for a, b, c, d, owners in spans:
+        if len(owners) == 1:
+            index = bisect_right(boundaries, (a, len(new)))
+            while index < len(boundaries) and boundaries[index][0] < b - 1:
+                x, y = boundaries[index]
+                if c < y < d - 1:
+                    result.append((a, x, c, y, owners))
+                    a, c = x + 1, y + 1
+                index += 1
+        result.append((a, b, c, d, owners))
+    return tuple(result)
+
+
+def _compare_rows(original, incoming, spans, old_rows, new_rows):
+    """Pair logical paragraphs or printed rows using the same source correspondence.
+
+    Each result gives the row slices and source section. An ownerless section
+    is one fully retained original row. Only untouched incoming rows may be
+    clipped to preserve the original wrapping of shared context.
+    """
+    old_starts = [a for a, _ in old_rows] + [len(original)]
+    new_starts = [c for c, _ in new_rows] + [len(incoming)]
+    old_ends = [b for _, b in old_rows]
+    new_ends = [d for _, d in new_rows]
+    new_empty = {c for c, d in new_rows if c == d}
+
+    def anchors():
+        a = c = 0
+        for k, (b, next_a, d, next_c, _) in enumerate(
+                [*spans, (len(original), len(original), len(incoming), len(incoming), ())]):
+            # [a,b) and [c,d) are the unchanged gap between consecutive edits.
+            first = bisect_left(new_starts, c)
+            stop = bisect_right(new_ends, d)
+            shared = False
+            if first < stop:
+                lo = bisect_left(old_starts, a + new_starts[first] - c)
+                hi = bisect_right(old_ends, a + new_ends[stop - 1] - c)
+                for i in range(lo, hi):
+                    start, end = old_rows[i]
+                    mapped = c + start - a
+                    if start == end:
+                        at_document_end = end == len(original) and mapped == len(incoming)
+                        if mapped not in new_empty or (end == b and not at_document_end):
+                            continue
+                    # A removed or inserted paragraph separator belongs to
+                    # its edit even when the preceding text survives intact.
+                    if end < b and original[end] == '\n':
+                        end += 1
+                    yield k, i, start, mapped, end
+                    shared = True
+            if not shared and 0 < k < len(spans):
+                i, j = bisect_left(old_starts, a), bisect_left(new_starts, c)
+                if old_starts[i] <= b and new_starts[j] <= d:
+                    # Wraps can move inside the gap. A boundary on both sides
+                    # still separates the previous comparison from the next.
+                    yield k, i, old_starts[i], new_starts[j], None
+            a, c = next_a, next_c
+        yield len(spans), len(old_rows), len(original), len(incoming), None
+
+    old_i = new_i = old_pos = new_pos = consumed = 0
+    for k, i, x, y, shared_end in anchors():
+        if i < old_i or x < old_pos or y < new_pos:
+            continue
+        j = bisect_left(new_starts, y)
+        if y == new_pos:
+            j = max(j, new_i)
+        if k > consumed:
+            if k == len(spans) and i == len(old_rows):
+                j = len(new_rows)
+            owners = tuple(sorted({index for *_, indices in spans[consumed:k] for index in indices}))
+            section = ReviewSection((old_pos, x), (new_pos, y), owners)
+            yield slice(old_i, i), slice(new_i, j), section
+        old_i, new_i, old_pos, new_pos, consumed = i, j, x, y, k
+        if shared_end is not None:
+            old_pos, new_pos = shared_end, y + shared_end - x
+            old_i = i + 1
+            length = old_rows[i][1] - x
+            first = bisect_right(new_ends, y) if length else bisect_left(new_starts, y)
+            stop = bisect_left(new_starts, y + length) if length else first + 1
+            new_i = stop - int(new_pos < new_ends[stop - 1])
+            yield slice(i, old_i), slice(first, stop), ReviewSection((x, old_pos), (y, new_pos), ())
 
 
 def build_review(original, incoming):
     """Build fine native decisions once; visual sections never merge decisions."""
     edits = tuple(suggestions(original, incoming))
-    windows = []
-    entries = sorted((*span, index) for index, edit in enumerate(edits) for span in edit.ranges)
-    for position, (a, b, c, d, index) in enumerate(entries):
-        first, last = _paragraph_bounds(original.text, a, b)
-        ns, ne = _paragraph_bounds(incoming.text, c, d)
-        previous_a, previous_c = (entries[position-1][1], entries[position-1][3]) if position else (0, 0)
-        following_a, following_c = (entries[position+1][0], entries[position+1][2]) if position+1 < len(entries) else (len(original.text), len(incoming.text))
-        # Expand both sides by the same unchanged context. Independent paragraph
-        # slicing would duplicate retained text beside a whole-paragraph insert.
-        front = min(a-previous_a, c-previous_c, max(a-first, c-ns))
-        back = min(following_a-b, following_c-d, max(last-b, ne-d))
-        windows.append((a-front, b+back, c-front, d+back, {index}))
-    for index, edit in enumerate(edits):
-        if not edit.ranges:
-            windows.append((0, 0, 0, 0, {index}))
-    # Related displaced passages can share context without sharing a decision.
-    from app.src.related_suggestions import related_groups
-    for group in related_groups(original, incoming, edits):
-        if len(group) < 2:
-            continue
-        contexts = [window for window in windows if window[4].intersection(group)]
-        windows.append((min(window[0] for window in contexts), max(window[1] for window in contexts),
-                        min(window[2] for window in contexts), max(window[3] for window in contexts), set(group)))
-    sections = []
-    for a, b, c, d, indices in sorted(windows, key=lambda window: (window[0], window[2])):
-        if sections and (a < sections[-1][1] or c < sections[-1][3]
-                         or (a, b, c, d) == tuple(sections[-1][:4])):
-            previous = sections[-1]
-            previous[1], previous[3] = max(previous[1], b), max(previous[3], d)
-            previous[4].update(indices)
-        else:
-            sections.append([a, b, c, d, set(indices)])
-    return ReviewModel(original, incoming, edits, tuple(
-        ReviewSection((a, b), (c, d), tuple(sorted(indices))) for a, b, c, d, indices in sections))
+    spans = _display_spans(original, incoming, edits)
+    pairs = _compare_rows(original.text, incoming.text, spans, _paragraph_rows(original.text),
+                          _paragraph_rows(incoming.text))
+    sections = [section for _, _, section in pairs if section.edit_indices]
+    sections.extend(ReviewSection((0, 0), (0, 0), (i,)) for i, edit in enumerate(edits) if not edit.ranges)
+    return ReviewModel(original, incoming, edits, tuple(sections), spans)

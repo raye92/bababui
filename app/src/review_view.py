@@ -6,7 +6,7 @@ from PySide6.QtCore import QEvent, Signal, Qt
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
-from app.src.suggestions import preview_context, preview_ranges
+from app.src.suggestions import preview_context, preview_ranges, preview_start
 
 
 def visible_text(text, empty):
@@ -213,6 +213,7 @@ class ReviewView(QWidget):
     def set_model(self, model, *, review=None, page_lines=()):
         self.model = model
         self.changes = model.edits
+        self._page_lines, self._location_side = page_lines, 'original'
         for button in self.decision_buttons:
             button.setDown(False)
         self.review = review
@@ -241,15 +242,10 @@ class ReviewView(QWidget):
                 title = 'Native fields and symbols'
             if change.kind == 'structure' and index not in attribution:
                 title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
-            if change.ranges:
-                start = change.ranges[0][0]
-                qt_start = len(original.text[:start].encode('utf-16-le')) // 2
-                line = next((p for p in reversed(page_lines) if p.position <= qt_start), None)
-                if line:
-                    title += f' · Page {line.page}, line {line.number}'
-            heading = QLabel(title)
-            heading.setWordWrap(True)
-            rows.addWidget(heading)
+            card.title = title
+            card.heading = QLabel(title)
+            card.heading.setWordWrap(True)
+            rows.addWidget(card.heading)
             if change.field:
                 rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
             if change.kind == 'speaker' and before == after:
@@ -404,6 +400,26 @@ class ReviewView(QWidget):
                 self.select(target)
                 self.navigated.emit()
 
+    def set_page_lines(self, page_lines, side):
+        self._page_lines, self._location_side = page_lines, side
+        self._update_heading()
+        self._size_comparison()
+
+    def _update_heading(self):
+        if not self.has_current:
+            return
+        card, change = self.cards[self.current], self.changes[self.current]
+        title = card.title
+        if self._page_lines and change.ranges:
+            start = preview_start(change, self._location_side)
+            text = getattr(change, self._location_side).text
+            qt_start = len(text[:start].encode('utf-16-le')) // 2
+            index = bisect_right(self._page_lines, qt_start, key=lambda line: line.position) - 1
+            if index >= 0:
+                line = self._page_lines[index]
+                title += f' · Page {line.page}, line {line.number}'
+        card.heading.setText(title)
+
     def _mark_selected(self):
         for button in self.decision_buttons:
             button.setEnabled(self.has_current)
@@ -412,6 +428,7 @@ class ReviewView(QWidget):
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
+        self._update_heading()
         self._size_comparison()
         self.selection_changed.emit()
 
