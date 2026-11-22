@@ -3,13 +3,13 @@ from itertools import accumulate
 import re
 
 from PySide6.QtCore import QObject, QPointF, QRunnable, Qt, Signal
-from PySide6.QtGui import QColor, QTextCursor
+from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.native_editor import NativeTranscriptEditor
-from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
+from app.src.review_colors import ADDITION_BACKGROUND, draw_focus_outlines
 from app.src.suggestions import preview_ranges, resolve_all
 
 
@@ -44,12 +44,14 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self.setReadOnly(True)
         self._text = ''
         self._edits, self._highlights = (), []
+        self._focused = []
 
     def load_preview(self, bundle, job, prepared, model, selected):
         self.set_native_source(bundle, job)
         self.setPlainText(job.text, prepared=prepared)
         self._text, self._edits = job.text, model.edits
         self._highlights = []
+        marks = []
         offsets = list(accumulate((2 if ord(char) > 0xffff else 1 for char in self._text), initial=0))
         for index, edit in enumerate(self._edits):
             for _, _, start, end in preview_ranges(edit):
@@ -61,23 +63,50 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
                     cursor.setPosition(offsets[first])
                     cursor.setPosition(offsets[last], QTextCursor.KeepAnchor)
                     self._highlights.append((first, last, index, cursor))
+                    mark = QTextEdit.ExtraSelection()
+                    mark.cursor = cursor
+                    mark.format.setBackground(QColor(ADDITION_BACKGROUND))
+                    mark.format.setForeground(QColor('#1e5531'))
+                    marks.append(mark)
+        self.set_review_marks(marks, [])
         self.highlight_edit(selected)
 
     def highlight_edit(self, selected):
-        marks, focused = [], []
-        for _, _, index, cursor in self._highlights:
-            mark = QTextEdit.ExtraSelection()
-            mark.cursor = cursor
-            if index == selected:
-                mark.format.setBackground(QColor(CHECK_BACKGROUND))
-                mark.format.setForeground(QColor(CHECK_FOREGROUND))
-                mark.format.setFontUnderline(True)
-                focused.append(mark)
-            else:
-                mark.format.setBackground(QColor(ADDITION_BACKGROUND))
-                mark.format.setForeground(QColor('#1e5531'))
-                marks.append(mark)
-        self.set_review_marks(marks + focused, [])
+        self._focused = [cursor for _, _, index, cursor in self._highlights if index == selected]
+        self.viewport().update()
+
+    def _focus_rects(self):
+        for cursor in self._focused:
+            block = cursor.block()
+            bounds = self.document().documentLayout().blockBoundingRect(block)
+            layout = block.layout()
+            if not layout.lineCount():
+                continue
+            start = cursor.selectionStart() - block.position()
+            end = cursor.selectionEnd() - block.position()
+            first = layout.lineForTextPosition(start).lineNumber()
+            last = layout.lineForTextPosition(end - 1).lineNumber()
+            tabbed = '\t' in cursor.selectedText()
+            for i in range(first, last + 1):
+                line = layout.lineAt(i)
+                rect = line.naturalTextRect()
+                # Glyph positions follow the painted text through wraps and
+                # direction changes. Tabs have no glyph, so box their line.
+                if not tabbed:
+                    a = max(start, line.textStart())
+                    b = min(end, line.textStart() + line.textLength())
+                    runs = [run.boundingRect() for run in line.glyphRuns(a, b - a)]
+                    if not runs:
+                        continue
+                    rect.setLeft(max(rect.left(), min(run.left() for run in runs)))
+                    rect.setRight(min(rect.right(), max(run.right() for run in runs)))
+                if not rect.isEmpty():
+                    yield rect.translated(bounds.topLeft()).adjusted(-1, -1, 1, 1)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._focused:
+            draw_focus_outlines(QPainter(self.viewport()), self, self._focus_rects())
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)

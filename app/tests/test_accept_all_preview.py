@@ -34,6 +34,29 @@ def visible_preview(view):
     return view.active_view()
 
 
+def has_outline_edge(image, x, y):
+    scale = image.devicePixelRatio()
+    xs = range(round((x - 2) * scale), round((x + 2) * scale) + 1)
+    for dy in range(-2, 3):
+        row = round((y + dy) * scale)
+        if not any(image.pixelColor(px, row).name() == '#d4a000' for px in xs):
+            return False
+    return True
+
+
+def outline_edges(preview, word):
+    selection = preview.document().find(word)
+    assert selection.hasSelection()
+    cursor = QTextCursor(preview.document())
+    cursor.setPosition(selection.selectionStart())
+    first = preview.cursorRect(cursor)
+    cursor.setPosition(selection.selectionEnd())
+    last = preview.cursorRect(cursor)
+    image = preview.viewport().grab().toImage()
+    center = first.center().y()
+    return has_outline_edge(image, first.x(), center), has_outline_edge(image, last.x(), center)
+
+
 def test_preview_matches_accepted_native_layout_and_highlights_only_changes(native_window):
     from app.src.documents import import_casecat
 
@@ -65,9 +88,9 @@ def test_preview_matches_accepted_native_layout_and_highlights_only_changes(nati
     assert all(fmt.background().style() == Qt.NoBrush for fmt in formats)
     marks = [mark for mark in preview.extraSelections() if mark.format.background().style() != Qt.NoBrush]
     assert 'information' in [mark.cursor.selectedText() for mark in marks]
-    assert [mark.cursor.selectedText() for mark in marks
-            if mark.format.background().color().name() == '#ffe08a'] == ['information']
-    assert {mark.format.background().color().name() for mark in marks} == {'#9edcb0', '#ffe08a'}
+    assert outline_edges(preview, 'information') == (True, True)
+    assert {mark.format.background().color().name() for mark in marks} == {'#9edcb0'}
+    assert not any(mark.format.fontUnderline() for mark in marks)
     assert all(not mark.format.boolProperty(QTextFormat.FullWidthSelection) for mark in marks)
 
     accept_all = next(a for a in native_window.edit_btn.menu().actions() if a.text() == 'Accept All')
@@ -107,6 +130,43 @@ def test_preview_option_is_per_tab_and_accessible_from_incoming(native_window, t
     assert view.active_view() is view.inline_editor
 
 
+def test_preview_closes_the_outline_on_each_line_of_a_wrapped_addition(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('Opening.\nClosing.')
+    added = 'The half-pink form was included with the other signed forms. ' * 3
+    view.receive('Opening.\n' + added.rstrip() + '\nClosing.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    block = preview.document().findBlockByNumber(1)
+    layout = block.layout()
+    assert layout.lineCount() > 1
+    bounds = preview.document().documentLayout().blockBoundingRect(block)
+    image = preview.viewport().grab().toImage()
+    for i in range(layout.lineCount()):
+        visible_text = layout.lineAt(i).naturalTextRect().translated(bounds.topLeft())
+        y = visible_text.center().y() - preview.verticalScrollBar().value()
+        for edge in (visible_text.left(), visible_text.right()):
+            assert has_outline_edge(image, edge - preview.horizontalScrollBar().value(), y)
+
+
+def test_preview_outlines_the_green_word_at_a_text_direction_change(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('שלום black example.')
+    view.receive('שלום pink example.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    image = preview.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    y = preview.cursorRect(preview.document().find('pink')).center().y()
+    colors = [image.pixelColor(x, round(y * scale)).name() for x in range(image.width())]
+    green = [i for i, color in enumerate(colors) if color == '#9edcb0']
+    yellow = [i for i, color in enumerate(colors) if color == '#d4a000']
+    assert 0 < min(green) - min(yellow) <= 4 * scale
+    assert 0 < max(yellow) - max(green) <= 4 * scale
+
+
 @pytest.mark.parametrize('accepted', [True, False])
 def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_window, audio_review, accepted, request):
     view = audio_review
@@ -115,6 +175,8 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     action.trigger()
     preview = visible_preview(view)
     assert view.diff_view.current == 0
+    assert outline_edges(preview, 'Orange') == (True, True)
+    assert outline_edges(preview, 'copper') == (False, False)
     player = view.playback.player
     request.addfinalizer(lambda: player.setSource(QUrl()))
     player.setPosition(20000)
@@ -133,9 +195,8 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     projected = page.mapFromScene(page.proxy.mapToScene(QPointF(surface_point)))
     QTest.mouseClick(page.viewport(), Qt.LeftButton, pos=projected)
     assert view.diff_view.current == 1
-    colors = {mark.cursor.selectedText(): mark.format.background().color().name()
-              for mark in preview.extraSelections()}
-    assert colors['copper'] == '#ffe08a' and colors['Orange'] == '#9edcb0'
+    assert outline_edges(preview, 'Orange') == (False, False)
+    assert outline_edges(preview, 'copper') == (True, True)
     assert 10840 <= player.position() <= 11040
     assert not player.isPlaying()
     before = doc.original, doc.incoming

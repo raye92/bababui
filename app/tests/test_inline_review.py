@@ -235,6 +235,71 @@ def test_separate_changed_wrapped_rows_pair_next_to_their_local_incoming_rows():
     view.close()
 
 
+def test_adjacent_changes_show_each_removal_with_its_own_addition():
+    old = 'Opening.\nFirst removed line.\n\nSecond removed line.\nThe car is red.\nClosing.'
+    new = 'Opening.\nFirst added line.\nSecond added line.\nThe car is blue.\nClosing.'
+    a, c = old.index('First'), new.index('First')
+    b, d = old.index('The car'), new.index('The car')
+    ranges = [(a, b, c, d), (old.index('red'), old.index('red') + 3,
+                               new.index('blue'), new.index('blue') + 4)]
+    view = widget(comparison(old, new, ranges, (a, len(old), c, len(new))))
+    assert [(row.kind, row.text) for row in view.rows if row.kind != 'equal'] == [
+        ('original', 'First removed line.'), ('original', ''), ('original', 'Second removed line.'),
+        ('incoming', 'First added line.'), ('incoming', 'Second added line.'),
+        ('original', 'The car is red.'), ('incoming', 'The car is blue.')]
+    view.focus_edit(0)
+    assert len(view._focus_rects) == 1
+    view.focus_edit(1)
+    assert len(view._focus_rects) == 1
+    view.close()
+
+
+def test_adjacent_edits_stay_paired_when_a_replacement_moves_the_wrap():
+    from app.src.review_model import build_review
+
+    old = ('The witness inspected a red car after a scheduled meeting near the old house '
+           'on Sunday morning. Other witnesses agreed with that account.')
+    new = old.replace('red', 'bright emerald green').replace('old', 'modern')
+    model = build_review(revision(old), revision(new))
+    view = widget(model)
+    pairs = []
+    for index in range(len(model.edits)):
+        rows = [row for row in view.rows if index in row.edit_indices]
+        pairs.append(rows)
+        view.focus_edit(index)
+        assert len(view._focus_rects) == 1
+    assert len(pairs) == 2
+    assert 'red' in pairs[0][0].text and any('green' in r.text for r in pairs[0] if r.kind == 'incoming')
+    assert 'old' in pairs[1][0].text and any('modern' in r.text for r in pairs[1] if r.kind == 'incoming')
+    assert pairs[0][-1].display_start < pairs[1][0].display_start
+    view.close()
+
+
+def test_outline_starts_at_the_diff_and_closes_at_the_visible_right_edge():
+    view = widget(wording_model())
+    row = next(row for row in view.rows if row.kind == 'original')
+    view.focus_edit(0)
+    for width in (round(view._page_width) + view.verticalScrollBar().width(), 600):
+        view.resize(width, 500)
+        QApplication.processEvents()
+        image = view.viewport().grab().toImage()
+        scale = image.devicePixelRatio()
+        y = round((row.y + row.pitch / 2 - view.verticalScrollBar().value()) * scale)
+        left = round(row.x * scale)
+        right = min(image.width(), round(view._page_width * scale))
+        border = [x for x in range(image.width()) if image.pixelColor(x, y).name() == '#d4a000']
+        middle = (left + right) // 2
+        for edge, expected in (([x for x in border if x < middle], left),
+                               ([x for x in border if x >= middle], right - 3 * scale)):
+            assert abs(edge[0] - expected) <= 1
+            assert edge == list(range(edge[0], edge[-1] + 1))
+            assert abs(len(edge) - 3 * scale) < 1
+        horizontal = [y for y in range(image.height()) if image.pixelColor(middle, y).name() == '#d4a000']
+        assert abs(len(horizontal) - 6 * scale) < 2
+    assert not any(mark.format.fontUnderline() for mark in view.extraSelections())
+    view.close()
+
+
 def test_review_formats_rows_without_relaying_out_each_row():
     from app.src.inline_review import InlineReviewEditor
     from app.src.review_model import build_review

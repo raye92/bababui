@@ -179,9 +179,7 @@ def outlined_rows(editor):
         cursor.setPosition(row.display_start)
         y = round(editor.cursorRect(cursor).center().y() * scale)
         if 0 <= y < image.height():
-            edges = [x for x in range(image.width()) if image.pixelColor(x, y).name() == '#d4a000']
-            if edges:
-                assert edges[-1] - edges[0] > editor._page_width * scale / 2
+            if any(image.pixelColor(x, y).name() == '#d4a000' for x in range(image.width())):
                 rows.append(row.text)
     return rows
 

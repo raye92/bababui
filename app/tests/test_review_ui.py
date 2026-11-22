@@ -4,7 +4,7 @@ from html import unescape
 import re
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QTextCursor, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QProgressBar, QPushButton
 from app.src.review_view import ReviewView, change_diff
@@ -315,9 +315,13 @@ def test_paragraph_join_highlights_whole_word_on_both_sides():
     assert added.endswith(' this')
     inline = widget(model)
     inline.focus_edit(0)
-    selections = [mark.cursor.selectedText() for mark in inline.extraSelections()]
-    assert any(text.endswith(' This') for text in selections)
-    assert any(text.endswith(' this') for text in selections)
+    cursor = QTextCursor(inline.document())
+    for side, word, color in [('original', ' This', '#f2aba7'), ('incoming', ' this', '#9edcb0')]:
+        start = getattr(model, side).text.index(word)
+        for offset in range(len(word)):
+            cursor.setPosition(inline.display_position(side, start + offset))
+            cursor.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor)
+            assert cursor.charFormat().background().color().name() == color
     inline.close()
     assert resolve(original, incoming, edit, True)[0].text == incoming.text
     assert resolve(original, incoming, edit, False)[1].text == original.text

@@ -533,7 +533,6 @@ class DocumentView(QWidget):
                     mark.format.setForeground(QColor('#82071e' if side == 'original' else '#116329'))
                     if index == selected:
                         mark.format.setBackground(QColor('#ffaaa5' if side == 'original' else '#7ee2a8'))
-                        mark.format.setFontUnderline(True)
                     marks.append(mark)
             if side == 'incoming' or not self.diff_view.has_changes:
                 for start, end in self.diff_view.unmatched_speaker_ranges:

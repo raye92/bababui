@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
-from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND, FOCUS_OUTLINE
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND, draw_focus_outlines
 from app.src.suggestions import preview_ranges, preview_start
 
 
@@ -83,13 +83,24 @@ def _row_groups(model, old_rows, new_rows, common):
         end = row.source_end
         return end+1 if end < len(text) and text[end] == '\n' else end
 
+    incoming_starts = [row.source_start for row in new_rows]
     anchors = []
     for index, row in enumerate(old_rows):
         end = extent(row, model.original.text)
         for a, b, c, d in common:
-            if a <= row.source_start <= end <= b:
-                anchors.append((index, c+row.source_start-a, c+end-a))
+            if not a <= row.source_start <= b:
+                continue
+            start = c + row.source_start - a
+            if end <= b:
+                anchors.append((index, start, c + end - a))
                 break
+            if (a, c) == (0, 0) or (index and old_rows[index - 1].source_start >= a):
+                continue
+            # A wrap can move within the unchanged text between edits. A row
+            # boundary on each side of that gap still separates the two pairs.
+            last = bisect_right(incoming_starts, d) - 1
+            if last >= 0 and incoming_starts[last] >= c:
+                anchors.append((index, incoming_starts[last], None))
 
     def incoming_rows(start, end, reference):
         result = []
@@ -107,18 +118,17 @@ def _row_groups(model, old_rows, new_rows, common):
         return result
 
     old_index = incoming_position = 0
-    for x, y, end in anchors + [(len(old_rows), len(model.incoming.text), len(model.incoming.text))]:
+    for x, y, shared_end in anchors + [(len(old_rows), len(model.incoming.text), None)]:
         if x > old_index or y > incoming_position:
             a = old_rows[old_index].source_start if old_index < len(old_rows) else len(model.original.text)
             b = old_rows[x].source_start if x < len(old_rows) else len(model.original.text)
             c, d = incoming_position, y
             indices = tuple(index for index, edit in enumerate(model.edits) if any(
-                (a < q and b > p) or (c < s and d > r)
-                or (p == q and a <= p <= b) or (r == s and c <= r <= d)
-                for p, q, r, s in edit.ranges))
+                max(a, p) < min(b, q) or max(c, r) < min(d, s) for p, q, r, s in edit.ranges))
             old_group = old_rows[old_index:x]
             yield old_group, incoming_rows(c, d, old_group[0] if old_group else None), indices, (a, c)
-        if x < len(old_rows):
+        old_index, incoming_position = x, y
+        if shared_end is not None:
             # The Original page supplies shared row breaks. A shorter proposal
             # must not duplicate every following line merely because its own
             # preview can fit another word on the preceding line.
@@ -126,7 +136,7 @@ def _row_groups(model, old_rows, new_rows, common):
             matched = replace(row, kind='incoming', source_start=y,
                               source_end=y+row.source_end-row.source_start)
             yield [row], [matched], (), None
-        old_index, incoming_position = x+1, end
+            old_index, incoming_position = x + 1, shared_end
 
 
 def _compact(row):
@@ -629,26 +639,27 @@ class InlineReviewEditor(QTextEdit):
                 else:
                     continue
                 left, right = max(start, source_start), min(end, source_start+len(row.text))
+                if not audio:
+                    if left < right or (not row.text and row.kind == side and start <= source_start < end):
+                        focused_rows.add(row_index)
+                    continue
                 if left >= right:
                     continue
                 mark = QTextEdit.ExtraSelection()
                 mark.cursor = QTextCursor(self.document())
                 mark.cursor.setPosition(row.display_start+_qt(row.text[:left-source_start]))
                 mark.cursor.setPosition(row.display_start+_qt(row.text[:right-source_start]), QTextCursor.KeepAnchor)
-                if audio:
-                    mark.format.setBackground(QColor(120, 165, 220, 85))
-                else:
-                    focused_rows.add(row_index)
-                    mark.format.setFontUnderline(True)
+                mark.format.setBackground(QColor(120, 165, 220, 85))
                 marks.append(mark)
         super().setExtraSelections(marks)
         self._focus_rects = []
         for index in sorted(focused_rows):
             row = self.rows[index]
+            band = QRectF(row.x, row.y, self._page_width - row.x, row.pitch)
             if index - 1 in focused_rows and self.rows[index - 1].page == row.page:
-                self._focus_rects[-1].setBottom(row.y + row.pitch)
+                self._focus_rects[-1] = self._focus_rects[-1].united(band)
             else:
-                self._focus_rects.append(QRectF(4, row.y, self._page_width - 8, row.pitch))
+                self._focus_rects.append(band)
         self.viewport().update()
 
     def _update_scroll_range(self):
@@ -722,9 +733,6 @@ class InlineReviewEditor(QTextEdit):
             painter.setFont(source.font())
             painter.fillRect(QRectF(0, page.top+page.height-12, self.viewport().width(), 12),
                              self.palette().color(QPalette.Window))
-        painter.setPen(QPen(QColor(FOCUS_OUTLINE), 2))
-        for rect in self._focus_rects:
-            painter.drawRect(rect)
         painter.resetTransform()
         for marker in self.boundary_marks:
             rect = self.boundary_rect(marker)
@@ -737,6 +745,7 @@ class InlineReviewEditor(QTextEdit):
             painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else ADDITION_BACKGROUND))
             painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
             painter.drawText(rect, Qt.AlignCenter, '↵')
+        draw_focus_outlines(painter, self, self._focus_rects)
 
     def boundary_rect(self, marker):
         cursor = QTextCursor(self.document())
