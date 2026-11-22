@@ -130,24 +130,33 @@ def test_preview_option_is_per_tab_and_accessible_from_incoming(native_window, t
     assert view.active_view() is view.inline_editor
 
 
-def test_preview_closes_the_outline_on_each_line_of_a_wrapped_addition(native_window, tmp_path):
+def test_preview_draws_one_outline_across_wraps_and_paragraphs(native_window, tmp_path):
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     view.editor.setPlainText('Opening.\nClosing.')
     added = 'The half-pink form was included with the other signed forms. ' * 3
-    view.receive('Opening.\n' + added.rstrip() + '\nClosing.', [])
+    view.receive('Opening.\n' + added.rstrip() + '\n\nA short final line.\nClosing.', [])
     preview_action(native_window).trigger()
     preview = visible_preview(view)
-    block = preview.document().findBlockByNumber(1)
-    layout = block.layout()
-    assert layout.lineCount() > 1
-    bounds = preview.document().documentLayout().blockBoundingRect(block)
+    assert len(view.review_model.edits) == 1
+    lines = []
+    for number in (1, 2, 3):
+        block = preview.document().findBlockByNumber(number)
+        bounds = preview.document().documentLayout().blockBoundingRect(block)
+        layout = block.layout()
+        lines.extend(layout.lineAt(i).naturalTextRect().translated(bounds.topLeft())
+                     for i in range(layout.lineCount()))
+    assert len(lines) > 3
+    left = min(rect.left() for rect in lines if rect.width()) - preview.horizontalScrollBar().value()
+    right = max(rect.right() for rect in lines) - preview.horizontalScrollBar().value()
     image = preview.viewport().grab().toImage()
-    for i in range(layout.lineCount()):
-        visible_text = layout.lineAt(i).naturalTextRect().translated(bounds.topLeft())
-        y = visible_text.center().y() - preview.verticalScrollBar().value()
-        for edge in (visible_text.left(), visible_text.right()):
-            assert has_outline_edge(image, edge - preview.horizontalScrollBar().value(), y)
+    for line in lines:
+        y = line.center().y() - preview.verticalScrollBar().value()
+        assert has_outline_edge(image, left, y) and has_outline_edge(image, right, y)
+    scale = image.devicePixelRatio()
+    middle = round((left + right) / 2 * scale)
+    border = [image.pixelColor(middle, y).name() == '#d4a000' for y in range(image.height())]
+    assert sum(on and not previous for previous, on in zip([False] + border, border)) == 2
 
 
 def test_preview_outlines_the_green_word_at_a_text_direction_change(native_window, tmp_path):
@@ -165,6 +174,33 @@ def test_preview_outlines_the_green_word_at_a_text_direction_change(native_windo
     yellow = [i for i, color in enumerate(colors) if color == '#d4a000']
     assert 0 < min(green) - min(yellow) <= 4 * scale
     assert 0 < max(yellow) - max(green) <= 4 * scale
+
+
+@pytest.mark.parametrize('original,proposal', [
+    ('ready for review', '"ready for review"'),
+    ('"ready for review"', 'ready for review'),
+    ('"ready for review"', 'ready for review!'),
+])
+def test_preview_uses_one_outline_for_both_ends_of_a_quotation(native_window, tmp_path, original, proposal):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText(f'He said {original}, then left.')
+    view.receive(f'He said {proposal}, then left.', [])
+    change, = view.review_model.edits
+    assert len(change.ranges) == 2
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    image = preview.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    cursor = QTextCursor(preview.document())
+    cursor.setPosition(change.ranges[0][2])
+    first = preview.cursorRect(cursor)
+    cursor.setPosition(change.ranges[-1][3])
+    last = preview.cursorRect(cursor)
+    y = first.center().y()
+    assert has_outline_edge(image, first.x(), y) and has_outline_edge(image, last.x(), y)
+    interior = range(round((first.x() + 4) * scale), round((last.x() - 4) * scale))
+    assert all(image.pixelColor(x, round(y * scale)).name() != '#d4a000' for x in interior)
 
 
 @pytest.mark.parametrize('accepted', [True, False])
@@ -307,6 +343,7 @@ def test_preview_keeps_suggestions_without_added_text_in_the_sidebar(native_wind
     preview = visible_preview(view)
     assert not any(mark.format.background().style() != Qt.NoBrush for mark in preview.extraSelections())
     assert len(view.review_model.edits) == 1 and view.diff_view.has_current
+    assert not preview._focus_rect().isEmpty()
     view.diff_view.decision_buttons[0].click()
     wait_until(lambda: not view.document.busy)
     assert not view.review_model.edits

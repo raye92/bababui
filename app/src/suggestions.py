@@ -87,6 +87,20 @@ def preview_start(change, side):
     return change.ranges[0][offset]
 
 
+def distance_to_ranges(ranges, side, start, end):
+    """Distance from a row or caret to the decision's half-open source ranges."""
+    offset = 0 if side == 'original' else 2
+    closest = float('inf')
+    for span in ranges:
+        a, b = span[offset:offset + 2]
+        if a == b:
+            distance = max(start - a, a - end, 0)
+        else:
+            distance = max(start - (b - 1), a - max(start, end - 1), 0)
+        closest = min(closest, distance)
+    return closest
+
+
 def _layout(line):
     match = re.match(r'^(\s*)([QA])([ \t]+)(.*)$', line)
     if match:

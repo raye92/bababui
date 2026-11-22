@@ -2,7 +2,7 @@
 from itertools import accumulate
 import re
 
-from PySide6.QtCore import QObject, QPointF, QRunnable, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import QTextEdit
 
@@ -10,7 +10,7 @@ from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_colors import ADDITION_BACKGROUND, draw_focus_outlines
-from app.src.suggestions import preview_ranges, resolve_all
+from app.src.suggestions import distance_to_ranges, preview_ranges, resolve_all
 
 
 class PreviewSignals(QObject):
@@ -54,15 +54,18 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         marks = []
         offsets = list(accumulate((2 if ord(char) > 0xffff else 1 for char in self._text), initial=0))
         for index, edit in enumerate(self._edits):
-            for _, _, start, end in preview_ranges(edit):
+            for _, _, start, end in preview_ranges(edit) or ((0, 0, 0, 0),):
                 # Qt paints a selection of a paragraph separator as an empty
-                # colored cell. Highlight the visible parts of the edit.
-                for match in re.finditer(r'[^\n]+', self._text[start:end]):
-                    first, last = start + match.start(), start + match.end()
+                # colored cell. Keep a caret for ranges with no visible text.
+                fragments = [(start + match.start(), start + match.end())
+                             for match in re.finditer(r'[^\n]+', self._text[start:end])]
+                for first, last in fragments or [(start, start)]:
                     cursor = QTextCursor(self.document())
                     cursor.setPosition(offsets[first])
                     cursor.setPosition(offsets[last], QTextCursor.KeepAnchor)
                     self._highlights.append((first, last, index, cursor))
+                    if first == last:
+                        continue
                     mark = QTextEdit.ExtraSelection()
                     mark.cursor = cursor
                     mark.format.setBackground(QColor(ADDITION_BACKGROUND))
@@ -75,38 +78,52 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self._focused = [cursor for _, _, index, cursor in self._highlights if index == selected]
         self.viewport().update()
 
-    def _focus_rects(self):
-        for cursor in self._focused:
+    def _highlight_rect(self, cursor):
+        outline = QRectF()
+        if cursor.hasSelection():
             block = cursor.block()
             bounds = self.document().documentLayout().blockBoundingRect(block)
             layout = block.layout()
-            if not layout.lineCount():
-                continue
             start = cursor.selectionStart() - block.position()
             end = cursor.selectionEnd() - block.position()
-            first = layout.lineForTextPosition(start).lineNumber()
-            last = layout.lineForTextPosition(end - 1).lineNumber()
             tabbed = '\t' in cursor.selectedText()
-            for i in range(first, last + 1):
+            for i in range(layout.lineCount()):
                 line = layout.lineAt(i)
+                a = max(start, line.textStart())
+                b = min(end, line.textStart() + line.textLength())
+                if a >= b:
+                    continue
                 rect = line.naturalTextRect()
                 # Glyph positions follow the painted text through wraps and
                 # direction changes. Tabs have no glyph, so box their line.
                 if not tabbed:
-                    a = max(start, line.textStart())
-                    b = min(end, line.textStart() + line.textLength())
                     runs = [run.boundingRect() for run in line.glyphRuns(a, b - a)]
                     if not runs:
                         continue
                     rect.setLeft(max(rect.left(), min(run.left() for run in runs)))
                     rect.setRight(min(rect.right(), max(run.right() for run in runs)))
                 if not rect.isEmpty():
-                    yield rect.translated(bounds.topLeft()).adjusted(-1, -1, 1, 1)
+                    outline = outline.united(rect.translated(bounds.topLeft()))
+        if not outline.isEmpty():
+            return outline.adjusted(-1, -1, 1, 1)
+        # An empty range marks its accepted position. Document-wide metadata
+        # uses the start of the transcript.
+        anchor = QTextCursor(cursor)
+        anchor.setPosition(cursor.selectionStart())
+        caret = QRectF(self.cursorRect(anchor))
+        caret.translate(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+        return caret.adjusted(-3, 0, 3, 0)
+
+    def _focus_rect(self):
+        outline = QRectF()
+        for cursor in self._focused:
+            outline = outline.united(self._highlight_rect(cursor))
+        return outline
 
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._focused:
-            draw_focus_outlines(QPainter(self.viewport()), self, self._focus_rects())
+            draw_focus_outlines(QPainter(self.viewport()), self, (self._focus_rect(),))
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
@@ -119,11 +136,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         candidates = [index for start, end, index, _ in self._highlights
                       if hit >= 0 and start <= position < end]
 
-        def distance(index):
-            return min(max(start - position, position - end + 1, 0)
-                       for _, _, start, end in self._edits[index].ranges)
-
-        index = min(candidates, key=distance, default=-1)
+        index = min(candidates, key=lambda i: distance_to_ranges(
+            self._edits[i].ranges, 'incoming', position, position), default=-1)
         self.passage_clicked.emit(index, position)
 
     def undo(self):

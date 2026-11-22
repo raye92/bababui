@@ -1,6 +1,7 @@
 import importlib.util
 import os
-from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.src.casecat.anchors import AnchoredSpan, Revision
 from app.src.native_editor import NativeTranscriptEditor
+from app.src.review_model import ReviewModel, ReviewSection
 from app.src.suggestions import Suggestion
 
 
@@ -21,10 +23,8 @@ def revision(text):
 def comparison(before, after, ranges, bounds):
     original, incoming = revision(before), revision(after)
     edits = tuple(Suggestion(original, incoming, (span,)) for span in ranges)
-    section = SimpleNamespace(original_range=bounds[:2], incoming_range=bounds[2:],
-                              edit_indices=tuple(range(len(edits))))
-    return SimpleNamespace(original=original, incoming=incoming, edits=edits,
-                           sections=(section,))
+    section = ReviewSection(bounds[:2], bounds[2:], tuple(range(len(edits))))
+    return ReviewModel(original, incoming, edits, (section,))
 
 
 def widget(model):
@@ -105,7 +105,7 @@ def test_inline_review_is_read_only_even_on_unchanged_text():
 
 def test_copy_uses_source_text_across_visual_wraps():
     text = 'Word ' * 30 + 'end.'
-    model = SimpleNamespace(original=revision(text), incoming=revision(text), edits=(), sections=())
+    model = ReviewModel(revision(text), revision(text), (), ())
     view = widget(model)
     assert len(view.rows) > 1
     view.selectAll()
@@ -116,7 +116,7 @@ def test_copy_uses_source_text_across_visual_wraps():
 
 def test_unicode_mapping_and_review_history_shortcuts():
     text = 'Intro 😀 text.\nTail.'
-    model = SimpleNamespace(original=revision(text), incoming=revision(text), edits=(), sections=())
+    model = ReviewModel(revision(text), revision(text), (), ())
     view = widget(model)
     position = text.index('text')
     view.set_source_position('original', position)
@@ -254,6 +254,34 @@ def test_adjacent_changes_show_each_removal_with_its_own_addition():
     view.close()
 
 
+@pytest.mark.parametrize('reverse', [False, True], ids=['forward', 'reverse'])
+@pytest.mark.parametrize('original,proposal,old_rows,new_rows', [
+    ('The car.', 'Today The car.', ['The car.'], ['Today The car.']),
+    ('The car.', 'The car. Today.', ['The car.'], ['The car. Today.']),
+    ('Kept.', 'Kept.\nAdded.', [''], ['Added.']),
+    ('Kept.', 'Added.\nKept.', [''], ['Added.']),
+    ('First.\nSecond.', 'First. Second.', ['First.', 'Second.'], ['First. Second.']),
+    ('First.\nSecond.', 'First.Second.', ['First.', 'Second.'], ['First.Second.']),
+    ('Kept.\n', 'Kept.\nAdded.', [''], ['Added.']),
+])
+def test_model_and_editor_pair_complete_affected_rows(original, proposal, old_rows, new_rows, reverse):
+    from app.src.review_model import build_review
+    if reverse:
+        original, proposal, old_rows, new_rows = proposal, original, new_rows, old_rows
+    model = build_review(revision(original), revision(proposal))
+    view = widget(model)
+    assert [row.text for row in view.rows if row.kind == 'original'] == old_rows
+    assert [row.text for row in view.rows if row.kind == 'incoming'] == new_rows
+    section, = model.sections
+    assert original[slice(*section.original_range)].strip('\n') == '\n'.join(old_rows)
+    assert proposal[slice(*section.incoming_range)].strip('\n') == '\n'.join(new_rows)
+    view.focus_edit(0)
+    focused = [row.text for row in view.rows if any(r.top() <= row.y + row.pitch / 2 < r.bottom()
+                                                    for r in view._focus_rects)]
+    assert focused == old_rows + new_rows
+    view.close()
+
+
 def test_adjacent_edits_stay_paired_when_a_replacement_moves_the_wrap():
     from app.src.review_model import build_review
 
@@ -272,6 +300,57 @@ def test_adjacent_edits_stay_paired_when_a_replacement_moves_the_wrap():
     assert 'red' in pairs[0][0].text and any('green' in r.text for r in pairs[0] if r.kind == 'incoming')
     assert 'old' in pairs[1][0].text and any('modern' in r.text for r in pairs[1] if r.kind == 'incoming')
     assert pairs[0][-1].display_start < pairs[1][0].display_start
+    view.close()
+
+
+def test_paired_paragraphs_stay_together_inside_one_multiline_decision():
+    from app.src.review_model import build_review
+    from app.src.suggestions import resolve
+
+    old = revision('The sign says red.\nBlue marks the next gate.')
+    new = revision('The sign says orange.\nGreen marks the next gate.')
+    model = build_review(old, new)
+    edit, = model.edits
+    view = widget(model)
+    assert [s.edit_indices for s in model.sections] == [(0,), (0,)]
+    assert [(r.kind, r.text) for r in view.rows] == [
+        ('original', 'The sign says red.'), ('incoming', 'The sign says orange.'),
+        ('original', 'Blue marks the next gate.'), ('incoming', 'Green marks the next gate.')]
+    view.focus_edit(0)
+    assert len(view._focus_rects) == 1
+    assert resolve(old, new, edit, True)[0].text == new.text
+    assert resolve(old, new, edit, False)[1].text == old.text
+    view.close()
+
+
+@pytest.mark.parametrize('add', [True, False], ids=['insert', 'delete'])
+def test_selecting_a_trailing_paragraph_break_finds_its_empty_row(add):
+    from app.src.review_model import build_review
+    text = 'Opening.\nLast line.'
+    before, after = (text, text + '\n') if add else (text + '\n', text)
+    view = widget(build_review(revision(before), revision(after)))
+    view.set_source_position('original', 0)
+    view.focus_edit(0)
+    side = 'incoming' if add else 'original'
+    row = next(row for row in view.rows if row.kind == side)
+    assert view.textCursor().position() == row.display_start
+    assert any(mark.display_position == row.display_start and mark.side == side and not mark.empty
+               for mark in view.boundary_marks)
+    view.close()
+
+
+def test_selected_word_owns_its_first_wrapped_row_and_scrolls_into_view():
+    from app.src.review_model import build_review
+    prefix = 'Kept.\n' * 55
+    word = 'a' * 85
+    model = build_review(revision(prefix + word + 'B'), revision(prefix + word + 'C'))
+    view = widget(model)
+    view.verticalScrollBar().setValue(0)
+    view.focus_edit(0)
+    originals = [r for r in view.rows if r.kind == 'original']
+    assert len(originals) >= 2 and originals[0].source_start == len(prefix)
+    assert view.textCursor().position() == originals[0].display_start
+    assert view.verticalScrollBar().value() > 0 and len(view._focus_rects) == 1
     view.close()
 
 

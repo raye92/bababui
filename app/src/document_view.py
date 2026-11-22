@@ -14,7 +14,7 @@ from app.src.page_view import PageView
 from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, PlaybackBar
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
-from app.src.suggestions import preview_ranges, preview_start, resolve, resolve_all, text_edits
+from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start, resolve, resolve_all, text_edits
 from app.src.suggestion_filter import override_speaker, track_decisions, questionable_speaker_defaults
 from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
@@ -594,12 +594,16 @@ class DocumentView(QWidget):
         if self._review_worker is not None:
             return
         position = utf16_index(getattr(self.document, side), editor.textCursor().position())
+        at_end = None
+        offset = 0 if side == 'original' else 2
         for index, change in enumerate(self.diff_view.changes):
-            for a, b, c, d in change.ranges:
-                start, end = (a, b) if side == 'original' else (c, d)
-                if start <= position <= end:
-                    self.diff_view.select(index)
-                    return
+            if distance_to_ranges(change.ranges, side, position, position) == 0:
+                self.diff_view.select(index)
+                return
+            if at_end is None and any(span[offset + 1] == position for span in change.ranges):
+                at_end = index
+        if at_end is not None:
+            self.diff_view.select(at_end)
 
     def edited(self):
         self.document.dirty = True

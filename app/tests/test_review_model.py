@@ -87,6 +87,41 @@ def test_model_preserves_identical_gaps_and_exact_source_coverage():
                    for edit in model.edits for a,b,c,d in edit.ranges)
 
 
+@pytest.mark.parametrize('before,after', [
+    ('same\nsamebb\n\n😀acb', 'saaa\nbbsamebaa\nbb\n\n😀acb'),
+    ('first\n\n \n\nlast', 'first amended\n\nlast'),
+])
+def test_rewrapping_preserves_every_character_and_empty_row(before, after):
+    from app.src.review_model import build_review
+
+    def wrap(text, width):
+        rows, start = [], 0
+        for paragraph in text.split('\n'):
+            end = start + len(paragraph)
+            rows.extend((i, min(i + width, end)) for i in range(start, max(start + 1, end), width))
+            start = end + 1
+        return rows
+
+    for old, new in ((before, after), (after, before)):
+        model = build_review(revision(old), revision(new))
+        for widths in ((5, 8), (8, 5), (100, 100)):
+            old_rows, new_rows = wrap(old, widths[0]), wrap(new, widths[1])
+            row_indices, empty_rows = [], []
+            old_end = new_end = 0
+            for left, right, section in model.compare_rows(old_rows, new_rows):
+                a, b = section.original_range
+                c, d = section.incoming_range
+                assert (a, c) == (old_end, new_end)
+                if not section.edit_indices:
+                    assert old[a:b] == new[c:d]
+                row_indices.extend(range(left.start, left.stop))
+                empty_rows.extend(start for start, end in new_rows[right] if start == end and c <= start <= d)
+                old_end, new_end = b, d
+            assert (old_end, new_end) == (len(old), len(new))
+            assert row_indices == list(range(len(old_rows)))
+            assert empty_rows == [start for start, end in new_rows if start == end]
+
+
 def test_linked_field_has_one_decision_and_multiple_visual_occurrences():
     from app.src.review_model import build_review
     old = revision('').insert_field(0, 'NAME', 'Jane')
