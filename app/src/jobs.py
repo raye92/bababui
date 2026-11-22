@@ -153,6 +153,7 @@ class ProcessingWorker(QThread):
             text = self._house_spelling(text, report, warnings)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
+            result = self._house_after_formatting(result)
             result, addressed = self._addressees(result, text, report, warnings)
             alignment = None
             if request.job is not None:
@@ -213,6 +214,22 @@ class ProcessingWorker(QThread):
         if unsure:
             notes.append(f'{unsure[0]} context entr{"y" if unsure[0] == 1 else "ies"} kept: the model could not decide.')
         self.house, self.house_summary = reference, ' '.join(notes) or None
+        return result.text
+
+    def _house_after_formatting(self, draft):
+        """Apply the CSV's whole-word rows again to the formatted draft, without the model.
+
+        The formatter follows its own style rules and can undo a house spelling, such as
+        X-rays written back as X rays. Context rows were decided before formatting and
+        are not asked again."""
+        from app.src import house_spelling
+        reference = getattr(self, 'house', None)
+        if reference is None:
+            return draft
+        result = reference.apply(draft, protect=house_spelling.FORMATTED_LABEL)
+        if result.changes:
+            note = f'{len(result.changes)} restored after formatting.'
+            self.house_summary = f'{self.house_summary} {note}' if self.house_summary else f'House spelling: {note}'
         return result.text
 
     def _review_speakers(self, transcription, report):

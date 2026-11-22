@@ -50,6 +50,7 @@ from app.src import speaker_votes
 from app.src.casecat.elements import NativeElement, speaker_number
 from app.src.casecat.fields import field_values
 from app.src.number_forms import equivalent_integer
+from shared.speaker_review import label_flags
 
 
 # An unnamed CaseCAT speaker field shows as [EZ SPEAKER 01] (or [!EZ SPEAKER 01]).
@@ -692,13 +693,16 @@ def questionable_speaker_defaults(review, ranges):
             and (not summaries[speaker]['counts'].get(name) or uses[name.casefold()] > 1)]
 
 
-def flagged_attributions(review, ranges):
-    """Count pending label changes that only the AI label supports."""
+def flagged_attributions(review, ranges, text=None):
+    """Count pending label changes that only the AI label supports. Given the draft's
+    text, labels of turns the speaker review could not settle count too."""
     if not review:
         return 0
-    return sum(1 for location in review['locations']
-               if not location['resolved'] and location.get('decision') == speaker_votes.FLAG
-               and any(c < location['end'] and d > location['start'] for _, _, c, d in ranges))
+    spans = {(location['start'], location['end']) for location in review['locations']
+             if not location['resolved'] and location.get('decision') == speaker_votes.FLAG}
+    if text:
+        spans |= {(a, b) for a, b, _ in label_flags(review.get('speaker_review'), text)}
+    return sum(1 for start, end in spans if any(c < end and d > start for _, _, c, d in ranges))
 
 
 def override_speaker(state, speaker, name):
@@ -772,15 +776,66 @@ def _examiner(text, position):
     return speaker_name_key(match['name']) if match else None
 
 
+_WITNESS_KEY = speaker_name_key('THE WITNESS')
+
+
+def _rough_turns(original, draft):
+    """The rough's turn for each draft paragraph paired with one:
+    {draft line start: (form, speaker key)}, where form is Q, A, or None for colloquy."""
+    old, new, pairs = aligned_paragraphs(original, draft)
+    found = {}
+    for i, j in pairs:
+        offset, line, label, _ = old[i]
+        if label:
+            if 'BY' not in label['prefix'].upper():
+                found[new[j][0]] = (None, speaker_name_key(label['name']))
+        elif match := QA_PREFIX.match(line):
+            form = match[0].strip()
+            who = _examiner(original, offset) if form == 'Q' else _WITNESS_KEY
+            if who:
+                found[new[j][0]] = (form, who)
+    return found
+
+
+_BY_LINE = re.compile(r'[ \t]*BY[ \t]+[^:\n]+:[ \t]*$')
+
+
+def _in_questioning(text, line):
+    """Whether the turn on `line` comes right after a Q or A, or right after a BY line."""
+    from shared.speaker_review import label_units
+    previous = text[:line].rstrip('\n').rsplit('\n', 1)[-1]
+    if _BY_LINE.match(previous):
+        return True
+    units = label_units(text[:line])
+    return bool(units) and units[-1].kind in ('q', 'a')
+
+
+def _turn_form(name, rough, examiner):
+    """How a turn by `name` displays: Q, A, or None for colloquy under the name.
+
+    When the rough gives the turn to the same person, its label decides, so counsel's
+    colloquy during an examination stays colloquy. Otherwise who spoke decides: while
+    the examiner is questioning (`examiner` is given), the examiner's turn is Q and
+    the witness's is A."""
+    key = speaker_name_key(name)
+    if rough and rough[1] == key:
+        return rough[0]
+    if examiner is None:
+        return None
+    return 'Q' if key == examiner else 'A' if key == _WITNESS_KEY else None
+
+
 def assign_speaker(state, name, location_ids=(), spans=(), *, times=(), answered=()):
     """Give turns to a participant by changing only their labels.
 
     `location_ids` are pending speaker label locations; `spans` are (start, end)
-    of Q or A labels of uncertain turns, in the draft. Each label changes in the
-    draft and the same label change is accepted into the original. Any wording
-    change nearby stays pending. `times` are the turns' (start, end) in the WAV,
-    kept so the decision survives a rerun. `answered` are the keys of the uncertain
-    turns this decides, so they are not asked again. Returns the assigned label spans.
+    of the labels of uncertain turns, in the draft. Each label changes in the
+    draft and the same label change is accepted into the original. A turn shows as
+    Q, A or colloquy by who spoke it (see _turn_form), so a colloquy label given to
+    the examiner becomes Q. Any wording change nearby stays pending. `times` are the
+    turns' (start, end) in the WAV, kept so the decision survives a rerun.
+    `answered` are the keys of the uncertain turns this decides, so they are not
+    asked again. Returns the assigned label spans.
     """
     choice = speaker_choices(state.original).get(speaker_name_key(name))
     if choice is None:
@@ -789,46 +844,51 @@ def assign_speaker(state, name, location_ids=(), spans=(), *, times=(), answered
     reference = choice.references[0] if choice.references else None
     values = field_values(state.original) if reference else {}
     revision, locations = state.incoming, state.review['locations']
+    rough = _rough_turns(state.original.text, revision.text)
     wanted = set(location_ids)
     targets = [('location', p['start'], p) for p in locations if p.get('id') in wanted and not p['resolved']]
     targets += [('qa', start, (start, end)) for start, end in spans]
     assigned = []
     for kind, _, target in sorted(targets, key=lambda t: t[1], reverse=True):
-        if kind == 'location':
-            a, b = target['start'], target['end']
-            revised = revision if revision.text[a:b] == name else _replace_speaker(
-                revision, a, b, name, reference, values)
+        text = revision.text
+        a, b = (target['start'], target['end']) if kind == 'location' else target
+        line = text.rfind('\n', 0, a) + 1
+        row = text[line:text.find('\n', line) if '\n' in text[line:] else len(text)]
+        qa, said = QA_PREFIX.match(row), LABEL.match(row)
+        if qa and line + qa.end() >= b:
+            prefix = qa.end()
+        elif (said and 'BY' not in said['prefix'].upper()
+              and line + said.start('name') <= a and b <= line + said.end('name')):
+            prefix = said.end() + len(row[said.end():]) - len(row[said.end():].lstrip(' \t'))
+            a, b = line + said.start('name'), line + said.end('name')
+        elif kind == 'location':
+            prefix = None  # A BY line: only the name changes.
         else:
-            label_start, label_end = target
-            line = revision.text.rfind('\n', 0, label_start) + 1
-            match = QA_PREFIX.match(revision.text[line:label_end + 8])
-            if not match or line + match.end() < label_end:
-                continue
-            a, b = line, line + match.end()
-            # Who spoke decides how the turn displays: the examiner's turn is Q,
-            # the witness's is A, and anyone else's is colloquy under their name.
-            shown = revision.text[label_start:label_end].strip()
-            wanted = ('Q' if speaker_name_key(name) == _examiner(revision.text, line) else
-                      'A' if speaker_name_key(name) == speaker_name_key('THE WITNESS') else None)
-            if wanted == shown:
-                revised, a, b = revision, a + 5, a + 6  # The draft is right; only the rough changes.
-            elif wanted:
-                revised = revision.replace(a, b, f'     {wanted}    ')
-                a, b = a + 5, a + 6
-            else:
-                revised = revision._replace(a, b, f'     {name}:  ')
-                a, b = a + 5, a + 5 + len(name)
-                if reference:
-                    revised = _replace_speaker(revised, a, b, name, reference, values)
-        delta = len(revised.text) - len(revision.text)
+            continue
+        questioning = qa or _in_questioning(text, line)
+        form = (_turn_form(name, rough.get(line), _examiner(text, line) if questioning else None)
+                if prefix is not None else None)
+        if form:
+            # Q or A in place of the label. The draft may already be right; then only the rough changes.
+            shown = row[:prefix].strip()
+            revised = revision if shown == form else revision.replace(line, line + prefix, f'     {form}    ')
+            edited, span = line + prefix, (line + 5, line + 6)
+        elif qa:
+            revised = revision._replace(line, line + prefix, f'     {name}:  ')
+            edited, span = line + prefix, (line + 5, line + 5 + len(name))
+            if reference:
+                revised = _replace_speaker(revised, *span, name, reference, values)
+        else:
+            revised = revision if text[a:b] == name else _replace_speaker(revision, a, b, name, reference, values)
+            edited, span = b, (a, b + len(revised.text) - len(text))
+        delta = len(revised.text) - len(text)
         for other in locations:
             if kind == 'location' and other is target:
-                other['end'] = b + delta
-            elif other['start'] >= b:
+                other['start'], other['end'] = span
+            elif other['start'] >= edited:
                 other['start'] += delta
                 other['end'] += delta
-        shifted = [(s + delta, e + delta) for s, e in assigned]
-        assigned = shifted + [(a, b + delta if kind == 'location' else b)]
+        assigned = [(s + delta, e + delta) for s, e in assigned] + [span]
         revision = revised
         if kind == 'location':
             target.update(resolved=True, assigned=name)

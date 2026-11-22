@@ -55,11 +55,16 @@ A proposal is checked before it is applied. It conflicts with the exchange when
 the turn speaks directly to the proposed speaker ("Doctor, when you ..." is not
 said by the doctor), when it gives the witness an objection, or when it rests on
 a bare courtesy such as "Thank you". It also conflicts when the reporter's rough
-attributes the words to Gemini's speaker. A conflicting proposal goes to Gemini
+attributes the words to Gemini's speaker. Each rough speaker's Gemini label is
+learned only from turns where the review kept Gemini's label, so a job where
+Gemini mixed up two voices cannot turn the rough against a correct fix. A
+conflicting proposal goes to Gemini
 with the audio of that turn and the turns immediately before and after it. If
 the voice confirms the proposal, it is applied; if it confirms Gemini's label,
 the proposal is dropped. Otherwise Gemini's label stays, the turn is formatted
-by that speaker's role and flagged, and a warning gives its audio time. When the
+by that speaker's role and flagged, and a warning gives its audio time. A
+suggestion that changes the label of a flagged turn says Needs review, and
+Accept All asks before accepting it. When the
 exchange establishes only a role, such as an objection that either of two
 attorneys could have made, Gemini's label stays and the turn is flagged too.
 The audio check hears up to two turns before and after the disputed turn, so
@@ -104,8 +109,13 @@ letter on the record and a capitalized official name are not changed. The
 Candidate column's other forms are matched, and a phrase there such as "back up
 the file" contributes only the words that spell the house form. Notes and examples are
 instructions, never words to swap in. A word that already has the house form
-gets no edit and no highlight, and no dictionary is looked up. In the editor, a
-change to a house form stays a suggestion, green on the changed term only:
+gets no edit and no highlight, and no dictionary is looked up. The formatting
+prompt has style rules of its own, such as X ray for the noun, so after
+formatting the Whole-word rows are applied again, without a model call, and the
+CSV has the last word. Speaker labels and BY lines are left alone, and Context
+rows are not asked again. The job summary counts these as restored after
+formatting. In the editor, a change to a house form stays a suggestion, green
+on the changed term only:
 automatic rules and the AI wording review leave it for you to accept. Words that
 are not in the CSV go through the review as before.
 
@@ -262,9 +272,11 @@ Resolved speakers are collapsed under **Resolved speakers**.
 
 Choose a participant, then **Assign this turn** or **Assign all N linked
 turns**. An assignment changes only the labels. The same label change is
-accepted into Original, and every wording change nearby stays pending. The
-assigned turn shows as Q for the examiner on the BY line, A for the witness,
-and colloquy for anyone else. **Review** goes to the identifying turn and plays
+accepted into Original, and every wording change nearby stays pending. When
+the rough gives that turn to the same person, the turn takes the rough's form:
+Q, A or colloquy. Otherwise, a turn that follows a Q, an A or a BY line shows
+as Q for the examiner on the BY line and A for the witness, and any other turn
+is colloquy under the participant's name. **Review** goes to the identifying turn and plays
 it from four seconds earlier. **Undo** reverses the last assignment.
 
 Assignments are saved with the job and its WAV times. When the same job is

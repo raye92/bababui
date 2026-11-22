@@ -266,9 +266,15 @@ def _parse(output):
 
 # Checks for a proposed change: the exchange, the reporter's rough, and the audio.
 
-def rough_attribution(words, rough):
+def rough_attribution(words, rough, segments=None):
     """Who the reporter's rough says spoke each Gemini word, and the Gemini label each
-    rough speaker usually has. Q is the examiner on the BY line, A is the witness."""
+    rough speaker usually has. Q is the examiner on the BY line, A is the witness.
+
+    With `segments`, each rough speaker's label is learned only from turns where the
+    speaker review kept Gemini's label. The disputed turns are the ones being
+    checked, so they never vote. When Gemini mixes up two voices across much of a
+    job, a majority over all of its labels can give each name the other's label,
+    and every correct fix would then look like a contradiction of the rough."""
     if not rough:
         return [None] * len(words), {}
     names, flat = [], []
@@ -286,9 +292,15 @@ def rough_attribution(words, rough):
         if j is not None and names[j]:
             votes[owner[k]][names[j]] += 1
     said = [v.most_common(1)[0][0] if v else None for v in votes]
+    agreed = None
+    if segments is not None:
+        agreed = [False] * len(words)
+        for segment in segments:
+            if segment.status == KEPT and segment.speaker == segment.gemini:
+                agreed[segment.start:segment.end] = [True] * (segment.end - segment.start)
     by_label = defaultdict(Counter)
-    for word, name in zip(words, said):
-        if name:
+    for i, (word, name) in enumerate(zip(words, said)):
+        if name and (agreed is None or agreed[i]):
             by_label[label_key(word.speaker)][name] += 1
     labels = defaultdict(list)
     for label, counts in by_label.items():
@@ -638,7 +650,7 @@ def review_speakers(words, complete, *, context='', notes=(), rough=None, verify
     for turn in turns:
         segments.extend(decided.get(turn.id) or [Segment(turn.id, turn.start, turn.end, turn.label, turn.label,
                                                          UNREVIEWED, False, _first_time(words, turn.start, turn.end))])
-    rough_said, rough_labels = rough_attribution(words, rough)
+    rough_said, rough_labels = rough_attribution(words, rough, segments)
     segments = _check(words, segments, verify, roles, rough_said, rough_labels, context, progress, log, identities)
     result = SpeakerReview(words, tuple(turns), tuple(segments), (), identities or {})
     for segment in segments:
@@ -809,6 +821,26 @@ def label_changes(record, text):
     changes = record.get('changes') or []
     return tuple((a, b, changes[n] if n is not None and n < len(changes) else None)
                  for a, b, n in _highlights(*_key(record), text))
+
+
+def label_flags(record, text):
+    """(label start, label end, flag) for each speech paragraph of a formatted draft
+    whose words mostly come from a turn the speaker review flagged: a turn it could
+    not settle, even after the audio check, so Gemini's label stayed unconfirmed."""
+    if not record or not record.get('flags') or not record.get('tokens') or not text:
+        return ()
+    flags = [f for f in record['flags'] if isinstance(f.get('tokens'), (list, tuple)) and len(f['tokens']) == 2]
+    owner = {}
+    for n, flag in enumerate(flags):
+        owner.update((i, n) for i in range(*flag['tokens']))
+    found = []
+    for start, end, _, tokens in _unit_tokens(tuple(record['tokens']), text):
+        hits = Counter(owner[i] for i in tokens if i in owner)
+        if hits:
+            n, count = hits.most_common(1)[0]
+            if 2 * count > len(tokens):
+                found.append((start, end, flags[n]))
+    return tuple(found)
 
 
 @lru_cache(maxsize=16)

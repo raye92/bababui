@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
 from app.src.addressees import note_spans
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context, preview_ranges
-from shared.speaker_review import WITNESS, label_changes, label_key, label_units
+from shared.speaker_review import WITNESS, label_changes, label_flags, label_key, label_units
 
 
 def speaker_paragraphs(text):
@@ -54,6 +54,16 @@ def speaker_note(info):
     if info.get('checks'):
         text += ' Checks: ' + '; '.join(info['checks']) + '.'
     return text
+
+
+def flag_note(flag):
+    """One line on a card for a turn the speaker review could not settle."""
+    note = (flag.get('note') or '').strip().rstrip('.')
+    text = (flag.get('text') or '').strip()
+    if not note:
+        return 'AI speaker review could not settle who spoke this turn. Check the audio.'
+    return f'AI speaker review: “{text}” {note}. Check the audio.' if text else \
+        f'AI speaker review: this turn {note}. Check the audio.'
 
 
 def visible_text(text, empty):
@@ -347,6 +357,13 @@ class ReviewView(QWidget):
         self.speaker_changes = frozenset(index for index, change in enumerate(self.changes)
                                          if index not in attribution and index not in self.missing
                                          and speaker_change(change, before_paragraphs, after_paragraphs))
+        # A label change at a turn the speaker review could not settle rests on
+        # Gemini's label alone, so it needs review like an AI-only attribution.
+        flags = label_flags((review or {}).get('speaker_review'), incoming.text)
+        unsettled = {index: flag for index in sorted(self.speaker_changes | attribution)
+                     for a, b, flag in flags
+                     if any(c < b and d > a for _, _, c, d in self.changes[index].ranges)}
+        self.needs_review = self.needs_review | frozenset(unsettled)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -405,6 +422,12 @@ class ReviewView(QWidget):
                     reason.setWordWrap(True)
                     rows.addWidget(reason)
                     break
+            if index in unsettled:
+                reason = QLabel(flag_note(unsettled[index]))
+                reason.setObjectName('speakerFlag')
+                reason.setTextFormat(Qt.PlainText)
+                reason.setWordWrap(True)
+                rows.addWidget(reason)
             if addressee is not None:
                 reason = QLabel(addressee['why'])
                 reason.setObjectName('addresseeReason')

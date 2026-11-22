@@ -149,3 +149,55 @@ def test_who_spoke_decides_whether_an_assigned_turn_shows_as_q_a_or_colloquy():
         assert state.review['answered'] == ['flag:1']
         # The label decision is accepted into the rough; nothing else changes there.
         assert state.original.text == rough.replace('     Q    Okay.', expected)
+
+
+QUESTIONING = ('     MS. JONES:  Objection.\nBY MR. HOMEN:\n     Q    Could that have created the neuroma?\n'
+               '     A    Wait.  Write it out and justify your questions.\n     Q    Thank you, Doctor.\n'
+               '     A    What entry are you saying was a fracture?\n     MR. HOMEN:  Let us go off the record.\n'
+               '     THE WITNESS:  Sure.\n')
+
+
+def unsettled(draft, line):
+    """The draft with one turn under THE WITNESS:, and that label's location."""
+    start = draft.index(line)
+    label = draft.rindex('THE WITNESS', 0, start)
+    location = {'id': 1, 'speaker': 'SPEAKER 2', 'start': label, 'end': label + len('THE WITNESS'),
+                'resolved': False}
+    return draft, location
+
+
+def test_a_colloquy_label_given_to_the_examiner_while_he_questions_becomes_q():
+    """From a November 2026 job at 12:23: the turn showed as THE WITNESS:, and giving it to
+    the examiner made it MR. HOMEN: colloquy, where the rough has his Q."""
+    draft, location = unsettled(QUESTIONING.replace('     Q    Thank you, Doctor.',
+                                                    '     THE WITNESS:  Sure.  Thank you, Doctor.'), 'Sure.  Thank')
+    for ids, spans in (((1,), ()), ((), ((location['start'], location['end']),))):
+        state = SimpleNamespace(original=revision(QUESTIONING), incoming=revision(draft),
+                                review={'locations': [dict(location)]})
+        assign_speaker(state, 'MR. HOMEN', ids, spans)
+        assert '     A    Wait.  Write it out and justify your questions.\n     Q    Sure.  Thank you, Doctor.\n' \
+            in state.incoming.text
+        # The rough already has his Q: only "Sure." is left to review.
+        assert state.original.text == QUESTIONING
+        changed = [(state.original.text[a:b], state.incoming.text[c:d])
+                   for change in suggestions(state.original, state.incoming) for a, b, c, d in change.ranges]
+        assert changed == [('', 'Sure.  ')]
+        if ids:
+            q = state.incoming.text.index('Q    Sure.')
+            assert (state.review['locations'][0]['start'], state.review['locations'][0]['end']) == (q, q + 1)
+            assert state.review['locations'][0]['resolved']
+
+
+def test_the_rough_keeps_colloquy_and_turns_outside_questioning_stay_colloquy():
+    # The rough has the examiner's own colloquy here, so it stays colloquy under his name.
+    draft, location = unsettled(QUESTIONING.replace('     MR. HOMEN:  Let us go off', '     THE WITNESS:  Let us go off'),
+                                'Let us go off')
+    state = SimpleNamespace(original=revision(QUESTIONING), incoming=revision(draft), review={'locations': [location]})
+    assign_speaker(state, 'MR. HOMEN', (1,))
+    assert state.incoming.text == QUESTIONING
+    # Before any BY line, the examiner's turn is colloquy, whatever the rough says.
+    rough = '     MR. HOMEN:  Good morning.\n     THE WITNESS:  Good morning.\nBY MR. HOMEN:\n     Q    Ready?\n'
+    draft, location = unsettled(rough.replace('     MR. HOMEN:  Good', '     THE WITNESS:  Good', 1), 'Good morning.')
+    state = SimpleNamespace(original=revision(rough), incoming=revision(draft), review={'locations': [location]})
+    assign_speaker(state, 'MR. HOMEN', (1,))
+    assert state.incoming.text == rough

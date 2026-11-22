@@ -648,7 +648,7 @@ class DocumentView(QWidget):
                     raise ValueError('Accept All leaves passages missing from the AI draft for you. '
                                      'Listen, then accept or reject each one.')
                 questionable = questionable_speaker_defaults(before[2], ranges) if accept else []
-                flagged = flagged_attributions(before[2], ranges) if accept else 0
+                flagged = flagged_attributions(before[2], ranges, before[1].text) if accept else 0
                 if questionable or flagged:
                     parts = []
                     if questionable:

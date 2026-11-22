@@ -111,9 +111,10 @@ def test_a_row_added_to_the_csv_is_used_on_the_next_run(tmp_path):
     assert load(path).apply('Speaker 1: A re-check of the x-ray.').text == 'Speaker 1: A recheck of the X-ray.'
 
 
-def run_worker(tmp_path, rough, *, review=None):
+def run_worker(tmp_path, rough, *, review=None, style=lambda line: line):
     """The normal AI-draft flow with stand-in models: speaker labels, house spelling,
-    formatting, spelling review and the AI wording review."""
+    formatting, spelling review and the AI wording review. `style` stands in for the
+    formatter's own style rules on each line it writes."""
     from app.src.audio_pipeline import Transcription
     from app.src.ai_review import PROMPT as REVIEW_PROMPT
     from app.src.jobs import ProcessingWorker, Request, TranscriptionCoordinator
@@ -149,7 +150,7 @@ def run_worker(tmp_path, rough, *, review=None):
             if prompt == REVIEW_PROMPT:
                 # Reject every edit it is shown: house edits must never be among them.
                 return json.dumps({item['id']: 'reject' for item in json.loads(text)})
-            return '\n'.join('     A    ' + line.split(': ', 1)[1] for line in text.split('\n'))
+            return '\n'.join(style('     A    ' + line.split(': ', 1)[1]) for line in text.split('\n'))
 
     request = Request('doc', str(wav), 'formatter', 'transcribe', 'rules', {}, original=revision(rough),
                       review_model=review)
@@ -193,6 +194,31 @@ def test_without_ai_review_whole_word_and_context_spellings_still_apply(tmp_path
     draft, calls = run_worker(tmp_path, ROUGH)
     assert draft == DRAFT
     assert {model for model, prompt, _ in calls if prompt == HOUSE_PROMPT} == {'formatter'}
+
+
+def test_whole_word_spellings_the_formatter_undoes_are_applied_again(tmp_path):
+    """The formatting prompt has its own rule, X ray for the noun. The CSV has the last word."""
+    from app.src.suggestions import preview_ranges, suggestions
+    unhyphenated = lambda line: line.replace('X-rays', 'X rays').replace('follow-up', 'follow up')
+    result, calls = run_worker(tmp_path, ROUGH, review='reviewer', style=unhyphenated)
+    original, incoming, _ = result.after_ai
+    # Both X-rays are back. The follow-up noun was a context decision, so it is not asked again.
+    assert incoming.text == DRAFT.replace('follow-up', 'follow up')
+    assert [prompt for _, prompt, _ in calls].count(HOUSE_PROMPT) == 1
+    changed = [(original.text[a:b], incoming.text[c:d])
+               for change in suggestions(original, incoming) for a, b, c, d in preview_ranges(change)]
+    assert changed == [('xrays', 'X-rays'), ('re-evaluation', 'reevaluation')]
+    assert result.summary.startswith('House spelling: 3 terms changed. 2 restored after formatting. ')
+
+
+def test_formatted_speaker_labels_and_by_lines_keep_their_spelling(tmp_path):
+    path = tmp_path / FILENAME
+    path.write_text(HEADER + '"House","smyth","Smith","Whole-word spelling","","",""\n', encoding='utf-8')
+    draft = ('BY MR. SMYTH:\n     Q    Did Mr. Smyth call you?\n     MR. SMYTH:  Objection.  Mr. Smyth again.\n'
+             '     THE WITNESS:  Yes, Smyth did.\n')
+    result = load(path).apply(draft, protect=house_spelling.FORMATTED_LABEL)
+    assert result.text == ('BY MR. SMYTH:\n     Q    Did Mr. Smith call you?\n     MR. SMYTH:  Objection.  '
+                           'Mr. Smith again.\n     THE WITNESS:  Yes, Smith did.\n')
 
 
 def green(editor):
