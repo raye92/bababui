@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtCore import QPointF, Qt, QUrl
 from PySide6.QtGui import QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QLabel
 
 from app.tests.test_inline_integration import audio_review
 from app.tests.test_native_editor import native_window, source_zip
@@ -64,7 +65,9 @@ def test_preview_matches_accepted_native_layout_and_highlights_only_changes(nati
     assert all(fmt.background().style() == Qt.NoBrush for fmt in formats)
     marks = [mark for mark in preview.extraSelections() if mark.format.background().style() != Qt.NoBrush]
     assert 'information' in [mark.cursor.selectedText() for mark in marks]
-    assert {mark.format.background().color().name() for mark in marks} == {'#9edcb0'}
+    assert [mark.cursor.selectedText() for mark in marks
+            if mark.format.background().color().name() == '#ffe08a'] == ['information']
+    assert {mark.format.background().color().name() for mark in marks} == {'#9edcb0', '#ffe08a'}
     assert all(not mark.format.boolProperty(QTextFormat.FullWidthSelection) for mark in marks)
 
     accept_all = next(a for a in native_window.edit_btn.menu().actions() if a.text() == 'Accept All')
@@ -130,6 +133,9 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     projected = page.mapFromScene(page.proxy.mapToScene(QPointF(surface_point)))
     QTest.mouseClick(page.viewport(), Qt.LeftButton, pos=projected)
     assert view.diff_view.current == 1
+    colors = {mark.cursor.selectedText(): mark.format.background().color().name()
+              for mark in preview.extraSelections()}
+    assert colors['copper'] == '#ffe08a' and colors['Orange'] == '#9edcb0'
     assert 10840 <= player.position() <= 11040
     assert not player.isPlaying()
     before = doc.original, doc.incoming
@@ -167,6 +173,58 @@ def test_switching_preview_keeps_the_visible_passage(native_window, tmp_path):
     wait_until(lambda: preview.page_lines()[preview.center_line()].text == anchor)
     action.trigger()
     wait_until(lambda: editor.page_lines()[editor.center_line()].text == anchor)
+
+
+def test_speaker_card_follows_the_displayed_page_and_line(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    original = ('MS. LIN: This testimony refers to the signed contract.\n'
+                'MS. LIN: The schedule was attached to the last page.\n'
+                'MS. LIN JONES: Everyone received a copy the next morning.')
+    view.editor.setPlainText(original)
+    extra = ''.join(f'Additional testimony {i}.\n' for i in range(28))
+    view.receive(extra + original.replace('MS. LIN:', 'SPEAKER 1:')
+                 .replace('MS. LIN JONES:', 'SPEAKER 1:'), [])
+    sidebar = view.diff_view
+    sidebar.filter_speaker('SPEAKER 1')
+    assert len(sidebar.visible_indices) == 1
+
+    def location(editor):
+        line = next(line for line in editor.page_lines() if 'Everyone received' in line.text)
+        return f'Page {line.page}, line {line.number}'
+
+    def heading():
+        return sidebar.cards[sidebar.current].findChild(QLabel).text()
+
+    original_location = location(view.editor)
+    assert original_location in heading()
+    action = preview_action(native_window)
+    action.trigger()
+    preview_location = location(visible_preview(view))
+    assert preview_location != original_location
+    assert preview_location in heading()
+    native_window.toggle_view_btn.click()
+    assert location(view.incoming_editor) in heading()
+    native_window.toggle_view_btn.click()
+    assert preview_location in heading()
+    action.trigger()
+    assert original_location in heading()
+
+
+def test_preview_locates_first_visible_addition_after_a_page_break(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    original = '\n'.join(f'Testimony {i}.' for i in range(25))
+    view.editor.setPlainText(original)
+    view.receive(original + '\nMS. LIN: Good afternoon.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    view.diff_view.select(0)
+
+    line = next(line for line in preview.page_lines() if 'Good afternoon.' in line.text)
+    assert (line.page, line.number) == (2, 1)
+    assert 'Page 2, line 1' in view.diff_view.cards[0].findChild(QLabel).text()
+    assert preview.textCursor().position() == line.position
 
 
 @pytest.mark.parametrize('change', ['paragraph break', 'deletion', 'metadata'])

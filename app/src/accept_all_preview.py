@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QTextEdit
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
 from app.src.native_editor import NativeTranscriptEditor
-from app.src.review_colors import ADDITION_BACKGROUND
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.suggestions import preview_ranges, resolve_all
 
 
@@ -64,15 +64,20 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self.highlight_edit(selected)
 
     def highlight_edit(self, selected):
-        marks = []
+        marks, focused = [], []
         for _, _, index, cursor in self._highlights:
             mark = QTextEdit.ExtraSelection()
             mark.cursor = cursor
-            mark.format.setBackground(QColor(ADDITION_BACKGROUND))
-            mark.format.setForeground(QColor('#1e5531'))
-            mark.format.setFontUnderline(index == selected)
-            marks.append(mark)
-        self.set_review_marks(marks, [])
+            if index == selected:
+                mark.format.setBackground(QColor(CHECK_BACKGROUND))
+                mark.format.setForeground(QColor(CHECK_FOREGROUND))
+                mark.format.setFontUnderline(True)
+                focused.append(mark)
+            else:
+                mark.format.setBackground(QColor(ADDITION_BACKGROUND))
+                mark.format.setForeground(QColor('#1e5531'))
+                marks.append(mark)
+        self.set_review_marks(marks + focused, [])
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)

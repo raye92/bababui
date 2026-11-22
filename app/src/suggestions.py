@@ -74,6 +74,19 @@ def preview_ranges(change):
     return ((a, b, c, d),)
 
 
+def preview_start(change, side):
+    """Locate the first visible highlight, or the boundary of a one-sided edit."""
+    offset = 0 if side == 'original' else 2
+    text = getattr(change, side).text
+    for span in preview_ranges(change):
+        start, end = span[offset:offset + 2]
+        while start < end and text[start] == '\n':
+            start += 1
+        if start < end:
+            return start
+    return change.ranges[0][offset]
+
+
 def _layout(line):
     match = re.match(r'^(\s*)([QA])([ \t]+)(.*)$', line)
     if match:

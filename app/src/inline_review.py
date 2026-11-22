@@ -10,8 +10,8 @@ from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
-from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
-from app.src.suggestions import preview_ranges
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND, FOCUS_OUTLINE
+from app.src.suggestions import preview_ranges, preview_start
 
 
 def _qt(text):
@@ -76,7 +76,8 @@ def _row_groups(model, old_rows, new_rows, common):
 
     Correspondence comes from source offsets, so repeated wording cannot align
     with the wrong occurrence. A changed wrap can span several rows until the
-    source layouts meet again. This grouping never creates review decisions.
+    source layouts meet again. Changed groups keep both starting offsets so
+    empty comparison rows can be placed at the actual edit boundary.
     """
     def extent(row, text):
         end = row.source_end
@@ -116,7 +117,7 @@ def _row_groups(model, old_rows, new_rows, common):
                 or (p == q and a <= p <= b) or (r == s and c <= r <= d)
                 for p, q, r, s in edit.ranges))
             old_group = old_rows[old_index:x]
-            yield old_group, incoming_rows(c, d, old_group[0] if old_group else None), indices, False
+            yield old_group, incoming_rows(c, d, old_group[0] if old_group else None), indices, (a, c)
         if x < len(old_rows):
             # The Original page supplies shared row breaks. A shorter proposal
             # must not duplicate every following line merely because its own
@@ -124,7 +125,7 @@ def _row_groups(model, old_rows, new_rows, common):
             row = old_rows[x]
             matched = replace(row, kind='incoming', source_start=y,
                               source_end=y+row.source_end-row.source_start)
-            yield [row], [matched], (), True
+            yield [row], [matched], (), None
         old_index, incoming_position = x+1, end
 
 
@@ -211,6 +212,7 @@ class InlineReviewEditor(QTextEdit):
         self.source_editors = None
         self._external_sources = False
         self._current_edit = -1
+        self._focus_rects = []
         self._source_highlight = None
         self._page_width, self._page_height = 800., 1200.
         self._font = QFont(font or QFont('Courier New', 12))
@@ -262,9 +264,9 @@ class InlineReviewEditor(QTextEdit):
                 row.incoming_start = matched.source_start
             self.rows.append(row)
 
-        for section_index, (old_group, new_group, edits, shared) in enumerate(
+        for section_index, (old_group, new_group, edits, starts) in enumerate(
                 _row_groups(model, old_rows, new_rows, self.shared_ranges)):
-            if shared:
+            if starts is None:
                 append_original(old_group[0], matched=new_group[0])
                 old_index += 1
                 continue
@@ -285,7 +287,7 @@ class InlineReviewEditor(QTextEdit):
                     old_index += 1
                 y += added_height
             else:
-                a = reference.source_start if reference else len(model.original.text)
+                a = starts[0]
                 y = reference.y+added_height if reference else self._top+added_height
                 baseline_end = y
                 row = _compact(ReviewRow('original', a, a, '', page, 0, page, 0,
@@ -305,8 +307,7 @@ class InlineReviewEditor(QTextEdit):
                 self.rows.append(projected)
                 y += row.pitch
             if not new_group:
-                c = next((span[2]+reference.source_end-span[0] for span in self.shared_ranges
-                          if span[0] <= reference.source_end <= span[1]), len(model.incoming.text))
+                c = starts[1]
                 row = _compact(ReviewRow('incoming', c, c, '', page, 0, page, 0,
                                         y, self._left, self._line_height,
                                         reference.leading if reference else 0, incoming.font(),
@@ -434,21 +435,24 @@ class InlineReviewEditor(QTextEdit):
                 measured.append((row, layout.lineAt(0).y(), block.blockFormat().lineHeight()))
             # Batch margin updates so Qt lays out the full review only once.
             cursor.beginEditBlock()
-            previous_origin = previous_height = 0
+            previous_bottom = 0
             for index, (row, leading, height) in enumerate(measured):
-                origin = row.y-leading
+                # A changed table can put both caption columns in reading order.
+                # Qt stacks those blocks, even when their native rows share a y.
+                origin = max(previous_bottom, row.y - leading)
+                row.y = origin + leading
                 cursor.setPosition(row.display_start)
                 block = cursor.blockFormat()
                 if index == 0:
                     fmt = frame.frameFormat()
-                    fmt.setTopMargin(max(0, origin))
+                    fmt.setTopMargin(origin)
                     frame.setFrameFormat(fmt)
                 else:
-                    block.setTopMargin(max(0, origin-previous_origin-previous_height))
+                    block.setTopMargin(origin - previous_bottom)
                 cursor.setBlockFormat(block)
-                previous_origin, previous_height = origin, height
+                previous_bottom = origin + height
             fmt = frame.frameFormat()
-            bottom = (self.pages[-1].top+self.pages[-1].height-previous_origin-previous_height
+            bottom = (self.pages[-1].top+self.pages[-1].height-previous_bottom
                       if self.pages else self._bottom)
             fmt.setBottomMargin(max(0, bottom))
             frame.setFrameFormat(fmt)
@@ -577,24 +581,26 @@ class InlineReviewEditor(QTextEdit):
             if candidates:
                 index = min(candidates)[1]
         if index is not None:
-            self._current_edit = index
-            self._refresh_selections()
             self.selected.emit(index)
         self.source_activated.emit(*playback)
+
+    def highlight_edit(self, index):
+        if self._current_edit != index:
+            self._current_edit = index
+            self._refresh_selections()
 
     def focus_edit(self, index):
         if self.model is None or not 0 <= index < len(self.model.edits):
             return
-        self._current_edit = index
+        self.highlight_edit(index)
         change = self.model.edits[index]
         if change.ranges:
-            a, b, c, d = change.ranges[0]
-            side, position = ('original', a) if a != b else ('incoming', c)
-            if self.set_source_position(side, position):
+            a, b, _, _ = change.ranges[0]
+            side = 'original' if a != b else 'incoming'
+            if self.set_source_position(side, preview_start(change, side)):
                 self.ensureCursorVisible()
                 rect = self.cursorRect()
                 self.verticalScrollBar().setValue(max(0, self.verticalScrollBar().value()+rect.y()-self.viewport().height()//2))
-        self._refresh_selections()
 
     def set_source_highlight(self, side, start, end):
         self._source_highlight = side, start, end
@@ -606,6 +612,8 @@ class InlineReviewEditor(QTextEdit):
 
     def _refresh_selections(self):
         marks = []
+        focused_rows = {self.document().findBlock(mark.display_position).blockNumber()
+                        for mark in self.boundary_marks if mark.edit_index == self._current_edit}
         intervals = []
         if self.model is not None and 0 <= self._current_edit < len(self.model.edits):
             for a, b, c, d in preview_ranges(self.model.edits[self._current_edit]):
@@ -613,7 +621,7 @@ class InlineReviewEditor(QTextEdit):
         if self._source_highlight:
             intervals.append((*self._source_highlight, True))
         for side, start, end, audio in intervals:
-            for row in self.rows:
+            for row_index, row in enumerate(self.rows):
                 if side == 'incoming' and row.kind == 'equal' and row.incoming_start is not None:
                     source_start = row.incoming_start
                 elif (side == 'incoming') == (row.kind == 'incoming'):
@@ -630,9 +638,18 @@ class InlineReviewEditor(QTextEdit):
                 if audio:
                     mark.format.setBackground(QColor(120, 165, 220, 85))
                 else:
+                    focused_rows.add(row_index)
                     mark.format.setFontUnderline(True)
                 marks.append(mark)
         super().setExtraSelections(marks)
+        self._focus_rects = []
+        for index in sorted(focused_rows):
+            row = self.rows[index]
+            if index - 1 in focused_rows and self.rows[index - 1].page == row.page:
+                self._focus_rects[-1].setBottom(row.y + row.pitch)
+            else:
+                self._focus_rects.append(QRectF(4, row.y, self._page_width - 8, row.pitch))
+        self.viewport().update()
 
     def _update_scroll_range(self):
         if self.pages:
@@ -705,6 +722,9 @@ class InlineReviewEditor(QTextEdit):
             painter.setFont(source.font())
             painter.fillRect(QRectF(0, page.top+page.height-12, self.viewport().width(), 12),
                              self.palette().color(QPalette.Window))
+        painter.setPen(QPen(QColor(FOCUS_OUTLINE), 2))
+        for rect in self._focus_rects:
+            painter.drawRect(rect)
         painter.resetTransform()
         for marker in self.boundary_marks:
             rect = self.boundary_rect(marker)
