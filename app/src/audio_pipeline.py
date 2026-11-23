@@ -1,6 +1,6 @@
 """WAV transcription and timestamp-aware, best-effort speaker stitching."""
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 import hashlib
 from itertools import chain, count
@@ -21,6 +21,7 @@ from shared.storage import file_lock
 AUDIO_MODEL = 'gemini-3.5-transcribe'
 CHUNK_SECONDS = 30 * 60
 OVERLAP_SECONDS = 60
+OVERLAP_DRIFT_SECONDS = 10
 CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
 MAX_DURATION = CHUNK_SECONDS + 3 * CHUNK_STEP
 VOCABULARY_SECONDS = 60 * 60
@@ -58,7 +59,7 @@ def segments(duration, *, vocabulary=False):
         start = end - OVERLAP_SECONDS
 
 
-def parse_words(response, *, timestamps=True):
+def parse_words(response, *, timestamps=True, partial=False):
     words = []
     for step in getattr(response, 'steps', None) or []:
         if getattr(step, 'type', None) != 'model_output':
@@ -66,20 +67,36 @@ def parse_words(response, *, timestamps=True):
         for block in getattr(step, 'content', None) or []:
             if getattr(block, 'type', None) != 'text':
                 continue
+            if not isinstance(getattr(block, 'text', None), str):
+                if partial:
+                    continue
+                raise ValueError('Invalid transcription text block.')
             raw = block.text.encode('utf-8')
             annotations = [a for a in (getattr(block, 'annotations', None) or [])
                            if getattr(a, 'type', None) == 'word_info']
             if raw.strip() and not annotations:
                 words.extend(Word(token, None, None, None) for token in block.text.split())
             for i, a in enumerate(annotations):
-                start, end = a.start_index, a.end_index
-                if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= len(raw):
-                    raise ValueError('Invalid transcription word offsets.')
-                if i and start < annotations[i-1].end_index:
-                    raise ValueError('Transcription word offsets are out of order.')
+                start, end = getattr(a, 'start_index', None), getattr(a, 'end_index', None)
+                try:
+                    if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= len(raw):
+                        raise ValueError('Invalid transcription word offsets.')
+                    if i and start < annotations[i-1].end_index:
+                        raise ValueError('Transcription word offsets are out of order.')
+                    if partial:
+                        raw[start:end].decode('utf-8')
+                except ValueError:
+                    if not partial:
+                        raise
+                    annotations = annotations[:i]
+                    break
+            if partial and annotations:
+                # A truncated text block can end with an unannotated word fragment.
+                raw = raw[:annotations[-1].end_index]
+            for i, a in enumerate(annotations):
                 # Include punctuation between annotations, using the original UTF-8 text.
                 next_start = annotations[i+1].start_index if i+1 < len(annotations) else len(raw)
-                begin = 0 if i == 0 else start
+                begin = 0 if i == 0 else a.start_index
                 text = raw[begin:next_start].decode('utf-8').strip()
                 speaker = getattr(a, 'speaker', None) or None
                 if not timestamps:
@@ -96,7 +113,7 @@ def parse_words(response, *, timestamps=True):
                 # Overlapping turns can run backward. Preserve text order and
                 # let the alignment choose timestamps that agree with it.
                 words.append(Word(text, speaker, t0, t1))
-    if not words:
+    if not words and not partial:
         raise ValueError('No speech was returned.')
     return words
 
@@ -133,38 +150,88 @@ def stitch(chunks):
     return tuple(chain.from_iterable(kept)), warnings
 
 
-def _stitched_chunks(chunks):
-    speakers = dict.fromkeys(w.speaker for w in chunks[0] if w.speaker is not None)
+def _number_speakers(words):
+    speakers = dict.fromkeys(w.speaker for w in words if w.speaker is not None)
     labels = {speaker: f'Speaker {i}' for i, speaker in enumerate(speakers, 1)}
+    return [replace(w, speaker=labels[w.speaker]) if w.speaker is not None else w for w in words], labels
+
+
+def _shift_words(words, offset):
+    return [replace(w, start=w.start + offset, end=w.end + offset) if w.start is not None else w
+            for w in words]
+
+
+def _bounded_words(words, duration):
+    return [w if w.start is not None and w.end is not None and 0 <= w.start <= w.end <= duration
+            else replace(w, start=None, end=None) for w in words]
+
+
+@dataclass
+class _OverlapReview:
+    # These labels are local to the join until recording-wide stitching finishes.
+    unmatched: list[str] = field(default_factory=list)
+    cut: float | None = None
+    untimed: bool = False
+
+    def warnings(self, chunk_number, *, labels=None, offset=0):
+        speakers = self.unmatched if labels is None else [labels[s] for s in self.unmatched if s in labels]
+        warnings = [f'Unmatched speaker in chunk {chunk_number} assigned {s}; review the identity.'
+                    for s in speakers]
+        if self.cut is not None:
+            minutes, seconds = divmod(int(offset + self.cut), 60)
+            warnings.append(f'Uncertain overlap alignment: joined at {minutes}:{seconds:02d}. Review for missing or repeated words.')
+        if self.untimed:
+            warnings.append('Could not match the overlap without timestamps. Both chunks were kept. Review for repeated words.')
+        return warnings
+
+
+class _ResumedWords(list[Word]):
+    """A segment word list with review notes for its internal join."""
+    def __init__(self, words, review):
+        super().__init__(words)
+        self.review = review
+
+
+def _stitched_chunks(chunks, continuation_reviews=()):
+    tail, labels = _number_speakers(chunks[0])
     next_label = count(len(labels) + 1)
-    tail = [replace(w, speaker=labels[w.speaker]) if w.speaker is not None else w for w in chunks[0]]
-    combined, warnings = [], []
+    combined = []
+    warnings = continuation_reviews[0].warnings(1, labels=labels) if continuation_reviews else []
     for index, chunk in enumerate(chunks[1:], 1):
         start = index * CHUNK_STEP
-        incoming = [replace(w, start=w.start+start, end=w.end+start) if w.start is not None else w
-                    for w in chunk]
+        incoming = _shift_words(chunk, start)
         # Only the previous chunk participates in the next overlap.
-        kept, tail, seam_warnings = _join_overlap(tail, incoming, index + 1, start, next_label)
+        review = _OverlapReview()
+        kept, tail, labels = _join_overlap(tail, incoming, start, start + OVERLAP_SECONDS, next_label, review)
         combined.append(kept)
-        warnings.extend(seam_warnings)
+        warnings.extend(review.warnings(index + 1))
+        if continuation_reviews:
+            warnings.extend(continuation_reviews[index].warnings(index + 1, labels=labels, offset=start))
     combined.append(tail)
-    return combined, warnings
+    return combined, list(dict.fromkeys(warnings))
 
 
-def _join_overlap(a, b, chunk_number, start, next_label):
-    midpoint = start + OVERLAP_SECONDS // 2
+def _word_key(word):
+    return re.sub(r'[^\w]', '', word.text.casefold())
+
+
+def _join_overlap(a, b, start, end, next_label, review):
+    midpoint = (start + end) / 2
     a_timed = any(w.start is not None for w in a)
-    b_timed = any(w.start is not None for w in b)
-    left = [(i, w) for i, w in enumerate(a) if w.start is not None and w.start >= start]
-    right = [(i, w) for i, w in enumerate(b) if w.start is not None and w.start < start + OVERLAP_SECONDS]
+    left = [(i, w) for i, w in enumerate(a) if w.start is not None and start <= w.start < end]
+    right = [(i, w) for i, w in enumerate(b) if w.start is not None and start <= w.start < end]
+    # Later timed words cannot locate an untimed opening turn in the shared minute.
+    b_timed = bool(right) or bool(b and b[0].start is not None)
     # Search near the edge of an untimed chunk for the repeated minute.
     if not a_timed:
         left = list(enumerate(a[-400:], max(0, len(a) - 400)))
     if not b_timed:
-        right = list(enumerate(b[:400]))
-    normalize = lambda w: re.sub(r'[^\w]', '', w.text.casefold())
-    left_text = [normalize(w) for _, w in left]
-    right_text = [normalize(w) for _, w in right]
+        for i, w in enumerate(b[:400]):
+            if w.start is not None:
+                break
+            right.append((i, w))
+    left_text = [_word_key(w) for _, w in left]
+    right_text = [_word_key(w) for _, w in right]
     matcher = SequenceMatcher(None, left_text, right_text, autojunk=False)
     pairs = []
     if a_timed and b_timed:
@@ -172,7 +239,7 @@ def _join_overlap(a, b, chunk_number, start, next_label):
             if match.size >= 3:
                 pairs.extend((left[match.a+k], right[match.b+k]) for k in range(match.size)
                              if left_text[match.a+k]
-                             and abs(left[match.a+k][1].start-right[match.b+k][1].start) <= 10)
+                             and abs(left[match.a+k][1].start-right[match.b+k][1].start) <= OVERLAP_DRIFT_SECONDS)
     else:
         match = matcher.find_longest_match()
         tokens = left_text[match.a:match.a+match.size]
@@ -193,11 +260,10 @@ def _join_overlap(a, b, chunk_number, start, next_label):
             candidates[speaker] = target
     targets = Counter(candidates.values())
     mapping = {s: t for s, t in candidates.items() if targets[t] == 1}
-    warnings = []
     for speaker in dict.fromkeys(w.speaker for w in b):
         if speaker is not None and speaker not in mapping:
             mapping[speaker] = f'Speaker {next(next_label)}'
-            warnings.append(f'Unmatched speaker in chunk {chunk_number} assigned {mapping[speaker]}; review the identity.')
+            review.unmatched.append(mapping[speaker])
     b = [replace(w, speaker=mapping[w.speaker]) if w.speaker is not None else w for w in b]
     if len(pairs) >= 5:
         if a_timed and b_timed:
@@ -208,15 +274,44 @@ def _join_overlap(a, b, chunk_number, start, next_label):
             ib += 1
         else:
             (ia, _), (ib, _) = pairs[0]
-        return a[:ia], b[ib:], warnings
+        return a[:ia], b[ib:], mapping
     if not (a_timed and b_timed):
-        warnings.append('Could not match the overlap without timestamps. Both chunks were kept. Review for repeated words.')
-        return a, b, warnings
+        review.untimed = True
+        return a, b, mapping
+    if not left or not right:
+        # Only one recording of the words in the overlap. A midpoint cut would lose them.
+        review.cut = end if not right else start
+        return a, b, mapping
     a = [w for w, t in zip(a, _seam_positions(a, start)) if t < midpoint]
     b = [w for w, t in zip(b, _seam_positions(b, midpoint)) if t >= midpoint]
-    minutes, seconds = divmod(midpoint, 60)
-    warnings.append(f'Uncertain overlap alignment: joined at {minutes}:{seconds:02d}. Review for missing or repeated words.')
-    return a, b, warnings
+    review.cut = midpoint
+    return a, b, mapping
+
+
+def _merge_continuation(prefix, resumed, start):
+    cutoff = prefix[-1].end
+    later = {i for i, w in enumerate(resumed) if w.end is not None and w.end > cutoff and _word_key(w)}
+    if not later:
+        return None
+    if all(resumed[i].start <= cutoff + OVERLAP_DRIFT_SECONDS for i in later):
+        # A slightly later timestamp on a repeated word is not evidence of new speech.
+        overlap = [w for w in prefix if w.start is not None and w.end >= start]
+        matcher = SequenceMatcher(None, [_word_key(w) for w in overlap], [_word_key(w) for w in resumed],
+                                  autojunk=False)
+        for a, b, size in matcher.get_matching_blocks():
+            for k in range(size):
+                i = b + k
+                if i in later and abs(overlap[a + k].start - resumed[i].start) <= OVERLAP_DRIFT_SECONDS:
+                    later.remove(i)
+        if not later:
+            return None
+
+    numbered, labels = _number_speakers(prefix)
+    review = _OverlapReview()
+    kept, tail, _ = _join_overlap(numbered, resumed, start, cutoff, count(len(labels) + 1), review)
+    if review.untimed:
+        return None  # The complete speaker-only pass can resolve ambiguous repeated wording.
+    return _ResumedWords(chain(kept, tail), review)
 
 
 def save_json(path, data):
@@ -234,7 +329,7 @@ class AudioPipeline:
         self.cache = Path(cache)
         self.testing = testing
 
-    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False, vocabulary=()):
+    def _upload(self, path):
         sdk = self.client.client()
         uploaded = sdk.files.upload(file=str(path), config={'mime_type': 'audio/wav'})
         deadline = time.monotonic()+300
@@ -245,43 +340,90 @@ class AudioPipeline:
             uploaded = sdk.files.get(name=uploaded.name)
         if str(getattr(uploaded.state, 'value', uploaded.state)).upper() not in ('ACTIVE', 'NONE'):
             raise ValueError('Audio upload processing failed.')
-        if vocabulary:
-            configs = [{'mode': {'type': 'verbatim'}, 'custom_vocabulary': list(vocabulary)}]
-        else:
-            speaker = {'type': 'verbatim', 'diarization_mode': 'speaker'}
-            configs = [{'mode': {**speaker, 'timestamp_granularities': ['word']}}]
-            if not timing_only:
-                configs.append({'mode': speaker})
-        for config in configs:
-            for attempt in range(2):
-                try:
-                    response = sdk.interactions.create(model=AUDIO_MODEL,
-                        input=[{'type': 'audio', 'uri': uploaded.uri, 'mime_type': 'audio/wav'}], store=False,
-                        generation_config={'max_output_tokens': 16384, 'transcription_config': config},
-                        automatic_continuation=False, timeout=1800)
-                    break
-                except Exception as exc:
-                    status_code = getattr(exc, 'status_code', getattr(exc, 'code', None))
-                    if status_code != 429 or attempt:
-                        raise
-                    progress('Transcription rate limit reached (429). Waiting 60 seconds before retrying this chunk...')
-                    time.sleep(60)
-                    progress('Retrying transcription for this chunk...')
-            if self.testing:
-                self._save_response(response)
-            status = getattr(response.status, 'value', response.status)
-            if status == 'completed':
-                try:
-                    return parse_words(response, timestamps='timestamp_granularities' in config['mode'])
-                except ValueError:
-                    if timing_only:
-                        return []  # A short clip can be silent or have unusable annotations.
-                    raise
-            if timing_only and status == 'incomplete':
-                return []
-            if status != 'incomplete':
+        return uploaded.uri
+
+    def _request(self, uri, config, progress):
+        sdk = self.client.client()
+        for attempt in range(2):
+            try:
+                response = sdk.interactions.create(model=AUDIO_MODEL,
+                    input=[{'type': 'audio', 'uri': uri, 'mime_type': 'audio/wav'}], store=False,
+                    generation_config={'max_output_tokens': 16384, 'transcription_config': config},
+                    automatic_continuation=False, timeout=1800)
                 break
-        raise ValueError('Transcription did not complete; existing text was preserved.')
+            except Exception as exc:
+                status_code = getattr(exc, 'status_code', getattr(exc, 'code', None))
+                if status_code != 429 or attempt:
+                    raise
+                progress('Transcription rate limit reached (429). Waiting 60 seconds before retrying this chunk...')
+                time.sleep(60)
+                progress('Retrying transcription for this chunk...')
+        if self.testing:
+            self._save_response(response)
+        status = getattr(response.status, 'value', response.status)
+        if status not in ('completed', 'incomplete'):
+            raise ValueError('Transcription did not complete; existing text was preserved.')
+        return status, response
+
+    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False, vocabulary=()):
+        uri = self._upload(path)
+        speaker = {'type': 'verbatim', 'diarization_mode': 'speaker'}
+        timed_config = {'mode': {**speaker, 'timestamp_granularities': ['word']}}
+        config = {'mode': {'type': 'verbatim'}, 'custom_vocabulary': list(vocabulary)} if vocabulary else timed_config
+        status, response = self._request(uri, config, progress)
+        if status == 'completed':
+            try:
+                return parse_words(response, timestamps=not vocabulary)
+            except ValueError:
+                if timing_only:
+                    return []  # A short clip can be silent or have unusable annotations.
+                raise
+        if timing_only:
+            return []
+        if vocabulary:
+            raise ValueError('Transcription did not complete; existing text was preserved.')
+
+        prefix = parse_words(response, partial=True)
+        resumed = []
+        if any(w.start is not None for w in prefix):
+            duration = media.probe(path)
+            prefix = _bounded_words(prefix, duration)
+            while prefix and prefix[-1].end is None:
+                prefix.pop()
+            if prefix and OVERLAP_SECONDS < prefix[-1].end < duration:
+                cutoff = prefix[-1].end
+                start = cutoff - OVERLAP_SECONDS
+                progress('Resuming incomplete transcription with one minute of overlap...')
+                complete, resumed = self._continue_segment(path, start, duration, timed_config, progress)
+                if complete:
+                    merged = _merge_continuation(prefix, resumed, start)
+                    if merged is not None:
+                        return merged
+
+        progress('Retrying the full chunk with speaker labels only...')
+        status, fallback = self._request(uri, {'mode': speaker}, progress)
+        if status != 'completed':
+            raise ValueError('Transcription did not complete; existing text was preserved.')
+        words = parse_words(fallback, timestamps=False)
+        # Keep the first measurement where both requests timed the same wording.
+        return recover_word_times(recover_word_times(words, resumed), prefix)
+
+    def _continue_segment(self, path, start, duration, config, progress):
+        try:
+            with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
+                clip = Path(temporary) / 'continuation.wav'
+                media.prepare(path, {'start': start, 'end': duration}, clip)
+                status, response = self._request(self._upload(clip), config, progress)
+        except Exception:
+            # The original upload is still available for the full-chunk fallback.
+            return False, []
+        try:
+            words = parse_words(response, partial=status == 'incomplete')
+        except ValueError:
+            # A malformed tail disqualifies the join but earlier timings can still support the fallback.
+            status = 'incomplete'
+            words = parse_words(response, partial=True)
+        return status == 'completed', _shift_words(_bounded_words(words, duration - start), start)
 
     @staticmethod
     def _save_response(response):
@@ -297,7 +439,8 @@ class AudioPipeline:
             for step in getattr(response, 'steps', None) or []
             if getattr(step, 'type', None) == 'model_output'
             for block in getattr(step, 'content', None) or []
-            if getattr(block, 'type', None) == 'text'), encoding='utf-8')
+            if getattr(block, 'type', None) == 'text' and isinstance(getattr(block, 'text', None), str)),
+            encoding='utf-8')
 
     def run(self, path, progress=lambda message: None, *, vocabulary=()):
         path = Path(path)
@@ -312,9 +455,14 @@ class AudioPipeline:
         with file_lock(directory / 'cache.lock'):
             return self._run_locked(path, plan, directory, progress, digest, normalized_vocabulary(vocabulary))
 
-    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False, vocabulary=()):
+    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False, vocabulary=(),
+                       continuation_reviews=None):
+        review = _OverlapReview()
+        review_path = cached.with_name('review-' + cached.name)
         if cached.exists():
             words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
+            if continuation_reviews is not None and review_path.exists():
+                review = _OverlapReview(**json.loads(review_path.read_text(encoding='utf-8')))
         else:
             with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
                 prepared = Path(temporary) / 'segment.wav'
@@ -330,11 +478,20 @@ class AudioPipeline:
                     words = self.transcribe_segment(prepared, progress, vocabulary=vocabulary)
                 else:
                     words = self.transcribe_segment(prepared, progress)
+                    if isinstance(words, _ResumedWords):
+                        review = words.review
             check_wav_digest(path, digest)
-        words = [w if (w.start is not None and w.end is not None and 0 <= w.start <= w.end <= end - start)
-                 else replace(w, start=None, end=None) for w in words]
+        words = _bounded_words(words, end - start)
         if not cached.exists() and (not timing_only or any(w.start is not None for w in words)):
+            if continuation_reviews is not None:
+                # Publish review information before the word list marks this chunk complete.
+                if review.unmatched or review.cut is not None:
+                    save_json(review_path, asdict(review))
+                else:
+                    review_path.unlink(missing_ok=True)
             save_json(cached, [asdict(w) for w in words])
+        if continuation_reviews is not None:
+            continuation_reviews.append(review)
         return words
 
     def _recover_timing(self, path, start, end, words, directory, progress, digest):
@@ -346,8 +503,7 @@ class AudioPipeline:
             clip = self._segment_words(path, clip_start, clip_end, cached, progress, digest, timing_only=True)
             if clip is None:
                 break
-            observations.extend(replace(w, start=w.start + offset, end=w.end + offset)
-                                if w.start is not None else w for w in clip)
+            observations.extend(_shift_words(clip, offset))
         return recover_word_times(words, observations)
 
     def _vocabulary_windows(self, path, duration, progress, digest, vocabulary):
@@ -370,10 +526,11 @@ class AudioPipeline:
         return windows, warnings
 
     def _run_locked(self, path, plan, directory, progress, digest, vocabulary):
-        chunks, timing_warnings = [], []
+        chunks, timing_warnings, continuation_reviews = [], [], []
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing speaker and timing chunk {i+1} of {len(plan)}...')
-            words = self._segment_words(path, start, end, directory / f'chunk-{i}.json', progress, digest)
+            words = self._segment_words(path, start, end, directory / f'chunk-{i}.json', progress, digest,
+                                        continuation_reviews=continuation_reviews)
             if not any(w.start is not None for w in words):
                 progress(f'Recovering word timestamps for chunk {i+1} from shorter audio clips...')
                 words = self._recover_timing(path, start, end, words, directory, progress, digest)
@@ -381,7 +538,7 @@ class AudioPipeline:
             if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
-        retained, warnings = _stitched_chunks(chunks)
+        retained, warnings = _stitched_chunks(chunks, continuation_reviews)
         words = tuple(chain.from_iterable(retained))
         if vocabulary:
             windows, vocabulary_warnings = self._vocabulary_windows(path, plan[-1][1], progress, digest, vocabulary)

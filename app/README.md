@@ -50,10 +50,14 @@ notice names, custom vocabulary uses up to two independent 60-minute chunks,
 starting at minutes 0 and 59. A 60-minute recording needs one vocabulary
 request. Both schedules overlap by one minute.
 If a transcription request returns HTTP 429, the app waits 60 seconds and retries
-that chunk once. Word timestamps and tolerant text alignment match speakers and
-remove repeated words at each join. An unmatched speaker receives a new label.
-If alignment is uncertain and both chunks have timestamps, the app joins them
-at the midpoint of the overlap. Review the warnings and resulting transcript.
+that request once. If Gemini returns an incomplete timed transcript, the app
+retries the remainder once, starting one minute before the end of the last fully
+timed word. If it cannot resume, it requests the full chunk with speaker labels
+only and recovers word times from matching phrases in the earlier responses.
+At each join, the app uses word times and shared wording to match speakers and
+remove repeated words. An unmatched speaker receives a new label.
+If the wording differs but both chunks have timed words in the overlap, the app
+uses the midpoint as a fallback. Review the warnings and resulting transcript.
 Timestamps are used internally and do not appear in Incoming.
 
 ## Notice PDFs
