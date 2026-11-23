@@ -44,6 +44,26 @@ def widget(model):
     return view
 
 
+def outlined_rows(view):
+    view.clearFocus()
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    rows = []
+    cursor = QTextCursor(view.document())
+    for row in view.rows:
+        if row.kind == 'equal':
+            continue
+        cursor.setPosition(row.display_start)
+        y = round(view.cursorRect(cursor).center().y() * scale)
+        if 0 <= y < image.height():
+            # Include the margin occupied by a paragraph-break marker.
+            left = max(0, round((row.x - 16) * scale))
+            right = min(image.width(), round((view._page_width - 2) * scale))
+            if any(image.pixelColor(x, y).name() == '#000000' for x in range(left, right)):
+                rows.append(row.text)
+    return rows
+
+
 def wording_model():
     before = 'Intro.\nThe red car is large.\nTail.'
     after = 'Intro.\nThe blue car is small.\nTail.'
@@ -61,12 +81,12 @@ def test_section_pairs_whole_passage_with_exact_independent_highlights():
     assert view.toPlainText().splitlines() == [
         'Intro.', 'The red car is large.', 'The blue car is small.', 'Tail.']
     assert [row.kind for row in view.rows] == ['equal', 'original', 'incoming', 'equal']
-    for side, word in [('original', 'red'), ('incoming', 'blue')]:
+    for side, word, color in [('original', 'red', '#f2aba7'), ('incoming', 'blue', '#9edcb0')]:
         position = view.display_position(side, getattr(model, side).text.index(word))
         cursor = QTextCursor(view.document())
         cursor.setPosition(position)
         cursor.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor)
-        assert cursor.charFormat().background().color() != cursor.blockFormat().background().color()
+        assert cursor.charFormat().background().color().name() == color
     view.focus_edit(1)
     assert view.source_position() == ('original', model.original.text.index('large'))
     assert model.original.text == 'Intro.\nThe red car is large.\nTail.'
@@ -248,23 +268,24 @@ def test_adjacent_changes_show_each_removal_with_its_own_addition():
         ('incoming', 'First added line.'), ('incoming', 'Second added line.'),
         ('original', 'The car is red.'), ('incoming', 'The car is blue.')]
     view.focus_edit(0)
-    assert len(view._focus_rects) == 1
+    assert outlined_rows(view) == ['First removed line.', 'Second removed line.',
+                                   'First added line.', 'Second added line.']
     view.focus_edit(1)
-    assert len(view._focus_rects) == 1
+    assert outlined_rows(view) == ['The car is red.', 'The car is blue.']
     view.close()
 
 
 @pytest.mark.parametrize('reverse', [False, True], ids=['forward', 'reverse'])
-@pytest.mark.parametrize('original,proposal,old_rows,new_rows', [
-    ('The car.', 'Today The car.', ['The car.'], ['Today The car.']),
-    ('The car.', 'The car. Today.', ['The car.'], ['The car. Today.']),
-    ('Kept.', 'Kept.\nAdded.', [''], ['Added.']),
-    ('Kept.', 'Added.\nKept.', [''], ['Added.']),
-    ('First.\nSecond.', 'First. Second.', ['First.', 'Second.'], ['First. Second.']),
-    ('First.\nSecond.', 'First.Second.', ['First.', 'Second.'], ['First.Second.']),
-    ('Kept.\n', 'Kept.\nAdded.', [''], ['Added.']),
+@pytest.mark.parametrize('original,proposal,old_rows,new_rows,context_only', [
+    ('The car.', 'Today The car.', ['The car.'], ['Today The car.'], None),
+    ('The car.', 'The car. Today.', ['The car.'], ['The car. Today.'], None),
+    ('Kept.', 'Kept.\nAdded.', [''], ['Added.'], None),
+    ('Kept.', 'Added.\nKept.', [''], ['Added.'], None),
+    ('First.\nSecond.', 'First. Second.', ['First.', 'Second.'], ['First. Second.'], 'Second.'),
+    ('First.\nSecond.', 'First.Second.', ['First.', 'Second.'], ['First.Second.'], 'Second.'),
+    ('Kept.\n', 'Kept.\nAdded.', [''], ['Added.'], None),
 ])
-def test_model_and_editor_pair_complete_affected_rows(original, proposal, old_rows, new_rows, reverse):
+def test_model_and_editor_pair_complete_affected_rows(original, proposal, old_rows, new_rows, context_only, reverse):
     from app.src.review_model import build_review
     if reverse:
         original, proposal, old_rows, new_rows = proposal, original, new_rows, old_rows
@@ -276,9 +297,7 @@ def test_model_and_editor_pair_complete_affected_rows(original, proposal, old_ro
     assert original[slice(*section.original_range)].strip('\n') == '\n'.join(old_rows)
     assert proposal[slice(*section.incoming_range)].strip('\n') == '\n'.join(new_rows)
     view.focus_edit(0)
-    focused = [row.text for row in view.rows if any(r.top() <= row.y + row.pitch / 2 < r.bottom()
-                                                    for r in view._focus_rects)]
-    assert focused == old_rows + new_rows
+    assert outlined_rows(view) == [text for text in old_rows + new_rows if text != context_only]
     view.close()
 
 
@@ -295,7 +314,9 @@ def test_adjacent_edits_stay_paired_when_a_replacement_moves_the_wrap():
         rows = [row for row in view.rows if index in row.edit_indices]
         pairs.append(rows)
         view.focus_edit(index)
-        assert len(view._focus_rects) == 1
+        focused = outlined_rows(view)
+        for side in ('original', 'incoming'):
+            assert any(r.text in focused for r in rows if r.kind == side)
     assert len(pairs) == 2
     assert 'red' in pairs[0][0].text and any('green' in r.text for r in pairs[0] if r.kind == 'incoming')
     assert 'old' in pairs[1][0].text and any('modern' in r.text for r in pairs[1] if r.kind == 'incoming')
@@ -317,7 +338,7 @@ def test_paired_paragraphs_stay_together_inside_one_multiline_decision():
         ('original', 'The sign says red.'), ('incoming', 'The sign says orange.'),
         ('original', 'Blue marks the next gate.'), ('incoming', 'Green marks the next gate.')]
     view.focus_edit(0)
-    assert len(view._focus_rects) == 1
+    assert outlined_rows(view) == [r.text for r in view.rows]
     assert resolve(old, new, edit, True)[0].text == new.text
     assert resolve(old, new, edit, False)[1].text == old.text
     view.close()
@@ -350,33 +371,169 @@ def test_selected_word_owns_its_first_wrapped_row_and_scrolls_into_view():
     originals = [r for r in view.rows if r.kind == 'original']
     assert len(originals) >= 2 and originals[0].source_start == len(prefix)
     assert view.textCursor().position() == originals[0].display_start
-    assert view.verticalScrollBar().value() > 0 and len(view._focus_rects) == 1
+    assert view.verticalScrollBar().value() > 0
+    assert originals[0].text in outlined_rows(view)
     view.close()
 
 
-def test_outline_starts_at_the_diff_and_closes_at_the_visible_right_edge():
+@pytest.mark.parametrize('index,selected', [(0, ('red', 'blue')), (1, ('large', 'small'))])
+def test_black_border_follows_only_the_selected_words(index, selected):
     view = widget(wording_model())
-    row = next(row for row in view.rows if row.kind == 'original')
-    view.focus_edit(0)
-    for width in (round(view._page_width) + view.verticalScrollBar().width(), 600):
-        view.resize(width, 500)
-        QApplication.processEvents()
-        image = view.viewport().grab().toImage()
-        scale = image.devicePixelRatio()
-        y = round((row.y + row.pitch / 2 - view.verticalScrollBar().value()) * scale)
-        left = round(row.x * scale)
-        right = min(image.width(), round(view._page_width * scale))
-        border = [x for x in range(image.width()) if image.pixelColor(x, y).name() == '#d4a000']
-        middle = (left + right) // 2
-        for edge, expected in (([x for x in border if x < middle], left),
-                               ([x for x in border if x >= middle], right - 3 * scale)):
-            assert abs(edge[0] - expected) <= 1
-            assert edge == list(range(edge[0], edge[-1] + 1))
-            assert abs(len(edge) - 3 * scale) < 1
-        horizontal = [y for y in range(image.height()) if image.pixelColor(middle, y).name() == '#d4a000']
-        assert abs(len(horizontal) - 6 * scale) < 2
+    view.highlight_edit(index)
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    for word in ('red', 'blue', 'large', 'small'):
+        cursor = view.document().find(word)
+        last = view.cursorRect(cursor)
+        cursor.setPosition(cursor.selectionStart())
+        first = view.cursorRect(cursor)
+        left, right = (round(rect.x() * scale) for rect in (first, last))
+        top, bottom = round(first.top() * scale), round((first.bottom() + 1) * scale)
+        middle_x, middle_y = (left + right) // 2, (top + bottom) // 2
+        for x, y, dx, dy in ((left, middle_y, 1, 0), (right, middle_y, 1, 0),
+                             (middle_x, top, 0, 1), (middle_x, bottom, 0, 1)):
+            tolerance = round(2 * scale)
+            black = any(image.pixelColor(x + dx * i, y + dy * i).name() == '#000000'
+                        for i in range(-tolerance, tolerance + 1))
+            assert black == (word in selected), (word, x, y)
     assert not any(mark.format.fontUnderline() for mark in view.extraSelections())
     view.close()
+
+
+def test_four_pixel_outline_grows_outward_and_preserves_the_shared_edge():
+    view = widget(wording_model())
+    view.clearFocus()
+    view.highlight_edit(0)
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    cursor = view.document().find('red')
+    block = cursor.block()
+    line = block.layout().lineAt(0)
+    y = round(view.cursorRect(cursor).center().y() * scale)
+    for pos, outward in ((cursor.selectionStart(), -1), (cursor.selectionEnd(), 1)):
+        edge = block.layout().position().x() + line.cursorToX(pos - block.position())[0]
+        pixels = [x for x in range(round((edge - 5) * scale), round((edge + 5) * scale))
+                  if image.pixelColor(x, y).name() == '#000000']
+        assert abs(len(pixels) - 4 * scale) < 1
+        center = (pixels[0] + pixels[-1] + 1) / 2
+        assert center == pytest.approx((edge + outward) * scale, abs=0.51)
+    # At the shared red/green edge the old one-pixel inset on each side remains.
+    cursor.setPosition(cursor.selectionStart())
+    x = round((view.cursorRect(cursor).x() + 5) * scale)
+    shared = view.cursorRect(view.document().find('blue')).top()
+    ink = sum(image.pixelColor(x, y).name() == '#000000'
+              for y in range(round((shared - 4) * scale), round((shared + 4) * scale)))
+    assert abs(ink - 2 * scale) < 1
+    view.close()
+
+
+def test_consecutive_comparisons_have_one_blank_line_between_pairs():
+    from app.src.review_model import build_review
+    original = revision('The car is red.\nThe house is old.\nShared testimony.')
+    incoming = revision('The car is blue.\nThe house is new.\nShared testimony.')
+    view = widget(build_review(original, incoming))
+    a, b, c, d, shared = view.rows
+    assert [r.kind for r in view.rows] == ['original', 'incoming', 'original', 'incoming', 'equal']
+    assert b.y - a.y == pytest.approx(a.pitch, abs=1)
+    assert c.y - (b.y + b.pitch) == pytest.approx(b.pitch, abs=1)
+    assert d.y - c.y == pytest.approx(c.pitch, abs=1)
+    assert shared.y - d.y == pytest.approx(d.pitch, abs=1)
+    assert [line.number for line in view.page_lines()] == [1, 2, 3]
+    assert view.document().blockCount() == 5
+    view.close()
+
+
+def test_selected_outline_closes_over_adjacent_highlights():
+    old, new = 'A muchlongerword, old.', 'A bit, new.'
+    model = comparison(old, new, [(2, old.index(','), 2, new.index(',')),
+                                  (old.index('old'), len(old) - 1, new.index('new'), len(new) - 1)],
+                       (0, len(old), 0, len(new)))
+    view = widget(model)
+    view.highlight_edit(0)
+    cursor = view.document().find('muchlongerword')
+    last = view.cursorRect(cursor)
+    cursor.setPosition(cursor.selectionStart())
+    first = view.cursorRect(cursor)
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    bottom = round((first.bottom() + 1) * scale)
+    tolerance = round(2 * scale)
+    for x in range(round((first.x() + 2) * scale), round((last.x() - 2) * scale)):
+        assert any(image.pixelColor(x, y).name() == '#000000'
+                   for y in range(bottom - tolerance, bottom + tolerance + 1)), x
+    view.close()
+
+
+def test_selected_tab_is_boxed_at_its_actual_tab_stop():
+    old, new = '😀A\tZ tail.', '😀A Z tail.'
+    view = widget(comparison(old, new, [(2, 3, 2, 3)], (0, len(old), 0, len(new))))
+    view.highlight_edit(0)
+    cursor = view.document().find('\t')
+    assert cursor.hasSelection()
+    last = view.cursorRect(cursor)
+    cursor.setPosition(cursor.selectionStart())
+    first = view.cursorRect(cursor)
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    y = round(first.center().y() * scale)
+    for edge in (first.x(), last.x()):
+        assert any(image.pixelColor(x, y).name() == '#000000'
+                   for x in range(round((edge - 2) * scale), round((edge + 2) * scale) + 1))
+    assert image.pixelColor(round((first.x() + last.x()) * scale / 2), y).name() == '#f2aba7'
+    view.close()
+
+
+def test_native_paragraph_space_inside_a_comparison_stays_blank():
+    old, new = 'First original line.\nSecond original line.', 'Replacement.'
+    span = (0, len(old), 0, len(new))
+    model = comparison(old, new, [span], span)
+    view = widget(model)
+    source = view.source_editors[0].document()
+    cursor = QTextCursor(source.findBlockByNumber(1))
+    fmt = cursor.blockFormat()
+    fmt.setTopMargin(60)
+    cursor.setBlockFormat(fmt)
+    view.set_model(model)
+    first, second, _ = view.rows
+    assert first.section == second.section
+    assert second.y - first.y - first.pitch == pytest.approx(60, abs=1)
+    view.highlight_edit(0)
+    image = view.viewport().grab().toImage()
+    scale = image.devicePixelRatio()
+    middle = round((first.y + first.pitch + 30 - view.verticalScrollBar().value()) * scale)
+    assert image.pixelColor(round((first.x + 10) * scale), middle) == image.pixelColor(
+        round((first.x - 20) * scale), middle)
+    view.close()
+
+
+def test_scrolling_scaled_rows_keeps_the_two_diff_backgrounds_in_contact():
+    from app.src.inline_review import InlineReviewEditor
+    from app.src.native_editor import _paper_font
+    from app.src.page_view import PageView
+    from app.src.review_model import build_review
+
+    app = QApplication.instance() or QApplication([])
+    # The nonbreaking hyphen uses a fallback font with a different ascent on Windows.
+    model = build_review(revision('A record\u2011keeping example.'), revision('A filing example.'))
+    view = InlineReviewEditor(_paper_font('Courier New', 18))
+    view.set_model(model)
+    page = PageView(view)
+    page.setAttribute(Qt.WA_DontShowOnScreen)
+    page.resize(610, 240)
+    page.show()
+    app.processEvents()
+    a, b = view.rows
+    for offset in range(12):
+        view.verticalScrollBar().setValue(offset)
+        app.processEvents()
+        image = page.viewport().grab().toImage()
+        scale = image.devicePixelRatio()
+        x = round(page.mapFromScene(view._page_width - 30, 0).x() * scale)
+        top, bottom = [round(page.mapFromScene(0, r.y + r.pitch/2 - offset).y() * scale)
+                       for r in (a, b)]
+        colors = {image.pixelColor(x, y).name() for y in range(top, bottom + 1)}
+        assert colors == {'#fbe9e7', '#e7f5ea'}, (offset, colors)
+    page.close()
 
 
 def test_review_formats_rows_without_relaying_out_each_row():

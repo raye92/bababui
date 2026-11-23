@@ -4,6 +4,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 import pytest
 
+from app.tests.test_inline_review import outlined_rows
 from app.tests.test_native_editor import native_window, source_zip
 
 
@@ -170,21 +171,7 @@ def test_unmatched_speaker_marks_only_the_label_and_keeps_the_diff(native_window
     assert color_at('incoming', state.incoming.text, 'THE WITNESS:  Correct') == '#9edcb0'
 
 
-def outlined_rows(editor):
-    image = editor.viewport().grab().toImage()
-    scale = image.devicePixelRatio()
-    rows = []
-    cursor = QTextCursor(editor.document())
-    for row in editor.rows:
-        cursor.setPosition(row.display_start)
-        y = round(editor.cursorRect(cursor).center().y() * scale)
-        if 0 <= y < image.height():
-            if any(image.pixelColor(x, y).name() == '#d4a000' for x in range(image.width())):
-                rows.append(row.text)
-    return rows
-
-
-def test_yellow_outline_follows_the_selected_pair_of_lines(native_window, tmp_path):
+def test_black_outlines_follow_the_selected_edit(native_window, tmp_path):
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     view.editor.setPlainText('The car is red.\nShared testimony.\nThe house is old.')
@@ -204,7 +191,7 @@ def test_yellow_outline_follows_the_selected_pair_of_lines(native_window, tmp_pa
     ('Kept.', 'Kept.\nAdded.', ['', 'Added.']),
     ('Removed.\nKept.', 'Kept.', ['Removed.', '']),
 ])
-def test_yellow_outline_includes_the_empty_side_of_a_change(native_window, tmp_path, original, incoming, expected):
+def test_black_outline_includes_the_empty_side_of_a_change(native_window, tmp_path, original, incoming, expected):
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current
     view.editor.setPlainText(original)

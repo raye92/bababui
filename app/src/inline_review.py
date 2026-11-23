@@ -4,14 +4,20 @@ from dataclasses import dataclass, replace
 import math
 
 from PySide6.QtCore import Qt, Signal, QPointF, QSizeF, QRectF, QSignalBlocker
-from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPalette, QPen,
-                          QTextBlockFormat, QTextCharFormat, QTextCursor)
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath,
+                          QPainterPathStroker, QPalette, QPen, QTextBlockFormat, QTextCharFormat, QTextCursor)
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.native_editor import NativeTranscriptEditor, PageLine
-from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND, draw_focus_outlines
+from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start
+
+
+_ROW_COLORS = {'original': QColor('#fbe9e7'), 'incoming': QColor('#e7f5ea')}
+_FOCUS_WIDTH = 4
+_FOCUS_INSET = 1
+_FOCUS_PEN = QPen(Qt.black, 2 * _FOCUS_INSET, Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin)
 
 
 def _qt(text):
@@ -42,6 +48,7 @@ class ReviewRow:
     # The right cell shares a display row with the plaintiff but has its own
     # native text range, after all text in the caption's left cell.
     caption_cell: tuple[int, int, int, int] | None = None
+    background_rect: QRectF | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +169,7 @@ class InlineReviewEditor(QTextEdit):
         self.source_editors = None
         self._external_sources = False
         self._current_edit = -1
-        self._focus_rects = []
+        self._edit_cursors = []
         self._source_highlight = None
         self._page_width, self._page_height = 800., 1200.
         self._font = QFont(font or QFont('Courier New', 12))
@@ -192,6 +199,7 @@ class InlineReviewEditor(QTextEdit):
         anchor = self.source_position() if self.rows else ('original', 0)
         self.model = model
         self._highlight_ranges = [preview_ranges(edit) for edit in model.edits]
+        self._edit_cursors = [[] for _ in model.edits]
         original, incoming = self._sources(model)
         self._page_width, self._page_height = original._page_width, original._page_height
         self._left, self._right = original._left, original._right
@@ -290,6 +298,7 @@ class InlineReviewEditor(QTextEdit):
         for page in range(1, len(extra)+1):
             shift = 0.
             cursor_y = top+self._top
+            previous = None
             for row in (row for row in self.rows if row.page == page):
                 if row.kind != 'incoming' and row.number:
                     source_y, source_pitch = native_geometry[row.source_start, row.source_end]
@@ -298,7 +307,14 @@ class InlineReviewEditor(QTextEdit):
                 else:
                     row.y = cursor_y
                     shift += row.pitch
+                if previous is not None and previous.kind == 'incoming' and row.kind == 'original':
+                    # Use a visual blank line between comparisons. Any native
+                    # space already at this boundary counts toward the gap.
+                    gap = max(0., cursor_y + previous.pitch - row.y)
+                    row.y += gap
+                    shift += gap
                 cursor_y = row.y+row.pitch
+                previous = row
             height = max(self._page_height, self._page_height+shift,
                          cursor_y-top+self._bottom)
             self.pages.append(ReviewPage(page, top, height))
@@ -322,7 +338,6 @@ class InlineReviewEditor(QTextEdit):
         side, position = anchor
         self.set_source_position(side, min(position, len(getattr(model, side).text)))
         self._refresh_selections()
-        self.viewport().update()
 
     def _render_document(self, unmatched_speakers):
         document = self.document()
@@ -352,8 +367,6 @@ class InlineReviewEditor(QTextEdit):
                 # in margins so switching between native and compact pitch
                 # cannot move the glyph relative to its painted line number.
                 block.setLineHeight(_compact(row).pitch, QTextBlockFormat.FixedHeight.value)
-                if row.kind != 'equal':
-                    block.setBackground(QColor('#fbe9e7' if row.kind == 'original' else '#e7f5ea'))
                 cursor.setBlockFormat(block)
                 char = QTextCharFormat()
                 char.setFont(row.font)
@@ -373,6 +386,7 @@ class InlineReviewEditor(QTextEdit):
                             mark = QTextCharFormat()
                             mark.setBackground(QColor('#f2aba7' if row.kind == 'original' else ADDITION_BACKGROUND))
                             cursor.mergeCharFormat(mark)
+                            self._edit_cursors[index].append(QTextCursor(cursor))
                 if speaker_ends and row.kind != 'original':
                     source_start = row.incoming_start if row.kind == 'equal' else row.source_start
                     source_end = source_start + len(row.text)
@@ -404,6 +418,16 @@ class InlineReviewEditor(QTextEdit):
                 # Qt stacks those blocks, even when their native rows share a y.
                 origin = max(previous_bottom, row.y - leading)
                 row.y = origin + leading
+                if row.kind != 'equal':
+                    row.background_rect = QRectF(row.x, row.y, self._page_width - row.x, row.pitch)
+                    if index:
+                        previous = self.rows[index - 1]
+                        if previous.section == row.section and previous.page == row.page:
+                            # Share the paint edge when either the block boxes or
+                            # their glyphs touch. Keep intentional paragraph space.
+                            gap = min(origin - previous_bottom, row.y - previous.background_rect.bottom())
+                            if gap < 1:
+                                previous.background_rect.setBottom(row.y)
                 cursor.setPosition(row.display_start)
                 block = cursor.blockFormat()
                 if index == 0:
@@ -548,7 +572,7 @@ class InlineReviewEditor(QTextEdit):
     def highlight_edit(self, index):
         if self._current_edit != index:
             self._current_edit = index
-            self._refresh_selections()
+            self.viewport().update()
 
     def focus_edit(self, index):
         if self.model is None or not 0 <= index < len(self.model.edits):
@@ -573,7 +597,6 @@ class InlineReviewEditor(QTextEdit):
 
     def _refresh_selections(self):
         marks = []
-        focused_rows = {i for i, row in enumerate(self.rows) if self._current_edit in row.edit_indices}
         if self._source_highlight:
             side, start, end = self._source_highlight
             for row in self.rows:
@@ -593,14 +616,6 @@ class InlineReviewEditor(QTextEdit):
                 mark.format.setBackground(QColor(120, 165, 220, 85))
                 marks.append(mark)
         super().setExtraSelections(marks)
-        self._focus_rects = []
-        for index in sorted(focused_rows):
-            row = self.rows[index]
-            band = QRectF(row.x, row.y, self._page_width - row.x, row.pitch)
-            if index - 1 in focused_rows and self.rows[index - 1].page == row.page:
-                self._focus_rects[-1] = self._focus_rects[-1].united(band)
-            else:
-                self._focus_rects.append(band)
         self.viewport().update()
 
     def _update_scroll_range(self):
@@ -640,14 +655,75 @@ class InlineReviewEditor(QTextEdit):
             row = lines[min(max(0, int(line)), len(lines)-1)]
             self.verticalScrollBar().setValue(max(0, int(row.y-self.viewport().height()/2)))
 
+    def _paint_row_backgrounds(self, event):
+        x, y = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+        visible = event.rect().translated(x, y)
+        with QPainter(self.viewport()) as painter:
+            painter.translate(-x, -y)
+            for row in self.rows:
+                if row.y > visible.bottom() + 1:
+                    break
+                band = row.background_rect
+                if band is not None and band.bottom() > visible.top():
+                    painter.fillRect(band, _ROW_COLORS[row.kind])
+
+    def _paint_edit_outline(self, painter, scroll, marker_rects):
+        """Trace the visible text on each side, including the steps at soft wraps."""
+        if not 0 <= self._current_edit < len(self._edit_cursors):
+            return
+        paths = {side: QPainterPath() for side in _ROW_COLORS}
+        visible_top = scroll - _FOCUS_WIDTH
+        visible_bottom = scroll + self.viewport().height() + _FOCUS_WIDTH
+        for cursor in self._edit_cursors[self._current_edit]:
+            block = cursor.block()
+            row = self.rows[block.blockNumber()]
+            band = row.background_rect
+            if band.bottom() < visible_top or band.top() > visible_bottom:
+                continue
+            layout = block.layout()
+            line = layout.lineAt(0)
+            start = cursor.selectionStart() - block.position()
+            length = cursor.selectionEnd() - cursor.selectionStart()
+            path = paths[row.kind]
+            origin = layout.position().x()
+            for run in line.glyphRuns(start, length):
+                rect = run.boundingRect()
+                path.addRect(origin + rect.left(), band.top(), rect.width(), band.height())
+            # Tabs occupy highlighted space, but have no glyph run.
+            pos = start
+            for piece in cursor.selectedText().split('\t')[:-1]:
+                pos += _qt(piece)
+                a, b = line.cursorToX(pos)[0], line.cursorToX(pos + 1)[0]
+                path.addRect(origin + min(a, b), band.top(), abs(b - a), band.height())
+                pos += 1
+        contours = list(paths.values())
+        for rect in marker_rects:
+            marker_path = QPainterPath()
+            marker_path.addRect(rect)
+            contours.append(marker_path)
+        painter.setPen(_FOCUS_PEN)
+        selected = QPainterPath()
+        for path in contours:
+            path.setFillRule(Qt.WindingFill)
+            contour = path.simplified()
+            painter.drawPath(contour)
+            selected = selected.united(contour)
+        # Keep one pixel inside each contour, including where red meets green.
+        # Only the outer half of this wider stroke contributes additional ink.
+        stroker = QPainterPathStroker(_FOCUS_PEN)
+        stroker.setWidth(2 * (_FOCUS_WIDTH - _FOCUS_INSET))
+        painter.fillPath(stroker.createStroke(selected).subtracted(selected), Qt.black)
+
     def paintEvent(self, event):
+        self._paint_row_backgrounds(event)
         super().paintEvent(event)
         if not self.source_editors:
             return
         source = self.source_editors[0]
         painter = QPainter(self.viewport())
         scroll = self.verticalScrollBar().value()
-        painter.translate(0, -scroll)
+        scroll_x = self.horizontalScrollBar().value()
+        painter.translate(-scroll_x, -scroll)
         painter.setFont(source.font())
         painter.setPen(QColor('#8a8f98'))
         for row in self.rows:
@@ -674,19 +750,22 @@ class InlineReviewEditor(QTextEdit):
             painter.setFont(source.font())
             painter.fillRect(QRectF(0, page.top+page.height-12, self.viewport().width(), 12),
                              self.palette().color(QPalette.Window))
-        painter.resetTransform()
+        marker_rects = []
         for marker in self.boundary_marks:
-            rect = self.boundary_rect(marker)
+            rect = self.boundary_rect(marker).translated(scroll_x, scroll)
             if marker.empty:
                 color = QColor('#116329' if marker.side == 'original' else '#82071e')
                 # A cosmetic pen keeps the stroke visible when the page scales down.
                 painter.setPen(QPen(color, 0))
                 painter.drawLine(rect.topLeft(), rect.bottomLeft())
-                continue
-            painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else ADDITION_BACKGROUND))
-            painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
-            painter.drawText(rect, Qt.AlignCenter, '↵')
-        draw_focus_outlines(painter, self, self._focus_rects)
+            else:
+                painter.fillRect(rect, QColor('#f2aba7' if marker.side == 'original' else ADDITION_BACKGROUND))
+                painter.setPen(QColor('#6e2530' if marker.side == 'original' else '#1e5531'))
+                painter.drawText(rect, Qt.AlignCenter, '↵')
+            if marker.edit_index == self._current_edit:
+                marker_rects.append(rect.adjusted(-2, 0, 2, 0) if marker.empty else rect)
+        # Paint on top so the next row's text background cannot cut off a border.
+        self._paint_edit_outline(painter, scroll, marker_rects)
 
     def boundary_rect(self, marker):
         cursor = QTextCursor(self.document())
