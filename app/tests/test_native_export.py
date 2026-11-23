@@ -9,10 +9,93 @@ from app.src.casecat.codec import load_job, records
 from app.src import documents
 from app.src.review_model import build_review
 from app.src.suggestions import resolve_all
-from app.tests.test_native_casecat import zip_bytes
+from app.tests.test_native_casecat import job_files, zip_bytes
 from app.tests.test_native_fields import field_files, native_stream
 from app.tests.test_native_layout import layout_bytes
 from app.tests.test_native_structure import container_files
+
+
+@pytest.mark.parametrize('source, replacement', [
+    (('blue\x0e \x0b', '\x04berry\x0e \x0b', 'paste.'), 'Maple syrup'),
+    (('blue\x0e \x0b', '\x04berry\x0e \x0b', 'paste.'), 'Maple paste'),
+    (('\x0e\x0b', '\x04\x0e\x0b', 'Maple syrup.'), None),
+], ids=['emptied-strokes', 'rewritten-suffix', 'previously-exported'])
+def test_export_keeps_the_word_space_before_a_replacement(tmp_path, source, replacement):
+    files = container_files(('Choose or\x0e \x0b', *source, ' Snow', '\x04fall.'))
+    del files['jobs/example.wav']
+    doc = documents.import_casecat(inspect_archive(zip_bytes(files)))
+    original = doc.native.original
+    if replacement:
+        incoming = original.revise(original.text.replace('blue berry paste', replacement))
+        review = build_review(original, incoming)
+        doc.native.original, doc.native.incoming = resolve_all(original, incoming, review.ranges, True)
+
+    target = tmp_path / 'spacing_AI.zip'
+    doc.export_casecat(target)
+    bundle = inspect_archive(target)
+    restored = load_job(bundle, bundle.jobs[0])
+    assert restored.text == f'Choose or {replacement or "Maple syrup"}. Snowfall.'
+    assert restored.notes_bytes == doc.native.job.notes_bytes
+    # CATalyst consumes the word space even across empty strokes. Its Delete
+    # Space record still belongs on the intact suffix in the second sentence.
+    stream = native_stream(restored)
+    joins = [offset for offset, raw in records(stream, 0, len(stream)) if raw == b'\x04']
+    assert joins == [stream.index(b'\x04fall.')]
+
+
+def test_edit_around_native_compound_keeps_its_join(tmp_path):
+    bundle = inspect_archive(zip_bytes(container_files(('Choose snow\x0e \x0b', '\x04fall', ' today.'))))
+    job = load_job(bundle, bundle.jobs[0])
+    revision = job.revision.revise('Choose "snow fall," today.')
+    target = tmp_path / 'quoted.zip'
+    export_zip(bundle, job.with_revision(revision), target)
+    exported = inspect_archive(target)
+    restored = load_job(exported, job.key)
+    assert b'\x04fall' in native_stream(restored)
+
+
+def test_deleted_join_cannot_attach_to_a_repeated_word(tmp_path):
+    words = ('Have blue\x0e \x0b', '\x04berry\x0e \x0b', 'and ', 'berry ', 'jam.')
+    bundle = inspect_archive(zip_bytes(container_files(words)))
+    job = load_job(bundle, bundle.jobs[0])
+    start = job.text.index('berry')
+    revision = job.revision.replace(start, start + len('berry and '), '')
+    target = tmp_path / 'repeated.zip'
+    export_zip(bundle, job.with_revision(revision), target)
+    exported = inspect_archive(target)
+    restored = load_job(exported, job.key)
+    assert restored.text == 'Have blue berry jam.'
+    stream = native_stream(restored)
+    assert all(raw != b'\x04' for _, raw in records(stream, 0, len(stream)))
+
+
+def test_replacement_sharing_its_suffix_initial_keeps_the_word_space(tmp_path):
+    files = container_files(('Watch snow\x0e \x0b', '\x04fall', ' today.'))
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    incoming = job.baseline.revise('Watch snow form today.')
+    review = build_review(job.baseline, incoming)
+    accepted, _ = resolve_all(job.baseline, incoming, review.ranges, True)
+    target = tmp_path / 'replacement.zip'
+    export_zip(bundle, job.with_revision(accepted), target)
+    restored = load_job(inspect_archive(target), job.key)
+    stream = native_stream(restored)
+    assert all(raw != b'\x04' for _, raw in records(stream, 0, len(stream)))
+
+
+@pytest.mark.parametrize('make_files, ai_copy', [
+    (container_files, False),
+    (job_files, True),
+], ids=['lossless-copy', 'unsupported-layout'])
+def test_unedited_export_preserves_native_bytes_when_repair_is_inapplicable(tmp_path, make_files, ai_copy):
+    files = make_files(('Left ', '\x0e\x0b', '\x04\x0e\x0b', 'right.'))
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    target = tmp_path / 'unedited.zip'
+    export_zip(bundle, job, target, ai_copy=ai_copy)
+    exported = inspect_archive(target)
+    restored = load_job(exported, exported.jobs[0])
+    assert restored.native_bytes == job.native_bytes
 
 
 def test_accept_all_export_uses_colloquy_indent_for_new_speaker_turns(tmp_path):

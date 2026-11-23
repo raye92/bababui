@@ -179,7 +179,11 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False, alignment
     validate_job(bundle, job)
     if target.exists() and not overwrite:
         raise ValueError('That destination already exists.')
-    serialized = serialize_native(job, bundle)
+    if ai_copy and job.revision == job.baseline:
+        from .structure import repair_legacy_spacing
+        serialized = repair_legacy_spacing(job, bundle)
+    else:
+        serialized = serialize_native(job, bundle)
     from .fields import serialize_metadata
     metadata = serialize_metadata(job, bundle)
     native_member = bundle.member(job.key + '.sgngl')

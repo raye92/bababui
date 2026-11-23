@@ -8,6 +8,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
+from itertools import accumulate
 from pathlib import PureWindowsPath
 import re
 import struct
@@ -384,10 +385,94 @@ def _colloquy_indents(text, elements, element_starts):
     return indents
 
 
+def _word_gap(text, position):
+    """Identify the word boundary at a control, excluding surrounding punctuation."""
+    left = right = position
+    while left and text[left - 1] == ' ':
+        left -= 1
+    while right < len(text) and text[right] == ' ':
+        right += 1
+    if (left == right or left == 0 or right == len(text)
+            or text[left - 1].isspace() or text[right].isspace()):
+        return None
+    start, stop = left - 1, right + 1
+    while start and text[start - 1].isalnum():
+        start -= 1
+    while stop < len(text) and text[stop].isalnum():
+        stop += 1
+    return left - 1, right, text[start:stop]
+
+
+def _legacy_delete_spaces(revision):
+    # Older exports left two empty translated strokes when replacing a word
+    # and its suffix. A standalone Delete Space can also be intentional.
+    groups = set()
+    position = 0
+    for index, span in enumerate(revision.spans):
+        if index and not span.content and span.formatting == ('04', '0e', '0b'):
+            previous = revision.spans[index - 1]
+            gap = _word_gap(revision.text, position)
+            if (not previous.content and previous.formatting == ('0e', '0b')
+                    and gap and gap[1] - gap[0] == 2):
+                groups.add(index)
+        position += len(span.content)
+    return groups
+
+
+def repair_legacy_spacing(job, bundle):
+    legacy_joins = _legacy_delete_spaces(job.baseline)
+    if legacy_joins:
+        try:
+            return _write_revision(job, bundle, legacy_joins)
+        except ValueError:
+            # An unedited copy can still be exported when its layout cannot
+            # be rewritten safely. The source archive remains authoritative.
+            pass
+    return job.native_bytes
+
+
 def serialize_candidate(job, bundle):
     validate_job(bundle, job)
     if job.revision == job.baseline:
         return job.native_bytes
+    return _write_revision(job, bundle, _legacy_delete_spaces(job.baseline))
+
+
+def _retained_join_gaps(baseline, groups, targets, legacy_joins):
+    """Locate the same two source characters in the reviewed stroke groups."""
+    source_starts = list(accumulate((len(s.content) for s in baseline.spans), initial=0))
+    target_starts = list(accumulate(map(len, targets), initial=0))
+
+    @lru_cache(maxsize=None)
+    def matches(index):
+        return group_matches(baseline.spans[index].content, targets[index])
+
+    def destination(position):
+        index = bisect_right(source_starts, position) - 1
+        local = position - source_starts[index]
+        for old, new, size in matches(index):
+            if old <= local < old + size:
+                return target_starts[index] + new + local - old
+        return None
+
+    retained = {}
+    for index, span in enumerate(baseline.spans):
+        if '04' not in span.formatting or index in legacy_joins:
+            continue
+        position = source_starts[index]
+        for token in groups[index]:
+            if token.raw == b'\x04':
+                gap = _word_gap(baseline.text, position)
+                if gap:
+                    old_left, old_right, words = gap
+                    left, right = destination(old_left), destination(old_right)
+                    if left is not None and right is not None:
+                        retained[token.offset] = (left, right, words)
+            position += len(token.text)
+    return retained
+
+
+def _write_revision(job, bundle, legacy_joins):
     text = job.text
     groups = source_groups(job.with_revision(job.baseline), bundle)
     targets = group_targets(job)
@@ -432,6 +517,7 @@ def serialize_candidate(job, bundle):
                        if layouts and len(layouts[0].paragraphs) >= 4 else {})
     indent_end = 0
     renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
+    retained_gaps = _retained_join_gaps(job.baseline, groups, targets, legacy_joins)
     for group, target in zip(groups, targets):
         stop = cursor + len(target)
         first = bisect_left(element_starts, cursor)
@@ -455,6 +541,12 @@ def serialize_candidate(job, bundle):
             encoded = bytearray()
             rewritten = generated + retained
             for record_start, raw in records(rewritten, 0, len(rewritten)):
+                if raw == token.raw == b'\x04':
+                    # A dictionary join survives edits to unrelated text. It
+                    # must not consume a space at a new word boundary.
+                    gap = _word_gap(text, visible)
+                    if gap and gap != retained_gaps.get(token.offset):
+                        continue
                 if (raw[0] == 0x16 and int.from_bytes(raw[1:], 'little') not in (8, 255)
                         and not renderer.has_content and text.startswith('\n', visible)):
                     encoded += b'\x16\xff\x00'
