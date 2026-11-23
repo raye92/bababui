@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
 from app.src.suggestions import preview_context, preview_ranges, preview_start
+from app.src.speech_alignment import WORD
 
 
 def visible_text(text, empty):
@@ -44,19 +45,28 @@ def change_diff(change):
         prefix, suffix = preview_context(original, position, group[-1][1])
         parts = [escape(prefix)]
         for a, b, c, d in group:
-            parts.extend((escape(original[position:a]), _highlight(original[a:b], False),
-                          _highlight(incoming[c:d], True)))
+            parts.extend((escape(original[position:a]), _highlight(original[a:b], False, a),
+                          _highlight(incoming[c:d], True, c)))
             position = b
         parts.append(escape(suffix))
         rows.append(('change', ''.join(parts)))
     return rows
 
 
-def _highlight(text, incoming):
+def _highlight(text, incoming, start=None):
     if not text:
         return ''
     background, foreground = ('#ccffd8', '#116329') if incoming else ('#ffd7d5', '#82071e')
-    value = escape(visible_text(text, ''))
+    parts, offset = [], 0
+    if start is not None:
+        side = 'incoming' if incoming else 'original'
+        for word in WORD.finditer(text):
+            parts.append(escape(text[offset:word.start()]))
+            parts.append(f'<a href="{side}:{start + word.start()}" style="color:{foreground}; '
+                         f'text-decoration:none">{escape(word.group())}</a>')
+            offset = word.end()
+    parts.append(escape(text[offset:]))
+    value = visible_text(''.join(parts), '')
     return f'<b style="background:{background}; color:{foreground}">{value}</b>'
 
 
@@ -136,6 +146,7 @@ class ReviewView(QWidget):
     selected = Signal(int)
     selection_changed = Signal()
     navigated = Signal()
+    passage_clicked = Signal(str, int)
     mapping_requested = Signal(str, object)
 
     def __init__(self):
@@ -227,7 +238,7 @@ class ReviewView(QWidget):
         for index, change in enumerate(self.changes):
             card = ReviewCard()
             card.clicked.connect(lambda i=index, snapshot=model:
-                                 self.select(i) if self.model is snapshot else None)
+                                 self._activate(i) if self.model is snapshot else None)
             card.setObjectName(f'suggestion{index}')
             rows = QVBoxLayout(card)
             rows.setContentsMargins(8, 6, 8, 6)
@@ -260,7 +271,8 @@ class ReviewView(QWidget):
                 label.setObjectName('comparison')
                 label.setTextFormat(Qt.RichText)
                 label.setWordWrap(True)
-                label.setTextInteractionFlags(Qt.NoTextInteraction)
+                label.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+                label.linkActivated.connect(lambda link, i=index, snapshot=model: self._click_word(snapshot, i, link))
                 rows.addWidget(label)
             layout.addWidget(card)
             self.cards.append(card)
@@ -397,8 +409,16 @@ class ReviewView(QWidget):
             index = self.visible_indices.index(self.current) if self.current in self.visible_indices else -1
             target = self.visible_indices[(index+step) % len(self.visible_indices)]
             if target != self.current:
-                self.select(target)
-                self.navigated.emit()
+                self._activate(target)
+
+    def _activate(self, index):
+        self.select(index)
+        self.navigated.emit()
+
+    def _click_word(self, model, index, link):
+        if self.model is model and self.current == index:
+            side, position = link.split(':')
+            self.passage_clicked.emit(side, int(position))
 
     def set_page_lines(self, page_lines, side):
         self._page_lines, self._location_side = page_lines, side
@@ -445,14 +465,15 @@ class ReviewView(QWidget):
             self.current = -1
             self._mark_selected()
 
-    def select(self, index):
+    def select(self, index, *, focus_passage=True):
         if 0 <= index < len(self.changes):
             if index not in self.visible_indices:
                 self.filter_speaker(None, select=False)
             self.current = index
             self._mark_selected()
             self.scroll.verticalScrollBar().setValue(0)
-            self.selected.emit(index)
+            if focus_passage:
+                self.selected.emit(index)
 
     def center_line(self): return self.current
     def scroll_to_center_line(self, line): self.select(min(line, len(self.changes)-1))

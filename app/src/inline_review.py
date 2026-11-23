@@ -574,14 +574,14 @@ class InlineReviewEditor(QTextEdit):
             self._current_edit = index
             self.viewport().update()
 
-    def focus_edit(self, index):
+    def focus_edit(self, index, *, prefer_incoming=False):
         if self.model is None or not 0 <= index < len(self.model.edits):
             return
         self.highlight_edit(index)
         change = self.model.edits[index]
         if change.ranges:
-            a, b, _, _ = change.ranges[0]
-            side = 'original' if a != b else 'incoming'
+            a, b, c, d = change.ranges[0]
+            side = 'incoming' if a == b or (prefer_incoming and c != d) else 'original'
             if self.set_source_position(side, preview_start(change, side), edit_index=index):
                 self.ensureCursorVisible()
                 rect = self.cursorRect()

@@ -3,6 +3,7 @@ from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from hashlib import file_digest
+from itertools import groupby
 import math
 from pathlib import Path
 import re
@@ -76,7 +77,7 @@ def _increasing(values, *, allow_equal=False):
     return reversed(ordered)
 
 
-def _matching_pairs(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
+def _matching_pairs(keys, audio_phrases, audio_times, expected, *, learn_offset=False, playback_duration=None):
     matches = {}
     for phrase, text_index in _unique_phrases(keys).items():
         audio_index = audio_phrases.get(phrase)
@@ -93,14 +94,19 @@ def _matching_pairs(keys, audio_phrases, audio_times, expected, *, learn_offset=
     center = median(offsets) if learn_offset and offsets else 0
     spread = median(abs(offset - center) for offset in offsets) if learn_offset and offsets else 0
     window = max(MATCH_WINDOW_MS, 6 * spread)
-    pairs = [(i, j) for i, j in pairs if expected[i] is None
-             or abs(expected[i] - audio_times[j] - center) <= window]
+    matched = {i for i, j in pairs if expected[i] is None
+               or abs(expected[i] - audio_times[j] - center) <= window}
+    if playback_duration is not None and len(matched) < len(pairs):
+        bounds = _shared_stroke_bounds(expected, playback_duration, matched)
+        matched.update(i for i, j in pairs if i in bounds and bounds[i][0] <= audio_times[j] <= bounds[i][1])
+    pairs = [(i, j) for i, j in pairs if i in matched]
     ordered = [pairs[k] for k in _increasing([j for _, j in pairs])]
     return [ordered[k] for k in _increasing([audio_times[j] for _, j in ordered], allow_equal=True)]
 
 
-def _matches(keys, audio_phrases, audio_times, expected, *, learn_offset=False):
-    pairs = _matching_pairs(keys, audio_phrases, audio_times, expected, learn_offset=learn_offset)
+def _matches(keys, audio_phrases, audio_times, expected, *, learn_offset=False, playback_duration=None):
+    pairs = _matching_pairs(keys, audio_phrases, audio_times, expected,
+                            learn_offset=learn_offset, playback_duration=playback_duration)
     return {i: audio_times[j] for i, j in pairs}
 
 
@@ -232,6 +238,24 @@ def _at_strokes(refs, times):
     return [times[ref] if times and ref is not None else None for ref in refs]
 
 
+def _shared_stroke_bounds(times, duration, matched):
+    """Find the recording interval for words that share one stroke time."""
+    bounds = {}
+    start = 0
+    for time, group in groupby(times):
+        end = start + sum(1 for _ in group)
+        # An isolated phrase from elsewhere in the recording is insufficient.
+        bracketed = start - 1 in matched and end in matched
+        if time is not None and end - start > 1 and (bracketed or not matched.isdisjoint(range(start, end))):
+            before = times[start - 1] if start else 0
+            after = times[end] if end < len(times) else duration
+            interval = (min(before, time) if before is not None else time,
+                        max(after, time) if after is not None else time)
+            bounds.update(dict.fromkeys(range(start, end), interval))
+        start = end
+    return bounds
+
+
 def _stroke_anchors(refs, matches):
     by_stroke = {}
     for i, time in matches.items():
@@ -279,7 +303,8 @@ class SpeechPlayback:
         if key not in self._cache:
             positions, keys, refs = _passages(revision)
             raw = _at_strokes(refs, self.alignment.stroke_ms)
-            matches = _matches(keys, self._phrases, self._times, raw)
+            matches = _matches(keys, self._phrases, self._times, raw,
+                               playback_duration=self.alignment.duration_ms)
             if not keys and self.alignment.stroke_ms:
                 position = 0
                 for span in revision.spans:

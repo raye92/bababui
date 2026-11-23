@@ -135,7 +135,10 @@ class PlaybackBar(QWidget):
     def seek_from_cursor(self):
         self._seek_with_lead_in(self.cursor_position_ms())
 
-    def seek_passage(self, revision, position):
+    def seek_passage(self, revision, position, end=None):
+        # An insertion can start on the space following the previous word.
+        if end is not None:
+            position = next((i for i in range(position, end) if not revision.text[i].isspace()), position)
         return self.timing is not None and self._seek_with_lead_in(self.timing.position_ms(revision, position))
 
     def _seek_with_lead_in(self, position):

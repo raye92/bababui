@@ -105,7 +105,7 @@ class DocumentView(QWidget):
         self.incoming_editor = NativeTranscriptEditor(font)
         self.inline_editor = InlineReviewEditor(font)
         self.inline_editor.set_source_editors(self.editor, self.incoming_editor)
-        self.inline_editor.selected.connect(self.select_inline)
+        self.inline_editor.selected.connect(self._select_clicked_edit)
         self.inline_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.inline_editor.source_activated.connect(self._seek_review_passage)
         self.preview_editor = AcceptAllPreviewEditor(font)
@@ -116,6 +116,7 @@ class DocumentView(QWidget):
         self.diff_view.selection_changed.connect(self.highlight_suggestions)
         self.diff_view.selected.connect(self.select_suggestion)
         self.diff_view.navigated.connect(self._seek_selected_suggestion)
+        self.diff_view.passage_clicked.connect(self._card_word_clicked)
         self.diff_view.mapping_requested.connect(self.change_speaker_mapping)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             editor.native_revision_at_step = lambda steps, s=side: self._native_history[s].get(steps)
@@ -145,8 +146,8 @@ class DocumentView(QWidget):
         self.review_splitter.setStretchFactor(1, 1)
         self.review_splitter.setSizes([900, 380])
         layout.addWidget(self.review_splitter, 1)
-        self.editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.editor, 'original'))
-        self.incoming_editor.transcript_clicked.connect(lambda: self.select_at_cursor(self.incoming_editor, 'incoming'))
+        self.editor.transcript_clicked.connect(lambda: self._transcript_clicked(self.editor, 'original'))
+        self.incoming_editor.transcript_clicked.connect(lambda: self._transcript_clicked(self.incoming_editor, 'incoming'))
         self.playback = None
         if document.native.alignment and not document.wav_path:
             self._validate_alignment(document.warnings)
@@ -181,8 +182,6 @@ class DocumentView(QWidget):
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
             self.stack.currentChanged.connect(lambda _: self.playback.stop())
-            for editor in (self.editor, self.incoming_editor):
-                editor.transcript_clicked.connect(lambda: self.playback.seek_from_cursor())
             for _, key, method in PLAYBACK_SHORTCUTS:
                 shortcut = QShortcut(QKeySequence(key), self)
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -195,22 +194,22 @@ class DocumentView(QWidget):
             self.playback.set_forward_seconds(seconds)
 
     def replay_current_edit(self):
+        if self._seek_selected_suggestion():
+            self.playback.player.play()
+
+    def _seek_selected_suggestion(self):
         if not self.playback or not self.diff_view.has_current:
-            return
+            return False
         ranges = self.diff_view.changes[self.diff_view.current].ranges
         if not ranges:
-            return
+            return False
         a, b, c, d = ranges[0]
         state = self.document.native
-        targets = ((state.original, a), (state.incoming, c))
-        # Start on the displayed side when it contains the edit. An insertion
-        # or deletion can use its other side, or fall back to the source anchor.
-        if a == b or ((self.stack.currentIndex() or self._showing_accept_all_preview()) and c != d):
+        targets = ((state.original, a, b), (state.incoming, c, d))
+        prefer_incoming = state.alignment is not None or self.stack.currentIndex() == 1 or self._showing_accept_all_preview()
+        if a == b or (c != d and prefer_incoming):
             targets = targets[::-1]
-        for revision, offset in targets:
-            if self.playback.seek_passage(revision, offset):
-                self.playback.player.play()
-                return
+        return any(self.playback.seek_passage(*target) for target in targets)
 
     def _validate_alignment(self, warnings):
         doc = self.document
@@ -252,15 +251,13 @@ class DocumentView(QWidget):
             revision = getattr(self.document.native, side)
             self.playback.seek_passage(revision, position)
 
-    def _seek_selected_suggestion(self):
-        index = self.diff_view.current
-        if self.playback and index >= 0 and self.diff_view.changes[index].ranges:
-            if self._showing_accept_all_preview():
-                a, _, c, d = self.diff_view.changes[index].ranges[0]
-                side, position = ('incoming', c) if c != d else ('original', a)
-                self._seek_review_passage(side, position)
-            else:
-                self.playback.seek_from_cursor()
+    def _card_word_clicked(self, side, position):
+        self._focus_passage(self.review_model.position_on(side, position, 'original'),
+                            self.review_model.position_on(side, position, 'incoming'))
+        if self.active_view() is self.inline_editor:
+            self.inline_editor.set_source_position(side, position, edit_index=self.diff_view.current)
+            self.inline_editor.ensureCursorVisible()
+        self._seek_review_passage(side, position)
 
     def capture_position(self):
         self.document.view = self.stack.currentIndex()
@@ -477,7 +474,7 @@ class DocumentView(QWidget):
         if self.active_view() is not self.preview_editor:
             return
         if index >= 0 and not self.document.busy:
-            self.select_inline(index)
+            self._select_clicked_edit(index)
         self._seek_review_passage('incoming', position)
 
     def refresh(self, *, previews=None, model=None):
@@ -548,23 +545,16 @@ class DocumentView(QWidget):
         if self._preview_matches(self._preview_model):
             self.preview_editor.highlight_edit(selected)
 
-    def select_inline(self, index):
-        if self._review_worker is not None:
-            return
-        self._inline_selection = True
-        try:
-            self.diff_view.select(index)
-        finally:
-            self._inline_selection = False
+    def _select_clicked_edit(self, index):
+        if self._review_worker is None:
+            self.diff_view.select(index, focus_passage=False)
 
     def select_suggestion(self, index):
         if not 0 <= index < len(self.diff_view.changes):
             return
         change = self.diff_view.changes[index]
-        inline_selection = getattr(self, '_inline_selection', False)
-        if not inline_selection:
-            self.inline_editor.focus_edit(index)
-        if change.ranges and not (inline_selection and self._showing_accept_all_preview()):
+        self.inline_editor.focus_edit(index, prefer_incoming=self.document.native.alignment is not None)
+        if change.ranges:
             self._focus_passage(preview_start(change, 'original'), preview_start(change, 'incoming'))
 
     def _focus_passage(self, original_start, incoming_start):
@@ -590,20 +580,21 @@ class DocumentView(QWidget):
                      if lines[i].position <= cursor.position()), 0)
         editor.scroll_to_center_line(line)
 
-    def select_at_cursor(self, editor, side):
+    def _transcript_clicked(self, editor, side):
+        position = utf16_index(getattr(self.document, side), editor.textCursor().position())
+        self._seek_review_passage(side, position)
         if self._review_worker is not None:
             return
-        position = utf16_index(getattr(self.document, side), editor.textCursor().position())
         at_end = None
         offset = 0 if side == 'original' else 2
         for index, change in enumerate(self.diff_view.changes):
             if distance_to_ranges(change.ranges, side, position, position) == 0:
-                self.diff_view.select(index)
+                self.diff_view.select(index, focus_passage=False)
                 return
             if at_end is None and any(span[offset + 1] == position for span in change.ranges):
                 at_end = index
         if at_end is not None:
-            self.diff_view.select(at_end)
+            self.diff_view.select(at_end, focus_passage=False)
 
     def edited(self):
         self.document.dirty = True
@@ -708,7 +699,8 @@ class DocumentView(QWidget):
         elif not self.diff_view.changes and ranges:
             self._focus_passage(ranges[0][0], ranges[0][2])
             if self.playback:
-                self.playback.seek_from_cursor()
+                retained = state.original if result[0] is before[0] else state.incoming
+                self.playback.seek_passage(retained, *ranges[0][side])
         self.edited()
 
     def change_speaker_mapping(self, speaker, name):

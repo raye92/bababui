@@ -365,6 +365,7 @@ def test_audio_slider_keyboard_and_page_steps_seek_the_player(tmp_path):
 @pytest.fixture
 def audio_view(tmp_path, monkeypatch, request):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtCore import QUrl
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from app.src import documents
@@ -381,7 +382,7 @@ def audio_view(tmp_path, monkeypatch, request):
         QTest.qWait(10)
     assert view.playback.player.isSeekable()
     yield view
-    view.playback.stop()
+    view.playback.player.setSource(QUrl())
     view.close()
     view.deleteLater()
     app.processEvents()
@@ -605,6 +606,150 @@ def test_review_clicks_seek_equal_original_and_incoming_passages(audio_view, row
     text = getattr(view.document, side)
     view._seek_review_passage(side, text.index(row_text))
     assert view.playback.player.position() == expected
+
+
+def receive_timed_proposal(view, proposal, times):
+    from hashlib import sha256
+    from pathlib import Path
+    from app.src.audio_pipeline import Word
+    from app.src.speech_alignment import align_speech
+
+    doc = view.document
+    words = tuple(Word(text, 'speaker', start, start + .1)
+                  for text, start in zip(proposal.split(), times, strict=True))
+    digest = sha256(Path(doc.wav_path).read_bytes()).hexdigest()
+    alignment = align_speech(doc.native.original, view.playback.timing.stroke_ms, words, 40000, digest)
+    assert alignment is not None
+    view.receive(proposal, [], alignment)
+
+
+@pytest.fixture
+def timed_incoming_passage(audio_view):
+    audio_view.editor.setPlainText('Alpha beta gamma delta epsilon.')
+    receive_timed_proposal(audio_view, 'Alpha please bring the signed copy beta gamma delta epsilon.',
+                           (2, 4, 5, 7, 9, 11, 12, 13, 14, 15))
+    return audio_view
+
+
+@pytest.mark.parametrize('surface', ['incoming', 'inline', 'preview'])
+def test_click_inside_incoming_change_seeks_the_clicked_word(timed_incoming_passage, surface):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    view = timed_incoming_passage
+    if surface == 'incoming':
+        view.stack.setCurrentIndex(1)
+    elif surface == 'preview':
+        view.set_accept_all_preview(True)
+        for _ in range(100):
+            if view.active_view() is view.preview_editor:
+                break
+            QTest.qWait(10)
+        assert view.active_view() is view.preview_editor
+    QApplication.processEvents()
+    editor = view.active_view()
+    player = view.playback.player
+    before = set_playback_state(player, 'paused')
+    for word, expected in [('signed', 8000), ('bring', 4000), ('beta', 11000)]:
+        position = view.document.incoming.index(word) + 2
+        cursor = editor.textCursor()
+        cursor.setPosition(editor.display_position('incoming', position) if surface == 'inline' else position)
+        QTest.mouseClick(editor.viewport(), Qt.LeftButton, pos=editor.cursorRect(cursor).center())
+        assert player.position() == expected
+        assert player.playbackState() == before
+
+
+def test_clicks_on_wrapped_incoming_rows_follow_a_pause_in_the_recording(audio_view):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    view = audio_view
+    doc = view.document
+    view.editor.setPlainText('Alpha beta agreed. Gamma delta epsilon.')
+    first = 'Before the break we reviewed the signed inspection report and compared each entry with the original notes.'
+    second = 'After lunch the clerk opened the blue binder and read the closing statement into the record.'
+    proposal = f'Alpha beta agreed. {first} {second} Gamma delta epsilon.'
+    times = [1, 2, 3, *(4 + i * .4 for i in range(len(first.split()))),
+             *(24 + i * .5 for i in range(len(second.split()))), 37, 38, 39]
+    receive_timed_proposal(view, proposal, times)
+    QApplication.processEvents()
+    editor = view.inline_editor
+    rows = []
+    for word, expected in [('Before', 3000), ('clerk', 24500)]:
+        position = doc.incoming.index(word) + 2
+        editor.scroll_to_source_position('incoming', position)
+        cursor = editor.textCursor()
+        cursor.setPosition(editor.display_position('incoming', position))
+        rows.append(cursor.blockNumber())
+        QTest.mouseClick(editor.viewport(), Qt.LeftButton, pos=editor.cursorRect(cursor).center())
+        assert view.playback.player.position() == expected
+    assert rows[1] > rows[0]
+
+
+def test_activating_incoming_suggestion_seeks_its_first_spoken_word(timed_incoming_passage):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    view = timed_incoming_passage
+    player = view.playback.player
+    before = set_playback_state(player, 'paused')
+    player.setPosition(20000)
+    QTest.mouseClick(view.diff_view.cards[0].heading, Qt.LeftButton)
+    assert player.position() == 3000
+    assert player.playbackState() == before
+    player.setPosition(20000)
+    view.replay_current_edit()
+    assert abs(player.position() - 3000) < 100
+    assert player.isPlaying()
+
+
+def test_clicking_a_changed_word_in_the_review_card_seeks_that_word(timed_incoming_passage):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    view = timed_incoming_passage
+    view.resize(1600, 650)
+    view.review_splitter.setSizes([700, 900])
+    QApplication.processEvents()
+    label = view.diff_view.cards[0].findChild(QLabel, 'comparison')
+    text = QTextDocument()
+    text.setDefaultFont(label.font())
+    text.setDocumentMargin(0)
+    text.setHtml(label.text())
+    text.setTextWidth(label.contentsRect().width())
+    cursor = text.find('signed')
+    block = cursor.block()
+    text.documentLayout().blockBoundingRect(block)
+    line = block.layout().lineForTextPosition(cursor.selectionStart() - block.position())
+    assert line.isValid()
+    x = line.cursorToX(cursor.selectionStart() - block.position() + 2)[0]
+    point = QPoint(label.contentsRect().left() + round(x), label.contentsRect().center().y())
+    QTest.mouseClick(label, Qt.LeftButton, pos=point)
+    assert view.playback.player.position() == 8000
+    assert view.inline_editor.source_position() == ('incoming', view.document.incoming.index('signed'))
+
+
+def test_accepting_last_incoming_passage_seeks_the_accepted_words(timed_incoming_passage):
+    view = timed_incoming_passage
+    view.review(0, True)
+    assert view.document.original == view.document.incoming
+    assert view.playback.player.position() == 3000
+
+
+def test_navigating_to_a_replacement_follows_the_timed_incoming_side(timed_incoming_passage):
+    view = timed_incoming_passage
+    view.editor.setPlainText('First heading.\nAlpha beta gamma delta epsilon.')
+    view.receive('Second heading.\nAlpha please bring the signed copy gamma delta epsilon.', [])
+    panel = view.diff_view
+    assert len(panel.changes) == 2
+    panel.select(0)
+    panel.navigate(1)
+    assert view.playback.player.position() == 3000
+    assert view.inline_editor.source_position()[0] == 'incoming'
 
 
 def test_transcript_click_maps_utf16_offsets_to_native_anchors(audio_view):

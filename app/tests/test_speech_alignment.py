@@ -90,13 +90,32 @@ def test_incoming_inserted_word_uses_speech_when_the_stroke_places_it_later():
     assert playback.position_ms(source, source.text.index('papers')) == 5000
 
 
-def test_incoming_replacement_keeps_context_when_words_match_far_earlier():
+@pytest.mark.parametrize(('old_words', 'old_clocks'), [(('Original ', 'passage. '), (10000, 49000)), ((), ())],
+                         ids=['replacement', 'insertion'])
+def test_long_incoming_passage_uses_measured_words_across_a_shared_stroke(old_words, old_clocks):
+    source = revision('Opening ', 'remarks ', 'conclude. ', *old_words, 'Back ', 'on ', 'record.')
+    incoming = source.revise('Opening remarks conclude. Bring the large blue binder and read this page. Back on record.')
+    seconds = (1, 2, 3, 8, 10, 20, 24, 33, 37, 40, 44, 48, 50, 52, 54)
+    words = audio(*zip(incoming.text.split(), seconds, strict=True))
+    strokes = (3000, 4000, 5000, *old_clocks, 52000, 54000, 56000)
+    playback = align(source, strokes, words, duration=60000).playback()
+
+    for word, time in [('Bring', 8000), ('large', 20000), ('blue', 24000), ('page', 48000)]:
+        start = incoming.text.index(word)
+        assert playback.position_ms(incoming, start) == time
+        assert playback.range_at(incoming, time)[0] == start
+
+
+@pytest.mark.parametrize('opening', [70, 1])
+def test_incoming_replacement_keeps_context_when_words_match_far_earlier(opening):
     source = revision('We ', 'can ', 'adjourn. ', 'Thanks ', 'folks.')
-    words = audio(('Thank', 1), ('you', 2), ('very', 3), ('much', 4),
-                  ('We', 70), ('can', 71), ('adjourn', 72), ('Thanks', 100), ('folks', 101))
-    playback = align(source, (70000, 71000, 72000, 100000, 101000), words, duration=120000).playback()
+    entries = [('Thank', 20), ('you', 21), ('very', 22), ('much', 23),
+               ('We', opening), ('can', opening + 1), ('adjourn', opening + 2), ('Thanks', 100), ('folks', 101)]
+    words = audio(*sorted(entries, key=lambda entry: entry[1]))
+    strokes = (opening * 1000, (opening + 1) * 1000, (opening + 2) * 1000, 100000, 101000)
+    playback = align(source, strokes, words, duration=120000).playback()
     incoming = source.replace(source.text.index('Thanks'), len(source.text), 'Thank you very much.')
-    assert playback.position_ms(incoming, 0) == 70000
+    assert playback.position_ms(incoming, 0) == opening * 1000
     assert playback.position_ms(incoming, incoming.text.index('Thank')) == 101000
 
 
