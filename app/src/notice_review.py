@@ -53,6 +53,10 @@ def remap_review(review, original, incoming):
     if review is None:
         return None
     result = deepcopy(review)
+    for decision in result.get('pending_decisions', ()):
+        for key in ('ranges', 'highlights'):
+            decision[key] = [[original(a), original(b), incoming(c), incoming(d)]
+                             for a, b, c, d in decision[key]]
     for row in (*result.get('locations', ()), *result.get('evidence', {}).get('occurrences', ())):
         row['start'], row['end'] = incoming(row['start']), incoming(row['end'])
     for row in (*result.get('automatic_changes', ()), *result.get('off_record_changes', ())):

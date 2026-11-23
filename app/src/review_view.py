@@ -104,8 +104,8 @@ def _attribution_edits(model, locations, needs_check, mappings):
     original, incoming = model.original.text, model.incoming.text
     by_speaker = {}
     for index, edit in enumerate(model.edits):
-        if edit.kind == 'speaker':
-            (_, _, start, end), = edit.ranges
+        if edit.kind == 'speaker' and len(edit.ranges) == 1:
+            _, _, start, end = edit.ranges[0]
             speaker = assigned.get((start, end))
             if speaker is None:
                 # A formatter can also supply a name directly, without a numbered tag.
@@ -158,6 +158,7 @@ class ReviewView(QWidget):
         self.speaker_edits = {}
         self.needs_review = frozenset()
         self.unmatched_speaker_ranges = ()
+        self.live_location = None
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 4, 8, 4)
         self.count = QLabel()
@@ -186,7 +187,7 @@ class ReviewView(QWidget):
         self.layout.addWidget(self.scroll, 1)
         decisions = QHBoxLayout()
         self.decision_buttons = []
-        for caption, accept, key in (('Accept', True, 'A'), ('Reject', False, 'D')):
+        for caption, accept, key in (('Accept', True, 'Alt+A'), ('Reject', False, 'Alt+D')):
             button = QPushButton(caption)
             button.setEnabled(False)
             button.clicked.connect(lambda _, accepted=accept: self.request_current(accepted))
@@ -228,54 +229,28 @@ class ReviewView(QWidget):
         for button in self.decision_buttons:
             button.setDown(False)
         self.review = review
-        original, incoming = model.original, model.incoming
-        self._speakers(original)
-        attribution = set().union(*self.speaker_edits.values())
+        self._speakers(model.original)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         self.cards = []
-        for index, change in enumerate(self.changes):
+        for index in range(len(self.changes)):
             card = ReviewCard()
-            card.clicked.connect(lambda i=index, snapshot=model:
-                                 self._activate(i) if self.model is snapshot else None)
+            card.clicked.connect(lambda i=index, c=card:
+                                 self._activate(i) if i < len(self.cards) and self.cards[i] is c else None)
             card.setObjectName(f'suggestion{index}')
             rows = QVBoxLayout(card)
             rows.setContentsMargins(8, 6, 8, 6)
             rows.setSpacing(6)
-            before = '\n'.join(original.text[a:b] for a, b, _, _ in change.ranges)
-            after = '\n'.join(incoming.text[c:d] for _, _, c, d in change.ranges)
-            if index in self.needs_review or index in attribution:
-                title = 'Speaker attribution · Needs review'
-            else:
-                title = 'Linked field' if change.field else 'Wording'
-            if change.kind == 'metadata':
-                title = 'Native fields and symbols'
-            if change.kind == 'structure' and index not in attribution:
-                title = 'Insert paragraph break' if after.count('\n') > before.count('\n') else 'Join paragraphs' if before.count('\n') > after.count('\n') else 'Paragraph change'
-            card.title = title
-            card.heading = QLabel(title)
+            card.heading = QLabel()
             card.heading.setWordWrap(True)
             rows.addWidget(card.heading)
-            if change.field:
-                rows.addWidget(QLabel(f'{len(change.ranges)} linked occurrences'))
-            if change.kind == 'speaker' and before == after:
-                (a, b, c, d), = change.ranges
-                fields = [next(e.name for e in rev.elements if (e.start, e.end) == span and e.kind == 'field')
-                          for rev, span in ((original, (a, b)), (incoming, (c, d)))]
-                rows.addWidget(QLabel(' → '.join(fields)))
-            for _, text in change_diff(change):
-                text = text.replace('\n', '<br>')
-                label = QLabel(f'<span style="white-space:pre-wrap; font-size:large">{text}</span>')
-                label.setStyleSheet('padding:4px;')
-                label.setObjectName('comparison')
-                label.setTextFormat(Qt.RichText)
-                label.setWordWrap(True)
-                label.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
-                label.linkActivated.connect(lambda link, i=index, snapshot=model: self._click_word(snapshot, i, link))
-                rows.addWidget(label)
+            card.detail = QLabel()
+            rows.addWidget(card.detail)
+            card.comparisons = []
             layout.addWidget(card)
             self.cards.append(card)
+            self._render_card(index)
         layout.addStretch()
         old = self.scroll.takeWidget()
         if old:
@@ -283,6 +258,76 @@ class ReviewView(QWidget):
         self.scroll.setWidget(root)
         self.current = max(0, min(self.current, len(self.changes)-1))
         self.filter_speaker(self.speaker_filter, select=False)
+
+    def amend_model(self, model, review):
+        count = len(model.edits)
+        if count > len(self.cards):
+            self.set_model(model, review=review)
+            return
+        self.model, self.changes, self.review = model, model.edits, review
+        self._page_lines = ()
+        if count < len(self.cards):
+            for card in self.cards[count:]:
+                card.hide()
+                self.scroll.widget().layout().removeWidget(card)
+                card.deleteLater()
+            del self.cards[count:]
+            self._speakers(model.original)
+            self.current = max(0, min(self.current, count-1))
+            self.filter_speaker(self.speaker_filter, select=False)
+        elif self.has_current:
+            self._render_card(self.current)
+            self._update_heading()
+            self._size_comparison()
+
+    def _render_card(self, index):
+        card, change = self.cards[index], self.changes[index]
+        attributed = index in self.needs_review or any(index in ids for ids in self.speaker_edits.values())
+        detail = ''
+        if attributed:
+            title = 'Speaker attribution · Needs review'
+        elif change.kind == 'metadata':
+            title = 'Native fields and symbols'
+        elif change.kind == 'structure':
+            old = sum(change.original.text.count('\n', a, b) for a, b, _, _ in change.ranges)
+            new = sum(change.incoming.text.count('\n', c, d) for _, _, c, d in change.ranges)
+            title = 'Insert paragraph break' if new > old else 'Join paragraphs' if new < old else 'Paragraph change'
+        else:
+            title = 'Linked field' if change.field else 'Wording'
+        if change.field:
+            detail = f'{len(change.ranges)} linked occurrences'
+        elif change.kind == 'speaker' and len(change.ranges) == 1:
+            a, b, c, d = change.ranges[0]
+            if change.original.text[a:b] == change.incoming.text[c:d]:
+                fields = [next((e.name for e in rev.elements if e.kind == 'field' and (e.start, e.end) == span), None)
+                          for rev, span in ((change.original, (a, b)), (change.incoming, (c, d)))]
+                if all(fields):
+                    detail = ' → '.join(fields)
+        card.title = title
+        card.heading.setText(title)
+        card.detail.setText(detail)
+        card.detail.setVisible(bool(detail))
+        parts = change_diff(change)
+        while len(card.comparisons) > len(parts):
+            label = card.comparisons.pop()
+            label.hide()
+            card.layout().removeWidget(label)
+            label.deleteLater()
+        for row, (_, content) in enumerate(parts):
+            if row == len(card.comparisons):
+                label = QLabel()
+                label.setStyleSheet('padding:4px;')
+                label.setObjectName('comparison')
+                label.setTextFormat(Qt.RichText)
+                label.setWordWrap(True)
+                label.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+                label.linkActivated.connect(lambda link, i=index, w=card:
+                                            self._click_word(self.model, i, link)
+                                            if i < len(self.cards) and self.cards[i] is w else None)
+                card.layout().addWidget(label)
+                card.comparisons.append(label)
+            card.comparisons[row].setText('<span style="white-space:pre-wrap; font-size:large">'
+                                          + content.replace('\n', '<br>') + '</span>')
 
     def _speakers(self, original):
         box = QWidget()
@@ -430,14 +475,16 @@ class ReviewView(QWidget):
             return
         card, change = self.cards[self.current], self.changes[self.current]
         title = card.title
-        if self._page_lines and change.ranges:
+        line = self.live_location(change) if self.live_location and change.ranges else None
+        if line is None and self._page_lines and change.ranges:
             start = preview_start(change, self._location_side)
             text = getattr(change, self._location_side).text
             qt_start = len(text[:start].encode('utf-16-le')) // 2
             index = bisect_right(self._page_lines, qt_start, key=lambda line: line.position) - 1
             if index >= 0:
                 line = self._page_lines[index]
-                title += f' · Page {line.page}, line {line.number}'
+        if line is not None:
+            title += f' · Page {line.page}, line {line.number}'
         card.heading.setText(title)
 
     def _mark_selected(self):
@@ -448,6 +495,8 @@ class ReviewView(QWidget):
         for i,card in enumerate(self.cards):
             card.setVisible(i == self.current and i in self.visible_indices)
             card.setStyleSheet(f'QWidget#suggestion{i} {{ border-left: 3px solid #91bce9; }}' if i == self.current else '')
+        if self.has_current:
+            self._render_card(self.current)
         self._update_heading()
         self._size_comparison()
         self.selection_changed.emit()

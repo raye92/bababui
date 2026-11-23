@@ -14,6 +14,8 @@ class Suggestion:
     ranges: tuple  # (original start/end, incoming start/end), Python character offsets
     kind: str = 'text'
     field: str | None = None
+    highlights: tuple | None = None  # Explicit display ownership after a manual edit.
+    definitions: tuple = ()  # Field definitions introduced by this manual amendment.
 
 
 def preview_context(text, start, end):
@@ -46,6 +48,8 @@ def word_context(text, start, end):
 
 def preview_ranges(change):
     """Include shared letters in replacement highlights without changing the decision."""
+    if change.highlights is not None:
+        return change.highlights
     if change.kind == 'word_join':
         a, _, c, _ = change.ranges[0]
         _, b, _, d = change.ranges[-1]
@@ -503,7 +507,7 @@ def suggestions(original, incoming):
     return _group_decisions(a, b, result)
 
 
-def resolve(original, incoming, change, accept):
+def resolve(original, incoming, change, accept, *, defer_fields=False):
     if change.original != original or change.incoming != incoming:
         raise ValueError('This suggestion is stale. Refresh the review.')
     if change.kind == 'metadata':
@@ -521,7 +525,8 @@ def resolve(original, incoming, change, accept):
                 target = target.adopt(a, b, source, c, d, at_destination=True) if accept else target.adopt(c, d, source, a, b)
     else:
         for a, b, c, d in reversed(change.ranges):
-            target = target.adopt(a, b, source, c, d, at_destination=True) if accept else target.adopt(c, d, source, a, b)
+            start, end, x, y = (a, b, c, d) if accept else (c, d, a, b)
+            target = target.adopt(start, end, source, x, y, at_destination=accept, update_fields=not defer_fields)
     original, incoming = (target, incoming) if accept else (original, target)
     if original.text == incoming.text and original.elements == incoming.elements and original.definitions == incoming.definitions:
         incoming = original

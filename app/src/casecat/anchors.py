@@ -1,6 +1,8 @@
 """Immutable editorial associations, independent of Qt and the native writer."""
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
+from bisect import bisect_left, bisect_right
 from functools import cached_property
+from itertools import accumulate
 import uuid
 
 from .elements import NativeElement, edited_elements, paragraph_symbols
@@ -34,16 +36,17 @@ def utf16_index(text, offset):
     """Convert a Qt offset, rejecting a position inside a surrogate pair."""
     if not isinstance(offset, int) or offset < 0:
         raise ValueError('Invalid UTF-16 offset.')
-    units = 0
-    for index, char in enumerate(text):
-        if units == offset:
-            return index
-        units += 2 if ord(char) > 0xffff else 1
-        if units > offset:
+    if text.isascii():
+        if offset <= len(text):
+            return offset
+        raise ValueError('UTF-16 offset exceeds the document.')
+    encoded = text.encode('utf-16-le', 'surrogatepass')
+    if 2 * offset > len(encoded):
+        raise ValueError('UTF-16 offset exceeds the document.')
+    if offset and 2 * offset < len(encoded) and 0xdc <= encoded[2 * offset + 1] <= 0xdf:
+        if 0xd8 <= encoded[2 * offset - 1] <= 0xdb:
             raise ValueError('UTF-16 offset splits a character.')
-    if units == offset:
-        return len(text)
-    raise ValueError('UTF-16 offset exceeds the document.')
+    return len(encoded[:2 * offset].decode('utf-16-le', 'surrogatepass'))
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,10 @@ class Revision:
     @cached_property
     def text(self):
         return ''.join(span.content for span in self.spans)
+
+    @cached_property
+    def _span_ends(self):
+        return tuple(accumulate(len(span.content) for span in self.spans))
 
     def replace_utf16(self, position, removed, inserted):
         text = self.text
@@ -159,11 +166,11 @@ class Revision:
         return start, end
 
     def adopt(self, start, end, source, source_start, source_end, *, at_destination=False,
-              update_fields=True):
+              update_fields=True, exact_position=False):
         """Accept or reject a passage using the selected revision's associations."""
         if not 0 <= source_start <= source_end <= len(source.text):
             raise ValueError('Invalid source revision range.')
-        if at_destination and start == end:
+        if at_destination and start == end and not exact_position:
             # The advanced diff may place an insertion before a shared space
             # (" Extra") rather than after it ("Extra "). Move only equivalent
             # plain whitespace boundaries so the new words inherit the native
@@ -178,18 +185,22 @@ class Revision:
                 end += 1
                 source_start += 1
                 source_end += 1
-        copied, cursor = [], 0
-        for span in source.spans:
-            stop = cursor + len(span.content)
-            if cursor < source_end and stop > source_start:
-                text = span.content[max(0, source_start - cursor):source_end - cursor]
-                copied.append(replace(span, identity=uuid.uuid4().hex, content=text))
-            cursor = stop
-        result = self._replace(start, end, ''.join(s.content for s in copied), None if at_destination else copied)
+        copied = None
+        if not at_destination:
+            copied, cursor = [], 0
+            for span in source.spans:
+                stop = cursor + len(span.content)
+                if cursor < source_end and stop > source_start:
+                    text = span.content[max(0, source_start - cursor):source_end - cursor]
+                    copied.append(replace(span, identity=uuid.uuid4().hex, content=text))
+                cursor = stop
+        result = self._replace(start, end, source.text[source_start:source_end], copied)
         elements = [e for e in result.elements if e.end <= start or e.start >= start + source_end - source_start]
         elements.extend(replace(e, start=start + e.start - source_start, end=start + e.end - source_start)
                         for e in source.elements if source_start <= e.start and e.end <= source_end)
-        result = replace(result, elements=tuple(sorted(elements, key=lambda e: (e.start, e.end))))
+        elements = tuple(sorted(elements, key=lambda e: (e.start, e.end)))
+        if elements != result.elements:
+            result = replace(result, elements=elements)
         if not update_fields:
             return result
         definitions = {e.name: e.value if e.value is not None else source.text[e.start:e.end] for e in source.elements
@@ -210,39 +221,30 @@ class Revision:
             raise ValueError('Invalid native edit range.')
         if start == end and not content:
             return self
-        positions, cursor = [], 0
-        for span in self.spans:
-            positions.append((cursor, cursor + len(span.content), span))
-            cursor += len(span.content)
-        affected = [span for a, b, span in positions if a < end and b > start]
+        ends = self._span_ends
+        first = bisect_right(ends, start)
+        offset = ends[first-1] if first else 0
+        stop = first if end == offset else bisect_left(ends, end) + 1
+        affected = self.spans[first:stop]
         if not affected:
-            following = next((span for a, b, span in positions if a <= start < b), None)
-            affected = [following or (self.spans[-1] if self.spans else AnchoredSpan('root', (), (), ''))]
+            following = self.spans[min(first, len(ends)-1)] if ends else AnchoredSpan('root', (), (), '')
+            affected = (following,)
         inserted = AnchoredSpan(uuid.uuid4().hex,
                                _ordered(ref for span in affected for ref in span.stroke_refs),
                                _ordered(ref for span in affected for ref in span.audio),
                                content, affected[0].formatting)
         additions = [inserted] if adopted is None else adopted
         result, added = [], False
-        for a, b, span in positions:
+        for index in range(first, stop):
+            span = self.spans[index]
+            a, b = offset, ends[index]
+            offset = b
             # Empty anchors are retained even when the whole passage is deleted.
             if not span.content:
                 result.append(span)
                 continue
-            if b <= start:
-                result.append(span)
-                continue
-            if a >= end and added:
-                result.append(span)
-                continue
             prefix = span.content[:max(0, start - a)]
             suffix = span.content[max(0, end - a):] if end < b else ''
-            if a >= end:  # insertion at the beginning of a following span
-                if content:
-                    result.extend(additions)
-                added = True
-                result.append(span)
-                continue
             result.append(replace(span, content=prefix))
             if not added:
                 if content:
@@ -254,7 +256,12 @@ class Revision:
             result.extend(additions)
         elements = edited_elements(self.elements, self.text, start, end, content, preserve)
         text = self.text[:start] + content + self.text[end:]
-        return replace(self, spans=tuple(result), elements=paragraph_symbols(text, elements))
+        spans = self.spans[:first] + tuple(result) + self.spans[stop:]
+        revision = replace(self, spans=spans, elements=paragraph_symbols(text, elements))
+        # The exact projection is already available; avoid joining every native
+        # span again when the editor reads the new revision after a keystroke.
+        revision.__dict__['text'] = text
+        return revision
 
     def revise(self, text, *, edits=None):
         """Apply VS Code inner changes while retaining native field associations."""
@@ -305,8 +312,10 @@ class Revision:
         return result
 
     def to_dict(self):
-        return {'spans': [asdict(span) for span in self.spans],
-                'elements': [asdict(element) for element in self.elements], 'all_caps': self.all_caps,
+        # Span and element fields contain only immutable values. A detached
+        # mapping is enough for project saves and background recovery.
+        return {'spans': [vars(span).copy() for span in self.spans],
+                'elements': [vars(element).copy() for element in self.elements], 'all_caps': self.all_caps,
                 'definitions': list(self.definitions)}
 
     @classmethod

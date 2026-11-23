@@ -13,8 +13,7 @@ from app.src.casecat.anchors import utf16_index
 SEEK_LEAD_IN_MS = 1000
 DEFAULT_FORWARD_SECONDS = 5
 PLAYBACK_SHORTCUTS = (
-    ('Play / pause', 'Space', 'toggle'),
-    ('Seek to the cursor', 'Shift+F9', 'seek_from_cursor'),
+    ('Play from cursor', 'Shift+F9', 'play_from_cursor'),
     ('Stop playback', 'Ctrl+F9', 'stop'),
 )
 
@@ -79,6 +78,7 @@ class PlaybackBar(QWidget):
         self.timing, self.context = timing, context
         self._highlight_editor = None
         self._pending_seek = None
+        self._highlight_stopped = False
         self.player = QMediaPlayer(self)
         self.output = QAudioOutput(self)
         self.player.setAudioOutput(self.output)
@@ -107,13 +107,18 @@ class PlaybackBar(QWidget):
         self.player.errorOccurred.connect(self._error, Qt.QueuedConnection)
         self.player.setSource(QUrl.fromLocalFile(str(Path(wav_path).resolve())))
 
+    @Slot('qint64')
     def _duration(self, duration):
         self.slider.setRange(0, duration)
         self.show_position(self.player.position())
 
+    @Slot(QMediaPlayer.PlaybackState)
     def _state(self, state):
+        if state == QMediaPlayer.PlayingState:
+            self._highlight_stopped = False
         self.play_button.setText('Pause' if state == QMediaPlayer.PlayingState else 'Play')
 
+    @Slot(QMediaPlayer.MediaStatus)
     def _loaded(self, status):
         if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia) and self._pending_seek is not None:
             position, self._pending_seek = self._pending_seek, None
@@ -134,6 +139,21 @@ class PlaybackBar(QWidget):
 
     def seek_from_cursor(self):
         self._seek_with_lead_in(self.cursor_position_ms())
+
+    def play_from_cursor(self):
+        self.seek_from_cursor()
+        self.player.play()
+
+    def stop_from_keyboard(self):
+        # Leave the local WAV decoder open between rapid transport commands.
+        # Tearing it down during a pending seek can deadlock Qt's FFmpeg backend.
+        self._pending_seek = None
+        self._highlight_stopped = True
+        if self.player.isPlaying():
+            self.player.pause()
+        if self.player.position():
+            self.player.setPosition(0)
+        self.clear_highlight()
 
     def seek_passage(self, revision, position, end=None):
         # An insertion can start on the space following the previous word.
@@ -159,6 +179,7 @@ class PlaybackBar(QWidget):
 
     def seek(self, position):
         """Move the playback head without changing playing/paused state."""
+        self._highlight_stopped = False
         position = max(0, position)
         if self.player.duration() > 0:
             position = min(position, self.player.duration())
@@ -176,7 +197,10 @@ class PlaybackBar(QWidget):
     def stop(self):
         self._pending_seek = None
         # Hiding or replacing a tab can happen while its WAV is still loading.
-        if self.player.playbackState() != QMediaPlayer.StoppedState or self.player.position():
+        if self.player.playbackState() != QMediaPlayer.StoppedState:
+            self.stop_from_keyboard()
+            return
+        if self.player.position():
             self.player.stop()
         self.clear_highlight()
 
@@ -188,6 +212,7 @@ class PlaybackBar(QWidget):
                 self._highlight_editor.setExtraSelections([])
             self._highlight_editor = None
 
+    @Slot('qint64')
     def show_position(self, position):
         if not self.slider.isSliderDown():
             with QSignalBlocker(self.slider):
@@ -195,7 +220,7 @@ class PlaybackBar(QWidget):
         self.clock.setText(f'{timestamp(position)} / {timestamp(self.player.duration())}')
         editor, revision = self.context()
         self.clear_highlight()
-        if editor is None or revision is None or self.timing is None:
+        if self._highlight_stopped or editor is None or revision is None or self.timing is None:
             return
         passage = self.timing.range_at(revision, position)
         if passage is None:

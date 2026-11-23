@@ -1,5 +1,8 @@
 """Tabbed transcript editor with explicit saves and independent processing."""
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import time
@@ -8,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QUrl
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
@@ -24,6 +27,7 @@ from app.src.casecat.retiming import AudioExportError
 from app.src.document_view import DocumentView, ImportView
 from app.src.playback import DEFAULT_FORWARD_SECONDS
 from app.src.settings_page import SettingsPage
+from app.src.smart_keys import SmartKeyProfile
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
 from app.src.jobs import JobManager, Request
 from app.src.notice_dialog import NoticeWizard, read_notice
@@ -31,6 +35,8 @@ from app.src.notice_model import NoticeDetails
 
 
 class TranscriptEditor(QMainWindow):
+    recovery_finished = Signal(object)
+
     def __init__(self, *, session_path=None, legacy_dir=None, jobs=None):
         super().__init__()
         self.setWindowTitle('BABABUI')
@@ -46,7 +52,9 @@ class TranscriptEditor(QMainWindow):
         self._recovery_timer = QTimer(self)
         self._recovery_timer.setSingleShot(True)
         self._recovery_timer.setInterval(300)
-        self._recovery_timer.timeout.connect(self.persist_session)
+        self._recovery_timer.timeout.connect(self._autosave)
+        self._recovery_executor = self._recovery_future = None
+        self.recovery_finished.connect(self._recovery_done, Qt.QueuedConnection)
         self.jobs = jobs if jobs is not None else JobManager(self)
         self.jobs.succeeded.connect(self._succeeded)
         self.jobs.reviewed.connect(self._reviewed)
@@ -68,7 +76,7 @@ class TranscriptEditor(QMainWindow):
         bar.tabMoved.connect(lambda *_: self.schedule_recovery())
         self.plus_btn = NewTabButton(self.tabs)
         self.plus_btn.setText('+')
-        self.plus_btn.setToolTip('New tab (Ctrl+T)')
+        self.plus_btn.setToolTip('New tab')
         self.plus_btn.clicked.connect(lambda: self.new_tab())
         self.tabs.setCornerWidget(self.plus_btn, Qt.TopRightCorner)
         documents, active, notice, self.settings = self._read_session()
@@ -115,14 +123,14 @@ class TranscriptEditor(QMainWindow):
         self.file_btn, menu = self._menu_button('File', row)
         self.file_actions = {}
         for label, shortcut, callback in (
-            ('New Tab', 'Ctrl+T', lambda: self.new_tab()),
+            ('New Tab', '', lambda: self.new_tab()),
             ('Open', 'Ctrl+O', lambda: self.open_file()),
             ('Import CaseCAT ZIP', '', lambda: self.choose_zip(self.tabs.currentIndex())),
             ('Export CaseCAT ZIP', '', self.export_casecat),
             ('Save', 'Ctrl+S', lambda: self.save_current()),
-            ('Save As', 'Ctrl+Shift+S', lambda: self.save_current(save_as=True)),
+            ('Save As', '', lambda: self.save_current(save_as=True)),
             ('Duplicate Tab', '', lambda: self.duplicate_tab()),
-            ('Close Tab', 'Ctrl+W', lambda: self.close_tab(self.tabs.currentIndex()))):
+            ('Close Tab', '', lambda: self.close_tab(self.tabs.currentIndex()))):
             action = QAction(label, self)
             action.triggered.connect(callback)
             if shortcut:
@@ -143,10 +151,10 @@ class TranscriptEditor(QMainWindow):
         edit.addSeparator()
         self.review_actions = []
         for label, shortcut, callback in (
-            ('Accept suggestion', 'A', lambda v: v.diff_view.request_current(True)),
-            ('Reject suggestion', 'D', lambda v: v.diff_view.request_current(False)),
-            ('Replay current edit', 'W', lambda v: v.replay_current_edit()),
-            ('Fast forward', 'S', lambda v: v.playback.skip_forward() if v.playback else None),
+            ('Accept suggestion', 'Alt+A', lambda v: v.diff_view.request_current(True)),
+            ('Reject suggestion', 'Alt+D', lambda v: v.diff_view.request_current(False)),
+            ('Replay current edit', 'Alt+W', lambda v: v.replay_current_edit()),
+            ('Fast forward', 'Alt+S', lambda v: v.playback.skip_forward() if v.playback else None),
         ):
             action = edit.addAction(label)
             action.setShortcut(QKeySequence(shortcut))
@@ -170,6 +178,11 @@ class TranscriptEditor(QMainWindow):
         self.settings_btn.setText('Settings')
         self.settings_btn.clicked.connect(self.open_settings)
         row.addWidget(self.settings_btn)
+        self.keyboard_mode_btn = QToolButton()
+        self.keyboard_mode_btn.setCheckable(True)
+        self.keyboard_mode_btn.setToolTip('Switch between Typing and Smart Keys (/) in this tab')
+        self.keyboard_mode_btn.clicked.connect(self._toggle_keyboard)
+        row.addWidget(self.keyboard_mode_btn)
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addWidget(self.status_label, 1)
@@ -201,6 +214,15 @@ class TranscriptEditor(QMainWindow):
 
     def _build_settings(self):
         self.settings_page = page = SettingsPage(self.file_actions.values(), self.review_actions)
+        if saved := self.settings.get('keyboard/profile'):
+            try:
+                page.set_profile(SmartKeyProfile.from_dict(saved))
+            except (ValueError, KeyError, TypeError) as exc:
+                page.profile_error.setText(f'Could not load the saved keyboard. {exc}')
+                page.profile_error.show()
+        page.profileChanged.connect(self._set_keyboard_profile)
+        page.space_playback.setChecked(self._load_setting('keyboard/space_playback', False))
+        page.space_playback.toggled.connect(self._set_space_playback)
         for rule, checkbox in page.auto_accept.items():
             enabled = self._load_setting(f'auto_accept/{rule}', True)
             checkbox.setChecked(enabled)
@@ -289,6 +311,8 @@ class TranscriptEditor(QMainWindow):
             view = DocumentView(document, disabled_auto_accept_rules=self.disabled_auto_accept_rules,
                                 forward_seconds=self.settings_page.forward_seconds.value())
             view.notice_requested.connect(self._attach_requested_notice)
+            view.keyboard.profile = self.settings_page.profile
+            view.keyboard.space_playback = self.settings_page.space_playback.isChecked()
             view.diff_view.selection_changed.connect(self._update_suggestion_actions)
         else:
             view = ImportView(document)
@@ -351,6 +375,10 @@ class TranscriptEditor(QMainWindow):
         doc = view.document if view else None
         busy = bool(doc and doc.busy)
         editable = isinstance(view, DocumentView) and not busy
+        smart = isinstance(view, DocumentView) and view.smart_keys
+        self.keyboard_mode_btn.setEnabled(editable)
+        self.keyboard_mode_btn.setChecked(smart)
+        self.keyboard_mode_btn.setText('Smart Keys' if smart else 'Typing')
         self.edit_btn.setEnabled(editable)
         self.notice_action.setEnabled(editable)
         pending_review = isinstance(view, DocumentView) and bool(view.review_model.edits)
@@ -428,6 +456,25 @@ class TranscriptEditor(QMainWindow):
     def _set_setting(self, key, value):
         self.settings[key] = value
         self.schedule_recovery()
+
+    def _toggle_keyboard(self, enabled):
+        if isinstance(self.current, DocumentView):
+            self.current.set_smart_keys(enabled)
+            if editor := self.current.active_view():
+                editor.setFocus()
+
+    def _set_keyboard_profile(self, profile):
+        self._set_setting('keyboard/profile', profile.to_dict())
+        for view in self.views():
+            if isinstance(view, DocumentView):
+                view.keyboard.profile = profile
+                view.keyboard.last_macro = None
+
+    def _set_space_playback(self, enabled):
+        self._set_setting('keyboard/space_playback', enabled)
+        for view in self.views():
+            if isinstance(view, DocumentView):
+                view.keyboard.space_playback = enabled
 
     def set_auto_accept_rule(self, rule, enabled):
         if enabled:
@@ -761,11 +808,43 @@ class TranscriptEditor(QMainWindow):
         if not self._restoring:
             self._recovery_timer.start()
 
+    def _autosave(self):
+        if self._restoring or not self._recovery_enabled:
+            return
+        if self._recovery_future and not self._recovery_future.done():
+            self._recovery_timer.start()
+            return
+        if self.current:
+            self.current.capture_position()
+        # Native revisions are immutable. Copy the editable metadata before a
+        # background write so a later edit, tab close, or import cannot leak in.
+        docs = [replace(v.document, warnings=v.document.warnings.copy(),
+                        native=v.document.native.duplicate() if v.document.native else None)
+                for v in self.views()]
+        active = self._processing_model_view()
+        if self._recovery_executor is None:
+            self._recovery_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='session-save')
+        self._recovery_future = self._recovery_executor.submit(
+            save_session, self.session_path, docs, active.document.id if active else None,
+            settings=deepcopy(self.settings))
+        self._recovery_future.add_done_callback(self.recovery_finished.emit)
+
+    @Slot(object)
+    def _recovery_done(self, future):
+        if self._recovery_future is future:
+            self._recovery_future = None
+            if error := future.exception():
+                self.show_status(f'Could not save recovery: {error}')
+
     def persist_session(self):
         if self._restoring or not self._recovery_enabled:
             return False
         self._recovery_timer.stop()
         try:
+            if self._recovery_future:
+                # Finish the earlier write before saving the latest version.
+                self._recovery_future.exception()
+                self._recovery_future = None
             views = self.views()
             for view in views:
                 view.capture_position()
@@ -785,6 +864,9 @@ class TranscriptEditor(QMainWindow):
             QMessageBox.warning(self, 'Recovery could not be saved', 'Keep the app open and save your documents before trying again.')
             event.ignore()
         else:
+            if self._recovery_executor:
+                self._recovery_executor.shutdown(wait=True)
+                self._recovery_executor = None
             super().closeEvent(event)
 
 

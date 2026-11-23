@@ -138,7 +138,8 @@ def test_project_reload_retains_independent_speaker_values(tmp_path, monkeypatch
     restored = documents.open_document(target)
     assert restored.native.original == doc.native.original
     assert restored.native.incoming == doc.native.incoming
-    assert len(restored.native.incoming.elements) == 5
+    assert len(restored.native.incoming.elements) == 6
+    assert any(e.name == 'Colloquy' and e.raw == '160400' for e in restored.native.incoming.elements)
 
 
 def test_document_proposal_keeps_normalized_linked_values(tmp_path):

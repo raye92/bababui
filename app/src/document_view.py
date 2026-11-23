@@ -2,20 +2,22 @@
 from bisect import bisect_right
 from copy import deepcopy
 from PySide6.QtCore import Signal, Slot, QThread, QThreadPool, QTimer, Qt
-from PySide6.QtGui import QFont, QShortcut, QKeySequence, QTextCursor, QColor, QTextFormat
+from PySide6.QtGui import QFont, QTextCursor, QColor, QTextFormat
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget, QPushButton, QLabel, QSplitter, QTextEdit, QMessageBox
 from app.src.accept_all_preview import AcceptAllPreviewEditor, AcceptAllPreviewTask, PreviewSignals
 from app.src.native_editor import NativeTranscriptEditor
 from app.src.review_view import ReviewView
 from app.src.review_model import build_review, map_position
+from app.src.review_editing import edit_review, resolve_review
+from app.src.transcript_keyboard import TranscriptKeyboard
 from app.src.review_colors import CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.inline_review import InlineReviewEditor
 from app.src.page_view import PageView
-from app.src.playback import DEFAULT_FORWARD_SECONDS, PLAYBACK_SHORTCUTS, PlaybackBar
+from app.src.playback import DEFAULT_FORWARD_SECONDS, PlaybackBar
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
-from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start, resolve, resolve_all, text_edits
-from app.src.suggestion_filter import override_speaker, track_decisions, questionable_speaker_defaults
+from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start, text_edits
+from app.src.suggestion_filter import override_speaker, questionable_speaker_defaults
 from app.src.notice_review import auto_accept_document, begin_document_review
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, WAV_CHANGED
 
@@ -53,12 +55,12 @@ class ReviewPreviewWorker(QThread):
 
     def run(self):
         try:
-            self.revisions = self.decision()
+            self.model, self.review = self.decision()
+            self.revisions = self.model.original, self.model.incoming
             for side, old, revision in zip(('original', 'incoming'), self.before, self.revisions):
                 if old != revision:
                     job = self.job.with_revision(revision)
                     self.previews[side] = prepare_editor_presentation(job, self.bundle)
-            self.model = build_review(*self.revisions)
         except Exception as exc:
             self.error = exc
 
@@ -88,6 +90,9 @@ class DocumentView(QWidget):
         self._native_history = {'original': {}, 'incoming': {}}
         self._review_undo, self._review_redo = [], []
         self._review_worker = None
+        self._typing_run = None
+        self._history_selection = None
+        self._source_views_stale = False
         self.accept_all_preview = False
         self._preview_anchor = None
         self._preview_model = None
@@ -96,6 +101,12 @@ class DocumentView(QWidget):
         # alive, and Qt disconnects the tab's slot when the tab is deleted.
         self._preview_signals = PreviewSignals()
         self._preview_signals.finished.connect(self._finish_accept_all_preview, Qt.QueuedConnection)
+        self._format_signals = PreviewSignals()
+        self._format_signals.finished.connect(self._finish_preview_format, Qt.QueuedConnection)
+        self._format_timer = QTimer(self, singleShot=True, interval=500)
+        self._format_timer.timeout.connect(self._prepare_preview_format)
+        self._format_running = False
+        self._needs_native_format = False
         if document.native.original != document.native.incoming or automatic_before:
             self._automatic_review(automatic_before)
         self.stack = QStackedWidget()
@@ -109,9 +120,19 @@ class DocumentView(QWidget):
         self.inline_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
         self.inline_editor.source_activated.connect(self._seek_review_passage)
         self.preview_editor = AcceptAllPreviewEditor(font)
+        self.preview_editor.document().contentsChange.connect(self._preview_text_changed)
+        self.preview_editor.native_edit_requested.connect(self._preview_native_edit)
         self.preview_editor.passage_clicked.connect(self._preview_clicked)
         self.preview_editor.history_requested.connect(lambda undo: self.undo_review() if undo else self.redo_review())
+        self.editor.transaction_history = self._editor_history
+        for editor in (self.editor, self.preview_editor):
+            editor.history_available = lambda undo: bool(self._review_undo if undo else self._review_redo)
+        self.smart_keys = False
+        self.keyboard = TranscriptKeyboard(self)
+        for editor in (self.editor, self.incoming_editor, self.preview_editor, self.inline_editor):
+            editor.installEventFilter(self.keyboard)
         self.diff_view = ReviewView()
+        self.diff_view.live_location = self._amended_location
         self.diff_view.requested.connect(self._start_review)
         self.diff_view.selection_changed.connect(self.highlight_suggestions)
         self.diff_view.selected.connect(self.select_suggestion)
@@ -182,16 +203,16 @@ class DocumentView(QWidget):
         if not getattr(self, '_playback_connected', False):
             self._playback_connected = True
             self.stack.currentChanged.connect(lambda _: self.playback.stop())
-            for _, key, method in PLAYBACK_SHORTCUTS:
-                shortcut = QShortcut(QKeySequence(key), self)
-                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-                shortcut.setAutoRepeat(method != 'toggle')
-                shortcut.activated.connect(lambda m=method: getattr(self.playback, m)())
 
     def set_forward_seconds(self, seconds):
         self.forward_seconds = seconds
         if self.playback:
             self.playback.set_forward_seconds(seconds)
+
+    def set_smart_keys(self, enabled):
+        if self.smart_keys != enabled:
+            self.smart_keys = enabled
+            self.changed.emit()
 
     def replay_current_edit(self):
         if self._seek_selected_suggestion():
@@ -269,8 +290,8 @@ class DocumentView(QWidget):
             anchor = self._inline_anchor(*self._preview_anchor)
             position = self.inline_editor.display_position(*anchor)
             if position is not None:
-                lines = self.inline_editor.page_lines()
-                self.document.center_line = max(0, bisect_right([line.position for line in lines], position) - 1)
+                self.document.center_line = max(0, sum(1 for row in self.inline_editor.rows
+                                                       if row.number and row.display_start <= position) - 1)
         else:
             self.document.center_line = editor.center_line()
 
@@ -318,8 +339,10 @@ class DocumentView(QWidget):
         if editor is self.inline_editor:
             return editor.center_source_position()
         side = 'original' if editor is self.editor else 'incoming'
-        lines = editor.page_lines()
-        position = lines[editor.center_line()].position if lines else 0
+        middle = editor.verticalScrollBar().value() + editor.viewport().height() / 2
+        page = int(middle // editor._page_height)
+        lines = editor.page_lines((max(0, page - 1), page + 1))
+        position = min(lines, key=lambda line: abs(line.y - middle)).position if lines else 0
         return side, utf16_index(editor.toPlainText(), position)
 
     def _restore_review_position(self, anchor, before):
@@ -353,6 +376,10 @@ class DocumentView(QWidget):
         pending = getattr(editor, 'pending_native_revision', None)
         if new_text == old.text and pending is None and not editor.history_action:
             return  # Presentation-only changes do not create native transactions.
+        if side == 'original' and not editor.history_action:
+            self._record_typing(position, removed, added, editor, atomic=pending is not None)
+        if doc.native.review and side == 'incoming':
+            doc.native.review.pop('pending_decisions', None)
         steps = editor.document().availableUndoSteps()
         history = self._native_history[side]
         restored = history.get(steps) if editor.history_action else None
@@ -382,6 +409,9 @@ class DocumentView(QWidget):
                 history = {key: value for key, value in history.items() if key <= steps}
                 self._native_history[side] = history
             history[steps] = revision
+            if self.playback and hasattr(self.playback.timing, 'track_edit'):
+                self.playback.timing.track_edit(old, revision, utf16_index(old.text, start),
+                                                utf16_index(old.text, end), new_text[new_start:new_end])
         doc.set_text(side, revision.text, revision=revision)
         if side == 'original':
             doc.native.review = None
@@ -391,6 +421,9 @@ class DocumentView(QWidget):
         doc = self.document
         if self._updating:
             return
+        self._typing_run = None
+        self._review_undo.clear()
+        self._review_redo.clear()
         doc.set_text(side, text)
         revision = getattr(doc.native, side)
         editor.set_native_source(doc.native.bundle, doc.native.job.with_revision(revision))
@@ -410,6 +443,19 @@ class DocumentView(QWidget):
         return (model is not None and self.review_model.original is model.original
                 and self.review_model.incoming is model.incoming)
 
+    def _amended_location(self, change):
+        if self._updating or not self._source_views_stale or self.active_view() is not self.preview_editor:
+            return None
+        editor = self.preview_editor
+        position = editor._qt_position(preview_start(change, 'incoming'))
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(position)
+        y = editor.cursorRect(cursor).center().y() + editor.verticalScrollBar().value()
+        page = max(0, int(y // editor._page_height))
+        lines = editor.page_lines((page, page))
+        index = bisect_right(lines, position, key=lambda line: line.position) - 1
+        return lines[index] if index >= 0 else None
+
     def set_accept_all_preview(self, enabled):
         if enabled == self.accept_all_preview:
             return
@@ -417,13 +463,17 @@ class DocumentView(QWidget):
         self.accept_all_preview = enabled
         if enabled:
             self.stack.setCurrentIndex(0)
+        elif self._source_views_stale:
+            self.refresh(model=self.review_model)
         self._update_original_page()
         self.schedule_restore(anchor)
         self.document.view = self.stack.currentIndex()
         self.changed.emit()
 
     def _update_original_page(self):
-        if not self.review_model.edits:
+        if self.accept_all_preview and self._source_views_stale and self._preview_matches(self._preview_model):
+            page = self.preview_page
+        elif not self.review_model.edits:
             page = self.original_page
         elif not self.accept_all_preview:
             page = self.inline_page
@@ -465,9 +515,147 @@ class DocumentView(QWidget):
         selected = self.diff_view.current if self.diff_view.has_current else -1
         self.preview_editor.load_preview(self.document.native.bundle, job, prepared, model, selected)
         self._preview_model = model
+        self.preview_editor.setReadOnly(self.document.busy)
         self._update_original_page()
+        self._restore_history_selection()
         if not self.stack.currentIndex():
             self.schedule_restore(self._preview_anchor)
+
+    def _record_typing(self, position, removed, added, editor, *, atomic=False):
+        state = self.document.native
+        single_insert = (added in (1, 2) and removed == 0 and not atomic)
+        if not single_insert or self._typing_run != (editor, position):
+            self._review_undo.append((state.original, state.incoming, state.review,
+                                      (position, position + removed, getattr(editor, 'caret_affinity', None))))
+        self._typing_run = (editor, position + added) if single_insert else None
+        self._review_redo.clear()
+
+    def _editor_history(self, undo):
+        history = self._review_undo if undo else self._review_redo
+        if not history:
+            return False
+        (self.undo_review if undo else self.redo_review)()
+        return True
+
+    def _restore_history_selection(self):
+        if self._history_selection is None:
+            return
+        editor = self.active_editor()
+        if editor is not None:
+            anchor, position, affinity = self._history_selection
+            self._history_selection = None
+            cursor = editor.textCursor()
+            last = editor.document().characterCount() - 1
+            cursor.setPosition(min(anchor, last))
+            cursor.setPosition(min(position, last), QTextCursor.KeepAnchor)
+            editor.setTextCursor(cursor)
+            if editor is self.preview_editor:
+                editor.caret_affinity, editor.affinity_position = affinity, cursor.position()
+
+    def _preview_text_changed(self, position, removed, added):
+        editor = self.preview_editor
+        if self._updating or editor.whole_text_update or not self._preview_matches(self._preview_model):
+            return
+        old = self.review_model.incoming.text
+        new = editor.toPlainText()
+        if old == new:
+            return
+        start, end = (utf16_index(old, p) for p in (position, position + removed))
+        finish = utf16_index(new, position + added)
+        self._edit_preview(start, end, new[start:finish], position, removed, added)
+
+    @Slot(object, int, int, str, int)
+    def _preview_native_edit(self, revision, start, end, replacement, caret):
+        if self.document.busy or not self._preview_matches(self._preview_model):
+            return
+        position = self.preview_editor._qt_position(start)
+        self._edit_preview(start, end, replacement, position, end-start, len(replacement),
+                           native_revision=revision, caret=caret)
+
+    def _edit_preview(self, start, end, replacement, position, removed, added, *, native_revision=None, caret=None):
+        state = self.document.native
+        editor = self.preview_editor
+        affinity = editor.caret_affinity if position == editor.affinity_position else None
+        before = self.review_model
+        try:
+            model, review = edit_review(before, state.review, 'incoming', start, end, replacement,
+                                        affinity=affinity, native_revision=native_revision)
+        except ValueError as exc:
+            self.document.status = str(exc)
+            editor.sync_native_text(before.incoming.text)
+            self.changed.emit()
+            return
+        if model is before:
+            return
+        self._record_typing(position, removed, added, editor, atomic=native_revision is not None)
+        self._updating = True
+        try:
+            self.review_model = self._preview_model = model
+            state.original, state.incoming, state.review = model.original, model.incoming, review
+            if self.playback and hasattr(self.playback.timing, 'track_edit'):
+                self.playback.timing.track_edit(before.incoming, model.incoming, start, end, replacement)
+            if native_revision is not None:
+                editor.sync_review_revision(before.incoming, model.incoming, start, end, replacement)
+            else:
+                editor.sync_native_text(model.incoming.text)
+            if not self._needs_native_format:
+                self._needs_native_format = native_revision is not None or editor.needs_native_format(
+                    before.incoming, start, end, replacement, position)
+            editor.invalidate_paragraphs(before.incoming.text, start, end, replacement, model.incoming.text)
+            if caret is not None:
+                cursor = editor.textCursor()
+                cursor.setPosition(editor._qt_position(min(len(model.incoming.text), caret)))
+                editor.setTextCursor(cursor)
+            editor.affinity_position = position + added
+            editor.caret_affinity = 'left' if replacement else affinity
+            self._source_views_stale = True
+            self.diff_view.amend_model(model, review)
+            editor.update_review(model, self.diff_view.current if self.diff_view.has_current else -1)
+            if not model.edits:
+                self.diff_view.setVisible(bool(review.get('evidence', {}).get('speakers')))
+            self._format_timer.start()
+        finally:
+            self._updating = False
+        self.edited()
+
+    def _prepare_preview_format(self):
+        if (self._format_running or not self._source_views_stale
+                or self.active_view() is not self.preview_editor):
+            return
+        if not self._needs_native_format:
+            self._refresh_preview_sidebar()
+            return
+        self._format_running = True
+        state = self.document.native
+        QThreadPool.globalInstance().start(AcceptAllPreviewTask(
+            self.review_model, state.bundle, state.job, self._format_signals))
+
+    @Slot(object, object, str)
+    def _finish_preview_format(self, model, result, error):
+        self._format_running = False
+        if self.active_view() is not self.preview_editor or not self._source_views_stale:
+            return
+        if model is not self.review_model:
+            if not self._format_timer.isActive():
+                self._format_timer.start()
+            return
+        if result is None:
+            self.document.status = f'Could not update preview formatting. {error}'
+            self.changed.emit()
+            return
+        self._updating = True
+        try:
+            self.preview_editor.apply_prepared(*result, model, self.diff_view.current)
+            self._needs_native_format = False
+        finally:
+            self._updating = False
+        self._refresh_preview_sidebar()
+
+    def _refresh_preview_sidebar(self):
+        if (self.diff_view.review or {}).get('evidence', {}).get('speakers'):
+            self.diff_view._speakers(self.review_model.original)
+            self.diff_view.filter_speaker(self.diff_view.speaker_filter, select=False)
+        self.diff_view._update_heading()
 
     @Slot(int, int)
     def _preview_clicked(self, index, position):
@@ -486,10 +674,12 @@ class DocumentView(QWidget):
         previews = previews or {}
         self._set_text(self.editor, doc.original, previews.get('original'))
         self._set_text(self.incoming_editor, doc.incoming, previews.get('incoming'))
-        self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming)
+        self.review_model = model if model is not None else build_review(doc.native.original, doc.native.incoming, doc.native.review)
         self.diff_view.set_model(self.review_model, review=doc.native.review)
         self.inline_editor.set_model(
             self.review_model, unmatched_speakers=self.diff_view.unmatched_speaker_ranges)
+        self._source_views_stale = False
+        self._needs_native_format = False
         self._update_original_page()
         self.inline_page.fit_page()
         self.original_page.fit_page()
@@ -505,6 +695,9 @@ class DocumentView(QWidget):
         if self._updating:
             return
         selected = self.diff_view.current if self.diff_view.has_current else -1
+        if self._source_views_stale and self.active_view() is self.preview_editor:
+            self.preview_editor.highlight_edit(selected)
+            return
         self.inline_editor.highlight_edit(selected)
         for side, editor in (('original', self.editor), ('incoming', self.incoming_editor)):
             text = getattr(self.document, side)
@@ -624,11 +817,11 @@ class DocumentView(QWidget):
                             f'{names}\n\nAccept all suggestions with these names?',
                             QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Yes:
                         return
-                decision = lambda: resolve_all(*before[:2], ranges, accept)
             else:
                 change = self.diff_view.changes[index]
                 ranges = change.ranges
-                decision = lambda: resolve(*before[:2], change, accept)
+            snapshot = self.review_model
+            decision = lambda: resolve_review(snapshot, before[2], index, accept)
             if not background:
                 result = decision()
         except (ValueError, IndexError) as exc:
@@ -665,10 +858,13 @@ class DocumentView(QWidget):
                 self.diff_view.select(worker.index)
             self.changed.emit()
             return
-        self._apply_review(worker.index, worker.before, worker.revisions, worker.ranges,
-                           previews=worker.previews, model=worker.model)
+        self._apply_review(worker.index, worker.before, (worker.model, worker.review), worker.ranges,
+                           previews=worker.previews)
 
-    def _apply_review(self, index, before, result, ranges, *, previews=None, model=None):
+    def _apply_review(self, index, before, decision, ranges, *, previews=None):
+        model, review = decision
+        result = model.original, model.incoming
+        self._typing_run = None
         state = self.document.native
         anchor = self._review_position() if index is None else None
         # Use offsets from the revision the decision leaves intact. The new
@@ -681,7 +877,7 @@ class DocumentView(QWidget):
         self._review_undo.append(before)
         self._review_redo.clear()
         state.original, state.incoming = result
-        track_decisions(state.review, ranges, incoming_changed=before[1].text != state.incoming.text)
+        state.review = review
         self.refresh(previews=previews, model=model)
         visible = self.diff_view.visible_indices
         if anchor is not None:
@@ -721,12 +917,21 @@ class DocumentView(QWidget):
 
     def _review_history(self, source, target):
         if source and not self.document.busy:
+            self._typing_run = None
             state = self.document.native
             before = state.original, state.incoming, deepcopy(state.review)
-            target.append(before)
+            editor = self.active_editor()
+            if editor is not None:
+                cursor = editor.textCursor()
+                target.append((*before, (cursor.anchor(), cursor.position(), getattr(editor, 'caret_affinity', None))))
+            else:
+                target.append(before)
             anchor = self._review_position()
-            state.original, state.incoming, state.review = source.pop()
+            saved = source.pop()
+            self._history_selection = saved[3] if len(saved) > 3 else None
+            state.original, state.incoming, state.review = saved[:3]
             self.refresh()
+            self._restore_history_selection()
             self._restore_review_position(anchor, before)
             self.edited()
 
@@ -735,8 +940,6 @@ class DocumentView(QWidget):
 
     def _original_changed(self):
         if not self._updating:
-            self._review_undo.clear()
-            self._review_redo.clear()
             self._refresh_native_presentation('original', self.editor)
             self.edited()
 
@@ -845,8 +1048,10 @@ class DocumentView(QWidget):
             self.notice_offer.setEnabled(not busy)
         pending = self.document.native.original != self.document.native.incoming
         self.editor.setReadOnly(busy or pending)
+        self.preview_editor.setReadOnly(busy or not self._preview_matches(self._preview_model))
         self.incoming_editor.setReadOnly(True)
         self.diff_view.setEnabled(not busy)
 
     def active_editor(self):
-        return self.editor if not self.document.busy and not self.stack.currentIndex() and not self.editor.isReadOnly() else None
+        editor = self.active_view()
+        return editor if editor is not None and not self.document.busy and not editor.isReadOnly() else None

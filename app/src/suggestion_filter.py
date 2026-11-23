@@ -704,6 +704,8 @@ def override_speaker(state, speaker, name):
     values = field_values(state.original) if reference else {}
     revision = state.incoming
     locations = state.review['locations']
+    saved = [(loc, (loc['start'], loc['end'])) for loc in locations
+             if loc['speaker'] == speaker and not loc['resolved']] if 'pending_decisions' in state.review else []
     for loc in sorted((p for p in locations if p['speaker'] == speaker and not p['resolved']), key=lambda p:p['start'], reverse=True):
         a, b = loc['start'], loc['end']
         value = name or speaker
@@ -718,5 +720,10 @@ def override_speaker(state, speaker, name):
                 other['start'] += delta
                 other['end'] += delta
         revision = revised
+    if saved:
+        from app.src.review_editing import remap_speaker_decisions
+        state.review['pending_decisions'] = remap_speaker_decisions(
+            state.original, state.incoming, revision, state.review,
+            [(old, (loc['start'], loc['end'])) for loc, old in saved])
     state.incoming = revision
     state.review['overrides'][speaker] = name

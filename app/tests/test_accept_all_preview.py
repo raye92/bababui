@@ -75,7 +75,7 @@ def test_preview_matches_accepted_native_layout_and_highlights_only_changes(nati
     assert action.isCheckable() and not action.isChecked()
     action.trigger()
     preview = visible_preview(view)
-    assert preview.isReadOnly()
+    assert not preview.isReadOnly()
     assert (doc.native.original, doc.native.incoming, doc.native.review, doc.dirty) == before
     assert 'Remove this line.' not in preview.toPlainText()
     assert preview.document().pageCount() == 2
@@ -238,7 +238,7 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     before = doc.original, doc.incoming
 
     key = Qt.Key_A if accepted else Qt.Key_D
-    QTest.keyClick(preview, key)
+    QTest.keyClick(preview, key, Qt.AltModifier)
     wait_until(lambda: not doc.busy and len(view.review_model.edits) == 1)
     after = doc.original, doc.incoming
     assert ('copper' in doc.original, 'copper' in doc.incoming) == (accepted, accepted)
@@ -250,6 +250,224 @@ def test_green_preview_click_seeks_and_keeps_the_suggestion_actionable(native_wi
     preview.redo()
     assert (doc.original, doc.incoming) == after
     visible_preview(view)
+
+
+def test_typed_preview_keeps_shared_edits_and_rejects_amended_green(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('First black statement.')
+    view.receive('First green statement.', [])
+    preview_action(native_window).trigger()
+    preview = visible_preview(view)
+    assert view.active_editor() is preview
+    cursor = preview.textCursor()
+    cursor.setPosition(2)
+    preview.setTextCursor(cursor)
+    QTest.keyClicks(preview, 'wasd ')
+    assert view.document.original == 'Fiwasd rst black statement.'
+    cursor = preview.document().find('green')
+    preview.setTextCursor(cursor)
+    QTest.keyClicks(preview, 'blue')
+    assert view.document.incoming == 'Fiwasd rst blue statement.'
+    assert view.document.original == 'Fiwasd rst black statement.'
+    assert len(view.review_model.edits) == 1
+    assert any(mark.cursor.selectedText() == 'blue' for mark in preview.extraSelections())
+    view.review(0, False)
+    assert view.document.incoming == view.document.original == 'Fiwasd rst black statement.'
+    view.undo_review()
+    assert view.document.incoming == 'Fiwasd rst blue statement.'
+
+
+def test_typing_and_smart_keys_are_scoped_to_transcript_tabs(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    editor = view.editor
+    editor.setPlainText('one two')
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    editor.setTextCursor(cursor)
+    QTest.keyClicks(editor, ' wasd[]')
+    assert view.document.original == 'one two wasd[]'
+    QTest.keyClick(editor, Qt.Key_Slash)
+    assert view.smart_keys
+    assert view.document.original == 'one two wasd[]'
+    QTest.keyClick(editor, Qt.Key_Space)
+    assert view.document.original.endswith('[] ')
+    QTest.keyClick(editor, Qt.Key_Slash)
+    QTest.keyClick(editor, Qt.Key_Slash, Qt.ControlModifier | Qt.ShiftModifier)
+    assert view.document.original.endswith('[] /')
+    assert not view.smart_keys
+    QTest.keyClick(editor, Qt.Key_Slash)
+    clone = native_window.duplicate_tab()
+    assert view.smart_keys and not clone.smart_keys
+
+
+def test_brackets_play_from_the_preview_caret_and_stop(native_window, audio_review):
+    view = audio_review
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    cursor = editor.document().find('copper')
+    cursor.setPosition(cursor.selectionStart())
+    editor.setTextCursor(cursor)
+    player = view.playback.player
+    player.setPosition(20000)
+    QTest.keyClick(editor, Qt.Key_Slash)
+    QTest.keyClick(editor, Qt.Key_BracketLeft)
+    assert player.isPlaying() and abs(player.position() - 10940) < 200
+    QTest.keyClick(editor, Qt.Key_BracketRight)
+    assert not player.isPlaying() and player.position() == 0
+    QTest.keyClick(editor, Qt.Key_F9, Qt.ShiftModifier)
+    assert player.isPlaying()
+    QTest.keyClick(editor, Qt.Key_F9, Qt.ControlModifier)
+    assert not player.isPlaying() and player.position() == 0
+    assert view.playback._highlight_editor is None
+    # A WAV without passage timing starts from its own playback head.
+    view.playback.timing = None
+    view.playback.seek(6000)
+    QTest.keyClick(editor, Qt.Key_BracketLeft)
+    assert player.isPlaying() and abs(player.position()-6000) < 200
+    native_window.open_settings()
+    QTest.qWait(20)
+    assert not player.isPlaying() and player.position() == 0
+    native_window.tabs.setCurrentWidget(view)
+    QTest.keyClick(editor, Qt.Key_BracketLeft)
+    assert player.isPlaying()
+    QTest.keyClick(editor, Qt.Key_BracketRight)
+    QTest.qWait(20)
+    assert not player.isPlaying() and player.position() == 0
+
+
+def test_imported_shortcuts_macro_history_and_text_input(native_window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from app.src.smart_keys import Binding, SmartKeyProfile
+
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('one two')
+    view.set_smart_keys(True)
+    QTest.keyClick(view.editor, Qt.Key_W, Qt.ControlModifier)
+    assert native_window.current is view and view.document.original == 'two one'
+    QTest.keyClick(view.editor, Qt.Key_Z, Qt.ControlModifier)
+    assert view.document.original == 'one two'
+    action = native_window.settings_page
+    native_window.open_settings()
+    QTest.keyClicks(action.profile_search, '/wasd[]')
+    assert action.profile_search.text() == '/wasd[]'
+    custom = tmp_path / 'Portable.sgkbd'
+    custom.write_text('a=Replacement\nb=[Nonexistent Function]\nc=')
+    monkeypatch.setattr(QFileDialog, 'getOpenFileName', lambda *args: (str(custom), ''))
+    action.import_keyboard()
+    native_window.tabs.setCurrentWidget(view)
+    view.editor.selectAll()
+    QTest.keyClicks(view.editor, 'abc')
+    assert view.document.original == 'Replacement'
+    assert 'Nonexistent Function' in view.document.status
+    assert native_window.persist_session()
+    from app.src.documents import load_session_state
+    settings = load_session_state(native_window.session_path)[-1]
+    assert SmartKeyProfile.from_dict(settings['keyboard/profile']).get('a').value == 'Replacement'
+
+    macro = Binding('x', 'macro', 'Phrase', (('literal', 'first'), ('literal', ' second')))
+    blocked = Binding('y', 'macro', 'Needs dictionary', (('literal', 'bad'), ('command', 'D-Define')))
+    action._apply_profile(SmartKeyProfile('Recorded', (macro, blocked)))
+    view.editor.selectAll()
+    QTest.keyClicks(view.editor, 'xy')
+    assert view.document.original == 'first second'
+    view.undo_review()
+    assert view.document.original == 'Replacement'
+
+
+def test_preview_formats_new_paragraph_after_typing_idle(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('Opening.\nOld testimony.')
+    view.receive('Opening.\nNew testimony.', [])
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.Start)
+    editor.setTextCursor(cursor)
+    QTest.keyClicks(editor, 'EXAMINATION')
+    QTest.keyClick(editor, Qt.Key_Return)
+    caret = editor.textCursor().position()
+    wait_until(lambda: editor.document().firstBlock().blockFormat().alignment() == Qt.AlignHCenter, timeout=5)
+    assert editor.textCursor().position() == caret
+    assert view.document.original.startswith('EXAMINATION\n')
+
+
+def test_smart_undo_retains_prior_typing_selection_and_redo_on_failed_macro(native_window, tmp_path, monkeypatch):
+    from app.src.smart_keys import Binding
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    editor = view.editor
+    editor.setPlainText('example')
+    QTest.keyClicks(editor, 'abc')
+    QTest.keyClick(editor, Qt.Key_Slash)
+    cursor = editor.textCursor()
+    cursor.setPosition(7)
+    cursor.setPosition(4, QTextCursor.KeepAnchor)
+    editor.setTextCursor(cursor)
+    QTest.keyClick(editor, Qt.Key_0)
+    QTest.keyClick(editor, Qt.Key_O)
+    assert view.document.original == 'abcexample'
+    assert (editor.textCursor().anchor(), editor.textCursor().position()) == (7, 4)
+    QTest.keyClick(editor, Qt.Key_O)
+    assert view.document.original == 'example'
+    macro = Binding('x', 'macro', 'Failed search', (('literal', 'X'), ('command', 'Go To Bookmarked Cursor')))
+    assert view.keyboard.run(macro, editor)
+    assert view.document.original == 'example'
+    from PySide6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *args, **kwargs: ('', False))
+    cancelled = Binding('y', 'macro', 'Find', (('literal', 'A'), ('command', 'Search'), ('literal', 'B')))
+    assert not view.keyboard.run(cancelled, editor)
+    assert view.document.original == 'example'
+    view.redo_review()
+    assert view.document.original == 'abcexample'
+
+
+def test_preview_keeps_native_caption_tables_and_linked_fields(native_window, monkeypatch):
+    from app.src.documents import import_casecat
+    from app.src.native_dialogs import FillFieldDialog
+    from app.tests.test_native_fields import field_files
+    from app.tests.test_native_notice_cover import covered, details
+
+    _, _, bundle, job, _, body = covered(field_files(), details())
+    doc = import_casecat(bundle)
+    view = native_window.add_document(doc)
+    view.receive(job.text[:body] + 'Changed testimony.\n' + job.text[body:], [])
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    frames = editor.document().rootFrame().childFrames()
+    assert len(frames) == 2
+    monkeypatch.setattr(FillFieldDialog, 'get_value', lambda *args: ('A NEW PLAINTIFF', True))
+    editor.fill_native_field('PLAINTIFF')
+    for revision in (doc.native.original, doc.native.incoming):
+        fields = [e for e in revision.elements if e.name == 'PLAINTIFF']
+        assert len(fields) == 2 and all(e.value == 'A NEW PLAINTIFF' for e in fields)
+    wait_until(lambda: not view._format_timer.isActive() and not view._format_running, timeout=6)
+    assert editor.toPlainText() == doc.incoming
+    assert len(editor.document().rootFrame().childFrames()) == 2
+    view.review(None, False)
+    assert 'Changed testimony.' not in doc.original
+    assert 'A NEW PLAINTIFF' in doc.original
+
+
+def test_typing_away_the_last_suggestion_keeps_the_live_caret(native_window, tmp_path):
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('First red word.')
+    view.receive('First blue word.', [])
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    editor.setTextCursor(editor.document().find('blue'))
+    QTest.keyClicks(editor, 'red')
+    assert not view.review_model.edits and view.active_editor() is editor
+    QTest.qWait(550)
+    QTest.keyClicks(editor, 'der')
+    assert view.document.original == view.document.incoming == 'First redder word.'
+    view.set_accept_all_preview(False)
+    assert view.active_editor() is view.editor
+    assert view.editor.toPlainText() == view.document.original
 
 
 def test_switching_preview_keeps_the_visible_passage(native_window, tmp_path):

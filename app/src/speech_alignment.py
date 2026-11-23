@@ -1,6 +1,7 @@
 """Align editable passages to timestamped speech without changing native records."""
 from bisect import bisect_left, bisect_right
-from collections import OrderedDict
+from functools import cached_property
+from weakref import WeakKeyDictionary
 from dataclasses import dataclass, replace
 from hashlib import file_digest
 from itertools import groupby
@@ -290,50 +291,178 @@ def align_speech(revision, native_times, words, duration_ms, wav_sha256):
     return SpeechAlignment(wav_sha256, duration_ms, stroke_ms, tuple(audio))
 
 
+@dataclass(frozen=True)
+class _WordTimes:
+    """Small immutable blocks share all unchanged word timings across undo snapshots."""
+    blocks: tuple  # (text origin, relative word starts, absolute audio times)
+    length: int
+
+    @staticmethod
+    def blocks_of(positions, times):
+        for i in range(0, len(positions), 256):
+            origin = positions[i]
+            yield origin, tuple(p-origin for p in positions[i:i+256]), tuple(times[i:i+256])
+
+    @cached_property
+    def starts(self):
+        return tuple(origin for origin, _, _ in self.blocks)
+
+    @cached_property
+    def first_times(self):
+        return tuple(times[0] for _, _, times in self.blocks)
+
+    def at_position(self, position):
+        i = bisect_right(self.starts, position)-1
+        if i >= 0:
+            origin, starts, times = self.blocks[i]
+            return times[bisect_right(starts, position-origin)-1]
+        return None
+
+    def at_time(self, time):
+        i = bisect_right(self.first_times, time)-1
+        if i < 0:
+            return None
+        origin, starts, times = self.blocks[i]
+        j = bisect_right(times, time)-1
+        stop = self.starts[i+1] if i+1 < len(self.blocks) else self.length
+        return origin+starts[j], origin+starts[j+1] if j+1 < len(starts) else stop
+
+    def replace(self, start, end, positions, times, delta):
+        # Repack the two boundary blocks. Shift the origins of later blocks
+        # without copying their word arrays or retaining the previous revision.
+        first = max(0, bisect_right(self.starts, start)-1)
+        stop = bisect_right(self.starts, end)
+        left, right = [], []
+        for origin, starts, clocks in self.blocks[first:stop]:
+            a, b = bisect_left(starts, start-origin), bisect_left(starts, end-origin)
+            left.extend((origin+p, t) for p, t in zip(starts[:a], clocks[:a]))
+            right.extend((origin+p+delta, t) for p, t in zip(starts[b:], clocks[b:]))
+        middle = [*left, *zip(positions, times), *right]
+        starts, clocks = zip(*middle) if middle else ((), ())
+        suffix = ((origin+delta, p, t) for origin, p, t in self.blocks[stop:])
+        return _WordTimes((*self.blocks[:first], *self.blocks_of(starts, clocks), *suffix), self.length+delta)
+
+    @cached_property
+    def ranges(self):
+        words = [(origin+p, t) for origin, starts, clocks in self.blocks for p, t in zip(starts, clocks)]
+        return tuple((a, b, t) for (a, t), (b, _) in zip(words, [*words[1:], (self.length, 0)]))
+
+
+def _nearby_words(revision, start, stop):
+    """Tokenize the affected paragraphs, retaining actual and displayed starts."""
+    result = []
+    for line in revision.text[start:stop].splitlines(keepends=True):
+        label = LABEL.match(line) or QA.match(line)
+        for index, (pos, key) in enumerate(_tokens(line, label.end() if label else 0)):
+            actual = start+pos
+            span = revision.spans[bisect_right(revision._span_ends, actual)]
+            result.append((actual if index else start, actual, key, max(span.stroke_refs, default=None)))
+        start += len(line)
+    return result
+
+
 class SpeechPlayback:
     """Project the speech map onto the current revision, including edits and undo."""
     def __init__(self, alignment):
         self.alignment = alignment
         self._phrases = _unique_phrases([key for key, _ in alignment.words])
         self._times = [time for _, time in alignment.words]
-        self._cache = OrderedDict()
+
+    def _cached(self, revision):
+        return revision.__dict__.get('_speech_indexes', {}).get(self)
+
+    def _remember(self, revision, index):
+        # Keep the projection as long as its revision and WAV are alive. Using
+        # the playback object as key avoids hashing every span of a revision.
+        revision.__dict__.setdefault('_speech_indexes', WeakKeyDictionary())[self] = index
+        return index
 
     def _index(self, revision):
-        key = id(revision)
-        if key not in self._cache:
-            positions, keys, refs = _passages(revision)
-            raw = _at_strokes(refs, self.alignment.stroke_ms)
-            matches = _matches(keys, self._phrases, self._times, raw,
-                               playback_duration=self.alignment.duration_ms)
-            if not keys and self.alignment.stroke_ms:
-                position = 0
-                for span in revision.spans:
-                    if span.content:
-                        positions.append(position)
-                        ref = max(span.stroke_refs, default=None)
-                        raw.append(self.alignment.stroke_ms[ref] if ref is not None else None)
-                        position += len(span.content)
-            if not matches and all(time is None for time in raw):
-                positions, raw = [], []
-            times = _timeline(raw, matches, self.alignment.duration_ms)
-            ranges = tuple(zip(positions, [*positions[1:], len(revision.text)], times))
-            self._cache[key] = revision, positions, times, ranges
-            if len(self._cache) > 4:
-                self._cache.popitem(last=False)
-        self._cache.move_to_end(key)
-        return self._cache[key]
+        cached = self._cached(revision)
+        if cached is not None:
+            return cached
+        positions, keys, refs = _passages(revision)
+        raw = _at_strokes(refs, self.alignment.stroke_ms)
+        matches = _matches(keys, self._phrases, self._times, raw,
+                           playback_duration=self.alignment.duration_ms)
+        if not keys and self.alignment.stroke_ms:
+            position = 0
+            for span in revision.spans:
+                if span.content:
+                    positions.append(position)
+                    ref = max(span.stroke_refs, default=None)
+                    raw.append(self.alignment.stroke_ms[ref] if ref is not None else None)
+                    position += len(span.content)
+        if not matches and all(time is None for time in raw):
+            positions, raw = [], []
+        times = _timeline(raw, matches, self.alignment.duration_ms)
+        return self._remember(revision, _WordTimes(tuple(_WordTimes.blocks_of(positions, times)), len(revision.text)))
+
+    def track_edit(self, before, after, start, end, replacement):
+        """Update a warm speech index for one exact contiguous native edit."""
+        previous = self._cached(before)
+        if previous is None or not previous.blocks or before is after or self._cached(after) is not None:
+            return
+        if not 0 <= start <= end <= len(before.text) or before.text[:start]+replacement+before.text[end:] != after.text:
+            return  # A linked fill can change several separated occurrences.
+        delta = len(replacement)-(end-start)
+        # Include neighboring paragraphs for the measured three-word phrases,
+        # and parse speaker / Q/A labels from genuine paragraph boundaries.
+        lo = before.text.rfind('\n', 0, start)+1
+        boundary = before.text.find('\n', end)
+        hi = len(before.text) if boundary < 0 else boundary+1
+        for _ in range(2):
+            lo = before.text.rfind('\n', 0, max(lo-1, 0))+1
+            boundary = before.text.find('\n', hi)
+            hi = len(before.text) if boundary < 0 else boundary+1
+        old = _nearby_words(before, lo, hi)
+        new = _nearby_words(after, lo, hi+delta)
+        old_times = {p: (key, previous.at_position(display)) for display, p, key, _ in old}
+        fixed, amended = {}, {}
+        for i, (_, p, key, _) in enumerate(new):
+            old_position = p-delta if p >= start+len(replacement) else p
+            if old_position in old_times:
+                old_key, time = old_times[old_position]
+                if time is None:
+                    continue
+                if key == old_key and (p < start or p >= start+len(replacement)):
+                    fixed[i] = time
+                elif p <= start and old_position == p:
+                    amended[i] = time
+        positions = [display for display, _, _, _ in new]
+        if positions and not lo:
+            positions[0] = 0
+        raw = _at_strokes([ref for _, _, _, ref in new], self.alignment.stroke_ms)
+        measured = _matches([key for _, _, key, _ in new], self._phrases, self._times, raw,
+                            playback_duration=self.alignment.duration_ms)
+        lower = previous.at_position(lo-1) if lo else None
+        upper = previous.at_position(hi) if hi < len(before.text) else None
+        # A newly recognizable word gets its recording time. A partial word
+        # being typed keeps the previous word's passage until then.
+        for candidates in (measured, amended):
+            retained = sorted(fixed)
+            for i, time in candidates.items():
+                j = bisect_left(retained, i)
+                left = fixed[retained[j-1]] if j else lower
+                right = fixed[retained[j]] if j < len(retained) else upper
+                if i not in fixed and (left is None or time >= left) and (right is None or time <= right):
+                    fixed[i] = time
+        if not positions and not lo and hi == len(before.text):
+            return  # Let the native punctuation-only stroke fallback handle this revision.
+        if positions and not fixed and all(t is None for t in raw):
+            # New, unmeasured words stay at the previously audible passage.
+            fixed[0] = previous.at_position(start) or 0
+        times = _timeline(raw, dict(sorted(fixed.items())), self.alignment.duration_ms)
+        times = [max(lower or 0, min(t, upper if upper is not None else self.alignment.duration_ms)) for t in times]
+        self._remember(after, previous.replace(lo, hi, positions, times, delta))
 
     def ranges(self, revision):
-        return self._index(revision)[3]
+        return self._index(revision).ranges
 
     def position_ms(self, revision, position):
         if not 0 <= position <= len(revision.text):
             raise ValueError('Playback position exceeds the transcript.')
-        _, positions, times, _ = self._index(revision)
-        i = bisect_right(positions, position) - 1
-        return times[i] if i >= 0 else None
+        return self._index(revision).at_position(position)
 
     def range_at(self, revision, milliseconds):
-        _, _, times, ranges = self._index(revision)
-        i = bisect_right(times, milliseconds) - 1
-        return ranges[i][:2] if i >= 0 else None
+        return self._index(revision).at_time(milliseconds)

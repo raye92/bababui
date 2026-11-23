@@ -18,7 +18,8 @@ import xml.etree.ElementTree as ET
 from app.src.suggestion_filter import LABEL
 
 from .codec import records, u32, validate_job
-from .layout import read_layouts
+from .layout import read_layouts, read_deltas
+from .elements import CENTER_JUSTIFY
 from .rendering import TextRenderer, render_record
 from .caption import caption_display, caption_value, cover_end
 
@@ -505,12 +506,15 @@ def _write_revision(job, bundle, legacy_joins):
     current_elements = {e.source: e for e in job.revision.elements if e.source is not None}
     markers, atoms = {}, {}
     for element in (*job.baseline.elements, *job.revision.elements):
+        if element.name == 'Center Justify' and element.kind == 'symbol':
+            continue
         key = element.source if element.source is not None else element
         if key not in markers:
             markers[key] = chr(0xf0000 + len(markers))
         atoms[markers[key]] = bytes.fromhex(element.raw)
     cursor = 0
-    elements = job.revision.elements
+    centers = {e.start for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'}
+    elements = tuple(e for e in job.revision.elements if not (e.kind == 'symbol' and e.name == 'Center Justify'))
     element_starts = [element.start for element in elements]
     layouts = read_layouts(job.native_bytes)
     colloquy_indents = (_colloquy_indents(text, elements, element_starts)
@@ -518,6 +522,7 @@ def _write_revision(job, bundle, legacy_joins):
     indent_end = 0
     renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
     retained_gaps = _retained_join_gaps(job.baseline, groups, targets, legacy_joins)
+    centered = 0 in centers
     for group, target in zip(groups, targets):
         stop = cursor + len(target)
         first = bisect_left(element_starts, cursor)
@@ -529,6 +534,11 @@ def _write_revision(job, bundle, legacy_joins):
         masked = []
         for token in group:
             element = original_elements.get(token.offset)
+            # Older saved revisions represent a colloquy indent as five
+            # ordinary spaces. Match that projection so its source paragraph
+            # survives a later edit elsewhere in the job.
+            if element and element.name == 'Colloquy' and token.offset not in current_elements:
+                element = None
             if element:
                 updated = current_elements.get(token.offset, element)
                 prefix = '\n' if element.kind == 'symbol' and token.text.startswith('\n') else ''
@@ -541,6 +551,11 @@ def _write_revision(job, bundle, legacy_joins):
             encoded = bytearray()
             rewritten = generated + retained
             for record_start, raw in records(rewritten, 0, len(rewritten)):
+                if centered and raw[:2] == b'\x15\x03':
+                    payload = b''.join(bytes([kind]) + value for kind, value in read_deltas(raw[6:]) if kind != 12)
+                    if not payload:
+                        continue
+                    raw = raw[:2] + struct.pack('<I', len(payload)) + payload
                 if raw == token.raw == b'\x04':
                     # A dictionary join survives edits to unrelated text. It
                     # must not consume a space at a new word boundary.
@@ -552,6 +567,13 @@ def _write_revision(job, bundle, legacy_joins):
                     encoded += b'\x16\xff\x00'
                     renderer.paragraph(255)
                 rendered = render_record(renderer, raw, speakers)
+                paragraph = raw[0] == 0x16
+                paragraph_start = visible + int(rendered.startswith('\n'))
+                if paragraph:
+                    centered = paragraph_start in centers
+                if rendered and visible == 0 and 0 in centers and (not paragraph or rendered.startswith('\n')):
+                    encoded += CENTER_JUSTIFY
+                    centers.remove(0)
                 if rendered and not text.startswith(rendered, visible) and raw[0] >= 32:
                     literal = raw.decode('cp1252')
                     marker = None
@@ -576,6 +598,9 @@ def _write_revision(job, bundle, legacy_joins):
                     indent_end = colloquy_indents[visible]
                 elif visible > indent_end or raw not in (b' ', b'\x01'):
                     encoded += raw
+                if paragraph and centered:
+                    encoded += CENTER_JUSTIFY
+                    centers.remove(paragraph_start)
             positions.append((token.offset - start, len(stream), len(token.raw), len(encoded)))
             stream += encoded
     if visible != len(text):

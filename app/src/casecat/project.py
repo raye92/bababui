@@ -218,6 +218,9 @@ class NativeState:
                     setattr(state, side, replace(revision, elements=restored.elements))
             codec.validate_job(bundle, state.job.with_revision(state.original))
             codec.validate_job(bundle, state.job.with_revision(state.incoming))
+            if state.review and 'pending_decisions' in state.review:
+                from app.src.review_editing import restore_decisions
+                restore_decisions(state.original, state.incoming, state.review['pending_decisions'])
             return state
         except (KeyError, TypeError) as exc:
             raise ValueError('Invalid native working project.') from exc

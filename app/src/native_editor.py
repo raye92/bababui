@@ -45,6 +45,8 @@ class _NativeTransactions:
         pass
 
     def undo(self):
+        if getattr(self, 'transaction_history', None) and self.transaction_history(True):
+            return
         self.history_action = 'undo'
         try:
             super().undo()
@@ -55,6 +57,8 @@ class _NativeTransactions:
             self.history_action = None
 
     def redo(self):
+        if getattr(self, 'transaction_history', None) and self.transaction_history(False):
+            return
         self.history_action = 'redo'
         try:
             super().redo()
@@ -103,8 +107,10 @@ class _NativeTransactions:
             insert.addAction('Insert Format Symbols...', self.choose_native_symbol)
             menu.addSeparator()
         for label, callback, enabled in (
-            ('Undo', self.undo, editable and self.document().isUndoAvailable()),
-            ('Redo', self.redo, editable and self.document().isRedoAvailable()),
+            ('Undo', self.undo, editable and (self.document().isUndoAvailable()
+             or bool(getattr(self, 'history_available', lambda _: False)(True)))),
+            ('Redo', self.redo, editable and (self.document().isRedoAvailable()
+             or bool(getattr(self, 'history_available', lambda _: False)(False)))),
             ('Cut', self.cut, editable and self.textCursor().hasSelection()),
             ('Copy', self.copy, self.textCursor().hasSelection()),
             ('Paste', self.paste, editable and self.canPaste()),
@@ -165,7 +171,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 start, end = (utf16_index(revision.text, value) for value in (cursor.selectionStart(), cursor.selectionEnd()))
                 if any(start < e.end and end > e.start for e in revision.elements):
                     start, end = revision.atomic_range(start, end)
-                    self.apply_native_revision(revision._replace(start, end, ''), start)
+                    self.apply_native_revision(revision._replace(start, end, ''), start, edit_range=(start, end))
                     return
             if not event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
                 if event.key() in (Qt.Key_Left, Qt.Key_Right) and (not cursor.hasSelection() or event.modifiers() & Qt.ShiftModifier):
@@ -183,7 +189,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     start, end = revision.atomic_range(start, end)
                     text = '\n' if event.key() in (Qt.Key_Return, Qt.Key_Enter) else event.text()
                     if event.key() not in (Qt.Key_Delete, Qt.Key_Backspace):
-                        self.apply_native_revision(revision._replace(start, end, text), start+len(text))
+                        self.apply_native_revision(revision._replace(start, end, text), start+len(text), edit_range=(start, end))
                         return
             self._snap_native_cursor()
         super().keyPressEvent(event)
@@ -196,7 +202,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
 
     def _snap_native_cursor(self):
-        if not self._native_source:
+        if not self._native_source or not self._native_source[1].revision.elements:
             return
         from app.src.casecat.anchors import utf16_index
         revision = self._native_source[1].revision
@@ -250,7 +256,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 if any(start < e.end and end > e.start for e in revision.elements):
                     start, end = revision.atomic_range(start, end)
                     text = data.text().replace('\r\n', '\n').replace('\r', '\n')
-                    self.apply_native_revision(revision._replace(start, end, text), start+len(text))
+                    self.apply_native_revision(revision._replace(start, end, text), start+len(text), edit_range=(start, end))
                     return
             return super().insertFromMimeData(data)
         from app.src.casecat.anchors import utf16_index
@@ -262,10 +268,10 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         except (ValueError, KeyError, TypeError, UnicodeError) as exc:
             QMessageBox.warning(self, 'Cannot paste native elements', str(exc))
             return
-        self.apply_native_revision(revision)
+        self.apply_native_revision(revision, edit_range=(start, end))
 
 
-    def apply_native_revision(self, revision, position=None):
+    def apply_native_revision(self, revision, position=None, *, edit_range=None):
         if self.isReadOnly():
             return
         if position is None:
@@ -314,7 +320,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         except (ValueError, UnicodeError) as exc:
             QMessageBox.warning(self, 'Cannot insert field', str(exc))
             return False
-        self.apply_native_revision(revision, start + len(value or f'[!{name}]'))
+        self.apply_native_revision(revision, start + len(value or f'[!{name}]'), edit_range=(start, end))
         return True
 
 
@@ -327,7 +333,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             return
         current = ('By-line' if element.name == 'By-line' else 'Q' if element.raw == '160200' else 'A') if change else None
         dialog = FormatSymbolDialog(self, current=current)
-        if dialog.exec() == QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        if accepted:
             if change:
                 cursor = self.textCursor()
                 cursor.setPosition(self._qt_position(element.start))
@@ -336,6 +343,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             self.insert_native_symbol(dialog.symbol)
         dialog.deleteLater()
         self.setFocus(Qt.OtherFocusReason)
+        return accepted
 
 
     def change_native_symbol(self):
@@ -367,7 +375,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                                     '160500110602000000425920', 'By-line')
             kept = [e for e in revision.elements if e.end <= element.start or e.start >= element.end]
             revision = replace(revision, elements=tuple(sorted((*kept, element), key=lambda e: (e.start, e.end))))
-        self.apply_native_revision(revision, start+len(prefix)+len(content))
+        self.apply_native_revision(revision, start+len(prefix)+len(content), edit_range=(start, end))
 
 
     def native_element_at_cursor(self):
@@ -384,7 +392,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         element = self.native_element_at_cursor()
         if self.isReadOnly() or element is None or element.kind != 'field':
             return
-        self.fill_native_field(element.name)
+        return self.fill_native_field(element.name)
 
 
     def fill_native_field(self, name):
@@ -398,13 +406,14 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             return
         value, accepted = FillFieldDialog.get_value(self, name, current)
         if not accepted or value == current:
-            return
+            return accepted
         try:
             revision = revision.set_field(name, value)
         except ValueError as exc:
             QMessageBox.warning(self, 'Cannot edit field', str(exc))
             return
         self.apply_native_revision(revision)
+        return True
 
 
     def mouseDoubleClickEvent(self, event):
@@ -505,7 +514,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
     def _refresh_element_marks(self):
         selections = []
-        if self._native_source and self.toPlainText() == self._native_source[1].text:
+        if (self._native_source and self._native_source[1].revision.elements
+                and self.toPlainText() == self._native_source[1].text):
             text = self.toPlainText()
             dark = self.palette().color(QPalette.Base).lightness() < 128
             for element in self._native_source[1].revision.elements:
@@ -647,14 +657,14 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             for column, text in enumerate((raw[start + 1:middle], raw[middle + 1:end])):
                 qt_table.cellAt(0, column).firstCursorPosition().insertText(text)
 
-    def _apply_paragraph_styles(self):
+    def _apply_paragraph_styles(self, positions=None):
         cursor = QTextCursor(self.document())
-        plain = self.toPlainText()
-        positions, offset, qt_offset = [], 0, 0
-        for text in plain.split('\n'):
-            positions.append((offset, qt_offset))
-            offset += len(text) + 1
-            qt_offset += len(text.encode('utf-16-le')) // 2 + 1
+        if positions is None:
+            positions, offset, qt_offset = [], 0, 0
+            for text in self.toPlainText().split('\n'):
+                positions.append((offset, qt_offset))
+                offset += len(text) + 1
+                qt_offset += len(text.encode('utf-16-le')) // 2 + 1
         for position, qt_position in positions:
             style = self._paragraph_styles.get(position)
             cursor.setPosition(qt_position)
@@ -730,15 +740,31 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                               round((y - page * self._page_height - self._top) / self._line_height) + 1))
         return sequential
 
-    def page_lines(self):
+    def _page_blocks(self, pages):
+        document = self.document()
+        layout = document.documentLayout()
+        block = document.begin()
+        if pages and pages[0]:
+            top = pages[0] * self._page_height
+            hit = layout.hitTest(QPointF(self._left + 1, top + self._top), Qt.FuzzyHit)
+            block = document.findBlock(max(0, hit))
+            while block.previous().isValid() and layout.blockBoundingRect(block.previous()).bottom() >= top:
+                block = block.previous()
+        while block.isValid():
+            if pages and layout.blockBoundingRect(block).top() >= (pages[1] + 1) * self._page_height:
+                break
+            yield block
+            block = block.next()
+
+    def page_lines(self, pages=None):
         # Force layout before reading QTextLine coordinates, including offscreen
         # pages. QTextCursor and native edit transactions keep logical offsets.
-        self.document().documentLayout().documentSize()
+        if pages is None:
+            self.document().documentLayout().documentSize()
         result = []
         page_numbers = {}
         doc_layout = self.document().documentLayout()
-        block = self.document().begin()
-        while block.isValid():
+        for block in self._page_blocks(pages):
             layout = block.layout()
             if block.isVisible():
                 raw = block.text().encode('utf-16-le')
@@ -752,7 +778,6 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     page_numbers[page] = number
                     text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le').replace('\u2011', '-')
                     result.append(PageLine(page + 1, number, block.position() + line.textStart(), text.rstrip(), y))
-            block = block.next()
         return result
 
     def page_number_rect(self, page):
@@ -785,10 +810,10 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         painter.setFont(self.font())
         # Courier variants may lack U+2011. Keep its nonbreaking layout cell,
         # but draw the original hyphen glyph with the current selection colors.
-        block = self.document().begin()
+        pages = int(scroll_y // self._page_height), int((scroll_y + self.viewport().height()) // self._page_height)
         selections = self.extraSelections()
         active = self.textCursor()
-        while block.isValid():
+        for block in self._page_blocks(pages):
             layout = block.layout()
             if layout.position().y() <= scroll_y + self.viewport().height() and layout.position().y()+layout.boundingRect().height() >= scroll_y:
                 raw = block.text().encode('utf-16-le')
@@ -812,10 +837,9 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     painter.fillRect(QRectF(x, y, right-x, line.height()), background)
                     painter.setPen(foreground.color())
                     painter.drawText(QPointF(x, y+line.ascent()), '-')
-            block = block.next()
         painter.setPen(QColor('#8a8f98'))
         fixed_gutter = bool(getattr(self._paragraph_styles, 'caption_tables', ()))
-        lines = [] if fixed_gutter else self.page_lines()
+        lines = [] if fixed_gutter else self.page_lines(pages)
         for line in lines:
             if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():
                 painter.drawText(self.line_number_rect(line.y),

@@ -39,7 +39,7 @@ def settings_page(window):
     return page
 
 
-def test_review_card_click_and_space_playback(native_window, tmp_path, monkeypatch):
+def test_review_card_click_and_optional_smart_space_playback(native_window, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QLabel
     native_window.import_zip(0, source_zip(tmp_path))
     view = native_window.current
@@ -55,12 +55,16 @@ def test_review_card_click_and_space_playback(native_window, tmp_path, monkeypat
     toggles = []
     monkeypatch.setattr(view.playback, 'toggle', lambda: toggles.append(True))
     native_window.activateWindow()
-    for target in (view.editor, view.diff_view.decision_buttons[0]):
-        target.setFocus()
-        app.processEvents()
-        before = len(toggles)
-        QTest.keyClick(target, Qt.Key_Space)
-        assert len(toggles) == before + 1
+    view.inline_editor.setFocus()
+    view.set_smart_keys(True)
+    QTest.keyClick(view.inline_editor, Qt.Key_Space)
+    assert not toggles
+    native_window.settings_page.space_playback.setChecked(True)
+    QTest.keyClick(view.inline_editor, Qt.Key_Space)
+    assert toggles == [True]
+    view.set_smart_keys(False)
+    QTest.keyClick(view.inline_editor, Qt.Key_Space)
+    assert toggles == [True]
 
 
 def test_native_import_uses_casecat_pages(native_window, tmp_path):

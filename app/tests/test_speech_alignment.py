@@ -168,3 +168,61 @@ def test_speech_playback_survives_reopen_without_distinct_stroke_anchors(refs):
     playback = SpeechAlignment.restore(vars(alignment), len(refs)).playback()
     assert playback.position_ms(source, 0) == 2000
     assert playback.position_ms(source, source.text.index('sign')) == 61000
+
+
+def test_typing_reuses_measured_speech_for_changed_and_untouched_passages(monkeypatch):
+    from app.src import speech_alignment as speech
+    source = revision('Please bring the papers.\n', 'Then sign each page.')
+    entries = [('please', 1), ('bring', 2), ('the', 3), ('signed', 9), ('papers', 12),
+               ('then', 17), ('sign', 18), ('each', 19), ('page', 21)]
+    playback = align(source, (2000, 17000), audio(*entries)).playback()
+    assert playback.position_ms(source, source.text.index('papers')) == 12000
+
+    def full_scan(*args):
+        raise AssertionError('A local edit realigned the entire transcript.')
+    monkeypatch.setattr(speech, '_passages', full_scan)
+    pos = source.text.index('papers')
+    old = source
+    for text in ('s', 'i', 'g', 'n', 'e', 'd', ' '):
+        new = old.replace(pos, pos, text)
+        playback.track_edit(old, new, pos, pos, text)
+        assert playback.position_ms(new, new.text.index('sign each')) == 18000
+        old, pos = new, pos+1
+    assert playback.position_ms(new, new.text.index('signed')) == 9000
+    assert playback.position_ms(new, new.text.index('papers')) == 12000
+    assert playback.range_at(new, 9000) == (new.text.index('signed'), new.text.index('papers'))
+    assert playback.position_ms(source, source.text.index('papers')) == 12000
+
+
+def test_edit_tracking_leaves_a_cold_speech_index_lazy(monkeypatch):
+    from app.src import speech_alignment as speech
+    source = revision('One two three.')
+    playback = align(source, (0,), audio(('one', 1), ('two', 2), ('three', 3))).playback()
+    monkeypatch.setattr(speech, '_passages', lambda *a: pytest.fail('cold cache rebuilt during typing'))
+    changed = source.replace(2, 2, 'x')
+    playback.track_edit(source, changed, 2, 2, 'x')
+
+
+def test_paragraph_join_keeps_later_word_time_and_drops_deleted_speech():
+    source = revision('Opening remarks here.\n', 'Read the last page.\n', 'Then sign here.')
+    entries = list(zip(source.text.split(), (1, 2, 3, 6, 7, 8, 9, 12, 13, 14)))
+    playback = align(source, (1000, 6000, 12000), audio(*entries)).playback()
+    playback.ranges(source)
+    start, end = source.text.index('\n'), source.text.index('Then')
+    updated = source.replace(start, end, ' ')
+    playback.track_edit(source, updated, start, end, ' ')
+    assert playback.position_ms(updated, updated.text.index('Then')) == 12000
+    assert playback.position_ms(updated, updated.text.index('sign')) == 13000
+    assert playback.range_at(updated, 7000)[0] == updated.text.index('here')
+
+
+def test_typo_in_measured_word_keeps_its_audio_passage_until_new_word_matches():
+    source = revision('Bring the result after lunch.')
+    words = audio(('Bring', 1), ('the', 2), ('result', 12), ('after', 16), ('lunch', 19))
+    playback = align(source, (0,), words).playback()
+    word = source.text.index('result')
+    assert playback.position_ms(source, word) == 12000
+    changed = source.replace(word+3, word+3, 'x')
+    playback.track_edit(source, changed, word+3, word+3, 'x')
+    assert playback.position_ms(changed, word) == 12000
+    assert playback.range_at(changed, 12000)[0] == word

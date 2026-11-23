@@ -79,6 +79,7 @@ def _presentation(job, groups):
     end_cover = cover_end(job.native_bytes)
     single_start, singles = None, []
     cells = []
+    alignments = {}
     for group, target in zip(groups, targets):
         source = ''.join(t.text for t in group)
         hard, paragraphs, page_breaks, offset = set(), {}, [], 0
@@ -122,6 +123,11 @@ def _presentation(job, groups):
                     # indent still applies when the first letter is replaced.
                     styles[cursor + offset] = value
             if token.raw[:2] == b'\x15\x03':
+                if source == target:
+                    paragraph_position = text.rfind('\n', 0, cursor + offset) + 1
+                    for kind, payload in read_deltas(token.raw[6:]):
+                        if kind == 12:
+                            alignments[paragraph_position] = struct.unpack('<H', payload)[0]
                 position = max(paragraphs) if paragraphs else max(styles, default=None)
                 if position is not None:
                     skip, value = paragraphs[position] if paragraphs else (0, styles[position])
@@ -178,6 +184,13 @@ def _presentation(job, groups):
         for position, style in styles.items():
             if isinstance(style, ParagraphStyle) and any(a <= position < b for a, b in singles):
                 styles[position] = replace(style, spacing=1)
+    alignments.update({e.start: 2 for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'})
+    for position, alignment in alignments.items():
+        style = styles.get(position)
+        if isinstance(style, ParagraphStyle):
+            styles[position] = replace(style, alignment=alignment)
+        elif alignment == 2:
+            styles[position] = 7
     # Page breaks decorate paragraph starts without changing logical offsets.
     starts = [0, *(match.end() for match in re.finditer('\n', text))]
     page_starts = set()

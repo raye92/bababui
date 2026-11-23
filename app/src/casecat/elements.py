@@ -8,6 +8,9 @@ import re
 
 
 QA_SYMBOL = re.compile(r'(?m)^     [QA]    ')
+# CATalyst's Center Justify command adds this paragraph delta immediately
+# after the native paragraph symbol. It never changes the paragraph style.
+CENTER_JUSTIFY = bytes.fromhex('1503030000000c0200')
 
 
 @dataclass(frozen=True)
@@ -78,8 +81,13 @@ def edited_elements(elements, text, start, end, content, preserve=None):
 
 def paragraph_symbols(text, elements):
     result = [e for e in elements if e.kind != 'symbol' or e.start == 0 or text[e.start - 1] == '\n']
+    if '     Q    ' not in text and '     A    ' not in text:
+        return tuple(result)
+    i = 0
     for match in QA_SYMBOL.finditer(text):
-        if not any(e.start < match.end() and e.end > match.start() for e in elements):
+        while i < len(elements) and elements[i].end <= match.start():
+            i += 1
+        if i == len(elements) or elements[i].start >= match.end():
             result.append(NativeElement(match.start(), match.end(), 'symbol',
                                         '160200' if match[0][5] == 'Q' else '160300'))
     return tuple(sorted(result, key=lambda element: (element.start, element.end)))
@@ -102,7 +110,11 @@ def validate_elements(revision, baseline):
             if not valid:
                 raise ValueError('Unrecognized native field reference.')
         elif element.kind == 'symbol':
-            label = {'160200': '     Q    ', '160300': '     A    '}.get(element.raw)
+            label = {'160200': '     Q    ', '160300': '     A    ',
+                     '160400': '     '}.get(element.raw)
+            if (element.name == 'Center Justify' and element.raw == CENTER_JUSTIFY.hex()
+                    and (element.start == 0 or text[element.start-1] == '\n')):
+                label = ''
             if element.name == 'By-line':
                 allowed = ('160500425920', '160500110602000000425920')
                 if element.raw in allowed or (source and element.raw == source.raw):

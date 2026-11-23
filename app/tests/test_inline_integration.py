@@ -37,7 +37,7 @@ def test_review_decision_hotkeys_resolve_only_the_selected_suggestion(native_win
     view.inline_editor.setFocus()
     QApplication.processEvents()
 
-    QTest.keyClick(view.inline_editor, key)
+    QTest.keyClick(view.inline_editor, key, Qt.AltModifier)
     for _ in range(100):
         if not view.document.busy:
             break
@@ -47,7 +47,7 @@ def test_review_decision_hotkeys_resolve_only_the_selected_suggestion(native_win
     assert view.document.incoming == f'{expected}\nThe house is new.'
 
 
-def test_w_replays_the_selected_edit_with_a_lead_in_even_after_the_caret_moves(native_window, audio_review):
+def test_alt_w_replays_the_selected_edit_with_a_lead_in_even_after_the_caret_moves(native_window, audio_review):
     view = audio_review
     view.diff_view.select(1)
     view.inline_editor.set_source_position('original', 0)
@@ -59,13 +59,13 @@ def test_w_replays_the_selected_edit_with_a_lead_in_even_after_the_caret_moves(n
     view.inline_editor.setFocus()
     QApplication.processEvents()
 
-    QTest.keyClick(view.inline_editor, Qt.Key_W)
+    QTest.keyClick(view.inline_editor, Qt.Key_W, Qt.AltModifier)
     assert player.isPlaying()
     assert abs(player.position() - 10940) < 100
     assert view.inline_editor.source_position() == ('original', 0)
 
 
-def test_s_uses_the_saved_forward_interval_and_preserves_pause(native_window, audio_review):
+def test_alt_s_uses_the_saved_forward_interval_and_preserves_pause(native_window, audio_review):
     view = audio_review
     player = view.playback.player
     native_window.activateWindow()
@@ -75,7 +75,7 @@ def test_s_uses_the_saved_forward_interval_and_preserves_pause(native_window, au
     player.pause()
     player.setPosition(10000)
 
-    QTest.keyClick(view.inline_editor, Qt.Key_S)
+    QTest.keyClick(view.inline_editor, Qt.Key_S, Qt.AltModifier)
     assert player.position() == 15000 and not player.isPlaying()
 
     native_window.settings_btn.click()
@@ -84,7 +84,7 @@ def test_s_uses_the_saved_forward_interval_and_preserves_pause(native_window, au
     view.inline_editor.setFocus()
     QApplication.processEvents()
     player.setPosition(10000)
-    QTest.keyClick(view.inline_editor, Qt.Key_S)
+    QTest.keyClick(view.inline_editor, Qt.Key_S, Qt.AltModifier)
     assert player.position() == 19000 and not player.isPlaying()
     view.playback.forward_button.click()
     assert player.position() == 28000

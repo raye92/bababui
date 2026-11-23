@@ -73,6 +73,8 @@ def test_toolbar_tabs_shortcuts_and_dirty_dot(window):
     assert '●' in window.tabs.tabText(0)
     assert not window.tabs.tabBar().is_empty(0)
     QTest.keyClick(window, Qt.Key_T, Qt.ControlModifier)
+    assert window.tabs.count() == 1
+    window.plus_btn.click()
     assert window.tabs.count() == 2
     assert window.file_btn.text() == 'File'
 
@@ -84,6 +86,35 @@ def test_import_screen_and_no_manual_menu(window):
     assert not hasattr(window, 'manual_btn')
     assert not window.file_actions['Save'].isEnabled()
     assert not window.notice_action.isEnabled()
+
+
+def test_recovery_writes_a_snapshot_and_explicit_save_keeps_latest_edits(window, monkeypatch):
+    from threading import Event
+    from app.src.documents import load_session
+
+    started, release = Event(), Event()
+    snapshots = []
+    writer = main.save_session
+
+    def save(path, docs, active, *, settings):
+        if not snapshots:
+            started.set()
+            assert release.wait(5)
+        snapshots.append(docs[0].original)
+        writer(path, docs, active, settings=settings)
+
+    editor = window.current.editor
+    editor.setPlainText('First snapshot.')
+    monkeypatch.setattr(main, 'save_session', save)
+    window._autosave()
+    try:
+        assert started.wait(3)
+        editor.setPlainText('Latest edit.')
+    finally:
+        release.set()
+    assert window.persist_session()
+    assert snapshots == ['First snapshot.', 'Latest edit.']
+    assert load_session(window.session_path)[0][0].original == 'Latest edit.'
 
 
 def test_notice_can_be_skipped_and_attached_later(window, monkeypatch):
@@ -201,6 +232,8 @@ def test_settings_tab_keeps_the_active_document_and_is_not_recovered(window):
 
     window.tabs.tabBar().moveTab(index, 0)
     QTest.keyClick(window, Qt.Key_W, Qt.ControlModifier)
+    assert window.tabs.count() == 3
+    window.file_actions['Close Tab'].trigger()
     assert window.tabs.count() == 2 and window.current is second
 
 

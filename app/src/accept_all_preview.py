@@ -1,8 +1,8 @@
 """Render the accepted transcript while its suggestions are pending."""
-from itertools import accumulate
+from bisect import bisect_left
 import re
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import QTextEdit
 
@@ -38,6 +38,7 @@ class AcceptAllPreviewTask(QRunnable):
 class AcceptAllPreviewEditor(NativeTranscriptEditor):
     passage_clicked = Signal(int, int)
     history_requested = Signal(bool)
+    native_edit_requested = Signal(object, int, int, str, int)
 
     def __init__(self, font):
         super().__init__(font)
@@ -45,14 +46,125 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self._text = ''
         self._edits, self._highlights = (), []
         self._focused = []
+        self.caret_affinity = None
+        self.affinity_position = -1
+        self._block_styles = []
 
     def load_preview(self, bundle, job, prepared, model, selected):
         self.set_native_source(bundle, job)
         self.setPlainText(job.text, prepared=prepared)
-        self._text, self._edits = job.text, model.edits
+        self._block_styles = [(self._paragraph_styles.get(m.start()), m.start() in self._page_breaks)
+                              for m in re.finditer('^', job.text, re.MULTILINE)]
+        self.update_review(model, selected)
+
+    def invalidate_paragraphs(self, before, start, end, replacement, after):
+        first = before.count('\n', 0, start)
+        removed = before.count('\n', start, end)
+        inserted = replacement.count('\n')
+        if before[:start] + replacement + before[end:] == after:
+            self._block_styles[first:first + removed + 1] = [None] * (inserted + 1)
+        else:
+            # A linked field operation can change several distant paragraphs.
+            self._block_styles = []
+
+    def needs_native_format(self, revision, start, end, replacement, qt_position):
+        """Qt already reflows ordinary wording within an existing body paragraph."""
+        from shared.transcript_formatting import TranscriptFormatter
+        text = revision.text
+        if any(not c.isalnum() for c in replacement + text[start:end]):
+            return True
+        block = self.document().findBlock(qt_position)
+        first = text.rfind('\n', 0, start) + 1
+        last = text.find('\n', end)
+        if last < 0:
+            last = len(text)
+        old, new = text[first:last], block.text()
+        if (not old or not new or old[0].isspace() or new[0].isspace()
+                or '\u00a0' in new or '\u2011' in new or block.blockFormat().pageBreakPolicy()
+                or TranscriptFormatter.examination_heading.fullmatch(old)
+                or TranscriptFormatter.examination_heading.fullmatch(new)):
+            return True
+        if getattr(self._paragraph_styles, 'caption_tables', ()) and QTextCursor(block).currentTable():
+            return True
+        return any(first <= e.start <= last or e.start < first < e.end for e in revision.elements)
+
+    def sync_review_revision(self, before, after, start, end, replacement):
+        if before.text == after.text:
+            return
+        if before.text[:start] + replacement + before.text[end:] == after.text:
+            patches = [(start, end, replacement)]
+        else:
+            # A filled field can occur on multiple distant pages. The native
+            # elements already describe those ranges, even inside a Qt table.
+            from app.src.review_editing import field_edits
+            patches = [(a, b, after.text[c:d]) for a, b, c, d in field_edits(before, after)]
+            if not patches:
+                self.sync_native_text(after.text)
+                return
+        cursor = QTextCursor(self.document())
+        with QSignalBlocker(self), QSignalBlocker(self.document()):
+            cursor.beginEditBlock()
+            for a, b, content in reversed(patches):
+                cursor.setPosition(len(before.text[:a].encode('utf-16-le')) // 2)
+                cursor.setPosition(len(before.text[:b].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
+                cursor.insertText(content.replace('-', '\u2011'))
+            cursor.endEditBlock()
+
+    def apply_prepared(self, job, prepared, model, selected):
+        """Update changed Qt blocks in place, keeping the live caret and selection."""
+        plain = job.text
+        display = self._presentation_text(plain, prepared)
+        tables = getattr(self._paragraph_styles, 'caption_tables', ())
+        document = self.document()
+        cursor = QTextCursor(document)
+        actual_tables = document.rootFrame().childFrames()
+        if len(tables) != len(actual_tables) or any(
+                frame.firstPosition() != len(plain[:table.start + 1].encode('utf-16-le')) // 2
+                for table, frame in zip(tables, actual_tables)):
+            anchor, position = self.textCursor().anchor(), self.textCursor().position()
+            scroll = self.verticalScrollBar().value()
+            self.load_preview(self._native_source[0], job, prepared, model, selected)
+            cursor.setPosition(min(anchor, document.characterCount() - 1))
+            cursor.setPosition(min(position, document.characterCount() - 1), QTextCursor.KeepAnchor)
+            self.setTextCursor(cursor)
+            self.verticalScrollBar().setValue(scroll)
+            return
+        roles, changed = [], []
+        logical = qt_offset = 0
+        with QSignalBlocker(self), QSignalBlocker(document):
+            cursor.beginEditBlock()
+            for index, line in enumerate(display.split('\n')):
+                role = self._paragraph_styles.get(logical), logical in self._page_breaks
+                if index >= len(self._block_styles) or role != self._block_styles[index]:
+                    changed.append((logical, qt_offset))
+                    block = document.findBlock(qt_offset)
+                    raw = block.text()
+                    if raw != line and len(raw) == len(line):
+                        offset = qt_offset
+                        for old, wanted in zip(raw, line):
+                            width = 2 if ord(old) > 0xffff else 1
+                            if old != wanted and {old, wanted} in ({' ', '\u00a0'}, {'-', '\u2011'}):
+                                cursor.setPosition(offset)
+                                cursor.setPosition(offset + width, QTextCursor.KeepAnchor)
+                                cursor.insertText(wanted)
+                            offset += width
+                roles.append(role)
+                logical += len(line) + 1
+                qt_offset += (len(line) if line.isascii() else len(line.encode('utf-16-le')) // 2) + 1
+            self._apply_paragraph_styles(changed)
+            if changed and changed[0][0] == 0:
+                self._align_page_top()
+            cursor.endEditBlock()
+        self._block_styles = roles
+        self.viewport().update()
+
+    def update_review(self, model, selected):
+        self._text, self._edits = model.incoming.text, model.edits
+        bundle, job = self._native_source
+        self._native_source = bundle, job.with_revision(model.incoming)
         self._highlights = []
         marks = []
-        offsets = list(accumulate((2 if ord(char) > 0xffff else 1 for char in self._text), initial=0))
+        supplementary = [m.start() for m in re.finditer(r'[\U00010000-\U0010ffff]', self._text)] if not self._text.isascii() else ()
         for index, edit in enumerate(self._edits):
             for _, _, start, end in preview_ranges(edit) or ((0, 0, 0, 0),):
                 # Qt paints a selection of a paragraph separator as an empty
@@ -61,8 +173,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
                              for match in re.finditer(r'[^\n]+', self._text[start:end])]
                 for first, last in fragments or [(start, start)]:
                     cursor = QTextCursor(self.document())
-                    cursor.setPosition(offsets[first])
-                    cursor.setPosition(offsets[last], QTextCursor.KeepAnchor)
+                    cursor.setPosition(first + bisect_left(supplementary, first))
+                    cursor.setPosition(last + bisect_left(supplementary, last), QTextCursor.KeepAnchor)
                     self._highlights.append((first, last, index, cursor))
                     if first == last:
                         continue
@@ -77,6 +189,24 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
     def highlight_edit(self, selected):
         self._focused = [cursor for _, _, index, cursor in self._highlights if index == selected]
         self.viewport().update()
+
+    def apply_native_revision(self, revision, position=None, *, edit_range=None):
+        if self.isReadOnly():
+            return
+        before = self._native_source[1].revision
+        cursor = self.textCursor()
+        start, end = edit_range or tuple(utf16_index(before.text, p) for p in
+                                         (cursor.selectionStart(), cursor.selectionEnd()))
+        length = len(revision.text) - len(before.text) + end - start
+        replacement = revision.text[start:start + max(length, 0)]
+        self.native_edit_requested.emit(revision, start, end, replacement,
+                                        start + len(replacement) if position is None else position)
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+        if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End):
+            self.affinity_position = self.textCursor().position()
+            self.caret_affinity = 'right' if event.key() in (Qt.Key_Left, Qt.Key_Home) else 'left'
 
     def _highlight_rect(self, cursor):
         outline = QRectF()
@@ -132,6 +262,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         scroll = QPointF(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
         hit = self.document().documentLayout().hitTest(event.position() + scroll, Qt.ExactHit)
         caret = self.textCursor().position()
+        self.affinity_position = caret
+        self.caret_affinity = 'left' if hit >= 0 and hit < caret else 'right'
         position = utf16_index(self._text, hit if hit >= 0 else caret)
         candidates = [index for start, end, index, _ in self._highlights
                       if hit >= 0 and start <= position < end]

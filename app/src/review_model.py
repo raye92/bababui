@@ -1,6 +1,7 @@
 """One immutable source of review decisions and logical display sections."""
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import cached_property
 
 from app.src.suggestions import Suggestion, preview_ranges, suggestions
 
@@ -17,8 +18,17 @@ class ReviewModel:
     original: object
     incoming: object
     edits: tuple[Suggestion, ...]
-    sections: tuple[ReviewSection, ...]
+    _sections: tuple[ReviewSection, ...] | None = None
     comparison_spans: tuple | None = None
+
+    @cached_property
+    def sections(self):
+        if self._sections is not None:
+            return self._sections
+        pairs = self.compare_rows(_paragraph_rows(self.original.text), _paragraph_rows(self.incoming.text))
+        sections = [section for _, _, section in pairs if section.edit_indices]
+        sections.extend(ReviewSection((0, 0), (0, 0), (i,)) for i, edit in enumerate(self.edits) if not edit.ranges)
+        return tuple(sections)
 
     def compare_rows(self, original_rows, incoming_rows):
         spans = self.comparison_spans
@@ -186,12 +196,22 @@ def _compare_rows(original, incoming, spans, old_rows, new_rows):
             yield slice(i, old_i), slice(first, stop), ReviewSection((x, old_pos), (y, new_pos), ())
 
 
-def build_review(original, incoming):
+def build_review(original, incoming, review=None):
     """Build fine native decisions once; visual sections never merge decisions."""
-    edits = tuple(suggestions(original, incoming))
-    spans = _display_spans(original, incoming, edits)
-    pairs = _compare_rows(original.text, incoming.text, spans, _paragraph_rows(original.text),
-                          _paragraph_rows(incoming.text))
-    sections = [section for _, _, section in pairs if section.edit_indices]
-    sections.extend(ReviewSection((0, 0), (0, 0), (i,)) for i, edit in enumerate(edits) if not edit.ranges)
-    return ReviewModel(original, incoming, edits, tuple(sections), spans)
+    if review and 'pending_decisions' in review:
+        from app.src.review_editing import restore_decisions
+        edits = restore_decisions(original, incoming, review['pending_decisions'])
+    else:
+        edits = tuple(suggestions(original, incoming))
+    return model_from_edits(original, incoming, edits)
+
+
+def model_from_edits(original, incoming, edits):
+    if all(edit.highlights is not None for edit in edits):
+        # Manual transactions already partitioned the colored passages. No
+        # paragraph alignment or whole-document diff is needed to render them.
+        spans = tuple(sorted((*span, (i,)) for i, edit in enumerate(edits)
+                             for span in edit.highlights))
+    else:
+        spans = _display_spans(original, incoming, edits)
+    return ReviewModel(original, incoming, edits, comparison_spans=spans)

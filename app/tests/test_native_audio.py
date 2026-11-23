@@ -451,9 +451,9 @@ def test_review_decisions_seek_without_changing_playback_state(audio_view, decis
     if remaining:
         assert abs(player.position() - 10940) < 100
         player.setPosition(15000)
-    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    view.playback.play_button.click()
     assert player.playbackState() == expected
-    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    view.playback.play_button.click()
     assert player.playbackState() == before
     for _ in range(100):
         if not view.document.busy:
@@ -465,9 +465,9 @@ def test_review_decisions_seek_without_changing_playback_state(audio_view, decis
 
     # Finishing the update must not rewind audio after the initial jump.
     assert abs(player.position() - (15000 if remaining else 10940)) < 100
-    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    view.playback.play_button.click()
     assert player.playbackState() == expected
-    QTest.keyClick(QApplication.focusWidget() or view, Qt.Key_Space)
+    view.playback.play_button.click()
     assert player.playbackState() == before
 
 

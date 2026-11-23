@@ -204,10 +204,11 @@ def load_job(bundle, key):
             elements.append(NativeElement(position + before, position + after, 'field',
                                           raw.hex(), field_name(raw), offset, value,
                                           bool(end_cover) and label in CAPTION_NAMES, renderer.uppercase))
-        elif op == 0x16 and int.from_bytes(raw[1:], 'little') in (2, 3):
+        elif op == 0x16 and int.from_bytes(raw[1:], 'little') in (2, 3, 4):
             prefix = content[-1]
             elements.append(NativeElement(position + before + int(prefix.startswith('\n')),
-                                          position + after, 'symbol', raw.hex(), source=offset))
+                                          position + after, 'symbol', raw.hex(),
+                                          name='Colloquy' if raw[1] == 4 else '', source=offset))
         if raw == b'\x16\x05\x00':
             byline = (offset, position + after)
         elif byline:
