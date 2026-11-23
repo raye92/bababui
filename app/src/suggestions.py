@@ -1,5 +1,5 @@
 """Review decisions over exact structured revision ranges, independent of Qt."""
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 import re
 from unicodedata import category
@@ -16,6 +16,18 @@ class Suggestion:
     field: str | None = None
     highlights: tuple | None = None  # Explicit display ownership after a manual edit.
     definitions: tuple = ()  # Field definitions introduced by this manual amendment.
+
+
+def same_passage(left, right, span):
+    """Compare wording and native elements relative to the start of each passage."""
+    a, b, c, d = span
+    if b-a != d-c or left.text[a:b] != right.text[c:d]:
+        return False
+
+    def elements(revision, start, end):
+        return [replace(e, start=e.start-start, end=e.end-start)
+                for e in revision.elements if e.start < end and start < e.end]
+    return elements(left, a, b) == elements(right, c, d)
 
 
 def preview_context(text, start, end):
@@ -431,45 +443,68 @@ def _group_decisions(left, right, changes):
     return result
 
 
-def _expanded_text_edits(original, incoming, left_start, left_end, right_start, right_end):
-    a, b = original.text, incoming.text
-    gaps = text_edits(a[left_start:left_end], b[right_start:right_end])
-    # Expand both sides together so adopting a field/symbol cannot cut it in half.
-    expanded = []
-    for i, j, k, l in gaps:
-        start, end = left_start+i, left_start+j
-        ns, ne = right_start+k, right_start+l
-        # A change from one speaker label to another is one decision, even
-        # for literal labels or when one side only deletes part of a name.
-        old_label = _attribution_span(a, start, end)
-        new_label = _attribution_span(b, ns, ne)
-        if old_label and new_label:
-            start, end = old_label
-            ns, ne = new_label
-        left_field = next((e for e in original.elements if e.kind == 'field'
-                           and e.start <= start <= end <= e.end and start < e.end), None)
-        right_field = next((e for e in incoming.elements if e.kind == 'field'
-                            and e.start <= ns <= ne <= e.end and ns < e.end), None)
-        if left_field and right_field:
-            # Field values need not have equal lengths. Expanding both by the
-            # same number of characters can swallow the following colon.
-            start, end = left_field.start, left_field.end
-            ns, ne = right_field.start, right_field.end
-        changed = True
-        while changed:
-            before = (start, end, ns, ne)
-            for rev, left in ((original, True), (incoming, False)):
-                x, y = (start, end) if left else (ns, ne)
-                for e in rev.elements:
-                    if (x < e.end and y > e.start) or (x == y and e.start < x < e.end):
-                        front, back = max(0, x-e.start), max(0, e.end-y)
-                        start, ns = max(left_start, start-front), max(right_start, ns-front)
-                        end, ne = min(left_end, end+back), min(right_end, ne+back)
-            changed = before != (start, end, ns, ne)
-        if expanded and (start < expanded[-1][1] or ns < expanded[-1][3]):
-            expanded[-1][1] = max(end, expanded[-1][1]); expanded[-1][3] = max(ne, expanded[-1][3])
+def _atomic_intervals(revision, labels, start, end):
+    spans = set(labels)
+    spans.update((e.start, e.end) for e in revision.elements if e.start < end and start < e.end)
+    intervals = []
+    for a, b in sorted(spans):
+        a, b = max(start, a), min(end, b)
+        if a >= b:
+            continue
+        if intervals and a < intervals[-1][1]:
+            intervals[-1] = (intervals[-1][0], max(intervals[-1][1], b))
         else:
-            expanded.append([start, end, ns, ne])
+            intervals.append((a, b))
+    return intervals
+
+
+def _expanded_text_edits(original, incoming, left_start, left_end, right_start, right_end):
+    old, new = original.text, incoming.text
+    raw = [(a+left_start, b+left_start, c+right_start, d+right_start)
+           for a, b, c, d in text_edits(old[left_start:left_end], new[right_start:right_end])]
+    if not raw:
+        return []
+    old_labels, new_labels = set(), set()
+    for a, b, c, d in raw:
+        left, right = _attribution_span(old, a, b), _attribution_span(new, c, d)
+        if left and right:
+            old_labels.add(left)
+            new_labels.add(right)
+    atoms = (_atomic_intervals(original, old_labels, left_start, left_end),
+             _atomic_intervals(incoming, new_labels, right_start, right_end))
+    if not any(atoms):
+        return raw
+
+    def padding(a, c, direction, available):
+        distance = 0
+        while distance <= available:
+            step = 0
+            for position, spans in zip((a, c), atoms):
+                index = bisect_left(spans, (position,)) - 1
+                if index >= 0 and position < spans[index][1]:
+                    first, last = spans[index]
+                    step = max(step, last-position if direction == 1 else position-first)
+            if not step:
+                break
+            distance += step
+            a += direction * step
+            c += direction * step
+        return distance
+
+    # Only an unchanged gap can separate two decisions. Keep its boundaries
+    # aligned on both sides and merge changes when no cut leaves atoms intact.
+    expanded = []
+    first = None
+    old_end, new_end = left_start, right_start
+    for a, b, c, d in [*raw, (left_end, left_end, right_end, right_end)]:
+        gap = a-old_end
+        front = padding(old_end, new_end, 1, gap)
+        back = padding(a, c, -1, gap)
+        if front + back <= gap:
+            if first is not None:
+                expanded.append((first[0], old_end+front, first[1], new_end+front))
+            first = (a-back, c-back)
+        old_end, new_end = b, d
     return expanded
 
 
@@ -488,18 +523,26 @@ def suggestions(original, incoming):
     for start, end, ns, ne in (*speakers, (len(a), len(a), len(b), len(b))):
         expanded.extend(_expanded_text_edits(original, incoming, previous_a, start, previous_c, ns))
         previous_a, previous_c = end, ne
+    left_fields = [e for e in original.elements if e.kind == 'field']
+    right_fields = {(e.start, e.name): e for e in incoming.elements if e.kind == 'field'}
     for span in expanded:
         start, end, ns, ne = span
-        left = next((e for e in original.elements if e.kind == 'field' and (e.start, e.end) == (start, end)), None)
-        right = next((e for e in incoming.elements if e.kind == 'field' and (e.start, e.end) == (ns, ne)), None)
-        # Only a pure value change is a linked-definition decision. Removing or
-        # replacing an occurrence must adopt the actual structural range.
-        name = left.name if left and right and left.name == right.name else None
-        kind = 'structure' if '\n' in a[start:end] + b[ns:ne] else 'text'
-        if name:
-            fields.setdefault(name, []).append(tuple(span))
+        # A diff can align a space inside a field name with the space before
+        # the field. Keep a pure rename linked across all its occurrences.
+        first = bisect_left(left_fields, start, key=lambda e: e.start)
+        last = bisect_left(left_fields, end, key=lambda e: e.start)
+        for left in left_fields[first:last]:
+            right = right_fields.get((ns + (left.start - start), left.name))
+            if right is None or left.end > end or right.end > ne:
+                continue
+            field = (left.start, left.end, right.start, right.end)
+            if field == span or (same_passage(original, incoming, (start, left.start, ns, right.start))
+                                 and same_passage(original, incoming, (left.end, end, right.end, ne))):
+                fields.setdefault(left.name, []).append(field)
+                break
         else:
-            result.append(Suggestion(original, incoming, (tuple(span),), kind))
+            kind = 'structure' if '\n' in a[start:end] + b[ns:ne] else 'text'
+            result.append(Suggestion(original, incoming, (span,), kind))
     result += [Suggestion(original, incoming, tuple(ranges), 'field', name) for name, ranges in fields.items()]
     if not result and (original.elements != incoming.elements or original.definitions != incoming.definitions):
         result.append(Suggestion(original, incoming, (), 'metadata'))

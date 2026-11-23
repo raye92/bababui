@@ -112,6 +112,9 @@ def test_insertion_timing_and_utf16_offsets():
                                  anchors.AnchoredSpan('b', (1,), ('b',), 'B')))
     edited = original.replace_utf16(3, 0, 'é\n')
     assert edited.text == 'A😀é\nB'
+    assert [edited.utf16_offset(i) for i in range(6)] == [0, 1, 3, 4, 5, 6]
+    shorter = edited.replace(1, 2, 'x')
+    assert shorter.utf16_offset(3) == 3
     inserted = next(span for span in edited.spans if span.content == 'é\n')
     assert inserted.stroke_refs == (1,)
     with pytest.raises(ValueError, match='UTF-16'):

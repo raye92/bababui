@@ -582,7 +582,8 @@ class DocumentView(QWidget):
                                         affinity=affinity, native_revision=native_revision)
         except ValueError as exc:
             self.document.status = str(exc)
-            editor.sync_native_text(before.incoming.text)
+            if native_revision is None:
+                editor.revert_text_edit(position, added, before.incoming.text[start:end])
             self.changed.emit()
             return
         if model is before:

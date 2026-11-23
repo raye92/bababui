@@ -1,5 +1,4 @@
 """Render the accepted transcript while its suggestions are pending."""
-from bisect import bisect_left
 import re
 
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, QSignalBlocker, Qt, Signal
@@ -105,9 +104,19 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         with QSignalBlocker(self), QSignalBlocker(self.document()):
             cursor.beginEditBlock()
             for a, b, content in reversed(patches):
-                cursor.setPosition(len(before.text[:a].encode('utf-16-le')) // 2)
-                cursor.setPosition(len(before.text[:b].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
+                cursor.setPosition(before.utf16_offset(a))
+                cursor.setPosition(before.utf16_offset(b), QTextCursor.KeepAnchor)
                 cursor.insertText(content.replace('-', '\u2011'))
+            cursor.endEditBlock()
+
+    def revert_text_edit(self, position, added, removed_text):
+        """Reverse the reported Qt change at its original UTF-16 position."""
+        cursor = QTextCursor(self.document())
+        with QSignalBlocker(self), QSignalBlocker(self.document()):
+            cursor.joinPreviousEditBlock()
+            cursor.setPosition(position)
+            cursor.setPosition(position + added, QTextCursor.KeepAnchor)
+            cursor.insertText(removed_text.replace('-', '\u2011'))
             cursor.endEditBlock()
 
     def apply_prepared(self, job, prepared, model, selected):
@@ -164,7 +173,6 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self._native_source = bundle, job.with_revision(model.incoming)
         self._highlights = []
         marks = []
-        supplementary = [m.start() for m in re.finditer(r'[\U00010000-\U0010ffff]', self._text)] if not self._text.isascii() else ()
         for index, edit in enumerate(self._edits):
             for _, _, start, end in preview_ranges(edit) or ((0, 0, 0, 0),):
                 # Qt paints a selection of a paragraph separator as an empty
@@ -173,8 +181,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
                              for match in re.finditer(r'[^\n]+', self._text[start:end])]
                 for first, last in fragments or [(start, start)]:
                     cursor = QTextCursor(self.document())
-                    cursor.setPosition(first + bisect_left(supplementary, first))
-                    cursor.setPosition(last + bisect_left(supplementary, last), QTextCursor.KeepAnchor)
+                    cursor.setPosition(model.incoming.utf16_offset(first))
+                    cursor.setPosition(model.incoming.utf16_offset(last), QTextCursor.KeepAnchor)
                     self._highlights.append((first, last, index, cursor))
                     if first == last:
                         continue

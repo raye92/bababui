@@ -514,15 +514,14 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
     def _refresh_element_marks(self):
         selections = []
-        if (self._native_source and self._native_source[1].revision.elements
-                and self.toPlainText() == self._native_source[1].text):
-            text = self.toPlainText()
+        revision = self._native_source[1].revision if self._native_source else None
+        if revision and revision.elements and self.toPlainText() == revision.text:
             dark = self.palette().color(QPalette.Base).lightness() < 128
-            for element in self._native_source[1].revision.elements:
+            for element in revision.elements:
                 mark = QTextEdit.ExtraSelection()
                 mark.cursor = QTextCursor(self.document())
-                mark.cursor.setPosition(len(text[:element.start].encode('utf-16-le')) // 2)
-                mark.cursor.setPosition(len(text[:element.end].encode('utf-16-le')) // 2, QTextCursor.KeepAnchor)
+                mark.cursor.setPosition(revision.utf16_offset(element.start))
+                mark.cursor.setPosition(revision.utf16_offset(element.end), QTextCursor.KeepAnchor)
                 color = ('#eab46a' if dark else '#a15a10') if element.kind == 'field' else ('#91bce9' if dark else '#276394')
                 mark.format.setForeground(QColor(color))
                 selections.append(mark)

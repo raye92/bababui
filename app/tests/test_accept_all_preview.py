@@ -278,6 +278,42 @@ def test_typed_preview_keeps_shared_edits_and_rejects_amended_green(native_windo
     assert view.document.incoming == 'Fiwasd rst blue statement.'
 
 
+@pytest.mark.parametrize('invalid, reason', [('\n', 'single line'), ('😀', 'Windows-1252')])
+def test_rejected_edit_rolls_back_only_the_typed_character(native_window, tmp_path, monkeypatch, invalid, reason):
+    from app.src import native_editor
+    from app.tests.test_native_casecat import zip_bytes
+    from app.tests.test_native_fields import field_files
+
+    path = tmp_path / 'fields.zip'
+    path.write_bytes(zip_bytes(field_files()))
+    native_window.import_zip(0, path)
+    view = native_window.current
+    view.receive(view.document.original.replace('More.', 'More testimony.'), [])
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    before = view.document.incoming
+    field = next(e for e in view.review_model.incoming.elements if e.kind == 'field')
+    comparisons = []
+    matcher = native_editor.SequenceMatcher
+
+    def record_comparison(junk, left, right, **kwargs):
+        comparisons.append(max(len(left), len(right)))
+        return matcher(junk, left, right, **kwargs)
+
+    monkeypatch.setattr(native_editor, 'SequenceMatcher', record_comparison)
+    cursor = editor.textCursor()
+    cursor.setPosition(field.start + 1)
+    cursor.setPosition(field.start + 2, QTextCursor.KeepAnchor)
+    cursor.insertText(invalid)
+    assert reason in view.document.status
+    assert editor.toPlainText() == view.document.incoming == before
+    assert max(comparisons, default=0) <= 1
+    cursor.movePosition(QTextCursor.End)
+    editor.setTextCursor(cursor)
+    QTest.keyClicks(editor, 'x')
+    assert editor.toPlainText() == view.document.incoming == before + 'x'
+
+
 def test_typing_and_smart_keys_are_scoped_to_transcript_tabs(native_window, tmp_path):
     native_window.import_zip(0, source_zip(tmp_path, audio=False))
     view = native_window.current

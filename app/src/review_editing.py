@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 
 from app.src.review_model import model_from_edits
 from app.src.suggestion_filter import track_decisions
-from app.src.suggestions import Suggestion, distance_to_ranges, preview_ranges, resolve, resolve_all
+from app.src.suggestions import Suggestion, distance_to_ranges, preview_ranges, resolve, resolve_all, same_passage
 
 
 @dataclass
@@ -171,16 +171,6 @@ def _append_range(spans, span):
         spans.append(span)
 
 
-def _same_passage(left, right, span):
-    a, b, c, d = span
-    if b-a != d-c or left.text[a:b] != right.text[c:d]:
-        return False
-    def elements(revision, start, end):
-        return [replace(e, start=e.start-start, end=e.end-start)
-                for e in revision.elements if e.start < end and start < e.end]
-    return elements(left, a, b) == elements(right, c, d)
-
-
 def _field_still_linked(name, original, incoming, ranges):
     for offset, revision in ((0, original), (2, incoming)):
         occurrences = {(e.start, e.end) for e in revision.elements if e.kind == 'field' and e.name == name}
@@ -209,7 +199,7 @@ def _updated_model(model, pieces, side, edited, opposite):
     for i, change in enumerate(model.edits):
         ranges = tuple(raw[i])
         if change.kind != 'metadata':
-            if not ranges or (i in touched and all(_same_passage(original, incoming, span) for span in ranges)):
+            if not ranges or (i in touched and all(same_passage(original, incoming, span) for span in ranges)):
                 continue
         elif original.elements == incoming.elements and original.definitions == incoming.definitions:
             continue
@@ -402,6 +392,31 @@ def edit_review(model, review, side, start, end, replacement, *, affinity=None, 
     return result, metadata
 
 
+def _reanchor_field_occurrences(model, side, operations):
+    """Account for linked fills inside other decisions on the destination side."""
+    pieces = list(_pieces(model, side))
+    edits = list(model.edits)
+    for a, b, c, d in reversed(operations):
+        first = _split_at(pieces, a, inside_raw='start')
+        last = _split_at(pieces, b, inside_raw='end')
+        affected = pieces[first:last]
+        if any(p.owner is None for p in affected):
+            # The other revision can have plain text that used to read exactly
+            # like this reference. Its new difference needs its own decision.
+            owner = next((p.owner for p in affected if p.raw), None)
+            if owner is None:
+                owner = len(edits)
+                edits.append(Suggestion(model.original, model.incoming, ()))
+            for p in affected:
+                if p.owner is None:
+                    p.owner = owner
+        _place_edit(pieces, a, b, d-c, None)
+    # The rest of resolution works in the unchanged source's coordinates.
+    for piece in pieces:
+        piece.length, piece.opposite = piece.opposite, piece.length
+    return replace(model, edits=tuple(edits)), pieces
+
+
 def resolve_review(model, review, index, accept):
     """Resolve existing ranges, retaining the ownership of every other decision."""
     ranges = model.ranges if index is None else model.edits[index].ranges
@@ -414,7 +429,18 @@ def resolve_review(model, review, index, accept):
         original, incoming = resolve(model.original, model.incoming, change, accept, defer_fields=True)
         side = 'incoming' if accept else 'original'
         source, target = (incoming, original) if accept else (original, incoming)
-        pieces = list(_pieces(model, side))
+        target_side = 'original' if accept else 'incoming'
+        extra = []
+        if change.field:
+            before = getattr(model, target_side)
+            target_offset = 0 if accept else 2
+            covered = {span[target_offset:target_offset+2] for span in ranges}
+            extra = [(a, b, c, d) for a, b, c, d in field_edits(before, target)
+                     if (a, b) not in covered and before.text[a:b] != target.text[c:d]]
+        if extra:
+            model, pieces = _reanchor_field_occurrences(model, target_side, extra)
+        else:
+            pieces = list(_pieces(model, side))
         for p in pieces:
             if p.owner == index:
                 p.opposite = p.length
@@ -437,6 +463,8 @@ def resolve_review(model, review, index, accept):
                     values.pop(name, None)
             target = replace(target, definitions=tuple(sorted(values.items())))
         result = _updated_model(model, pieces, side, source, target)
+        if extra and not accept:
+            ranges = list(ranges) + [(0, d-c, a, b) for a, b, c, d in extra]
     metadata = _metadata(review, result)
     track_decisions(metadata, ranges, incoming_changed=not accept and
                     (bool(corrections) or model.incoming.text != result.incoming.text))
@@ -455,7 +483,7 @@ def remap_speaker_decisions(original, before, after, review, locations):
     for old, new in reversed(sorted(locations)):
         a, b = old
         c, d = new
-        if _same_passage(before, after, (a, b, c, d)):
+        if same_passage(before, after, (a, b, c, d)):
             continue
         first = _split_at(pieces, a, inside_raw='start')
         last = _split_at(pieces, b, inside_raw='end')

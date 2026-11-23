@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 from bisect import bisect_left, bisect_right
 from functools import cached_property
 from itertools import accumulate
+import re
 import uuid
 
 from .elements import NativeElement, edited_elements, paragraph_symbols
@@ -63,6 +64,18 @@ class Revision:
     @cached_property
     def _span_ends(self):
         return tuple(accumulate(len(span.content) for span in self.spans))
+
+    @cached_property
+    def _supplementary_positions(self):
+        if self.text.isascii():
+            return ()
+        return tuple(m.start() for m in re.finditer(r'[\U00010000-\U0010ffff]', self.text))
+
+    def utf16_offset(self, position):
+        """Return the Qt offset for a Python character boundary in this revision."""
+        if not isinstance(position, int) or not 0 <= position <= len(self.text):
+            raise ValueError('Invalid character offset.')
+        return position + bisect_left(self._supplementary_positions, position)
 
     def replace_utf16(self, position, removed, inserted):
         text = self.text

@@ -18,6 +18,64 @@ def review(old, new):
     return review_model.build_review(revision(old), revision(new))
 
 
+def test_field_rename_keeps_typing_after_a_byline_in_both_revisions():
+    from app.src.review_editing import resolve_review
+
+    old = revision('BY :  Tell me.').insert_field(3, 'COUNSEL', 'MR. JONES')
+    new = old.set_field('COUNSEL', 'JOHN')
+    model = review_model.build_review(old, new)
+    end = len(new.text)
+    typed, metadata = transaction(model, None, 'incoming', end, end, ' Please.')
+    assert typed.original.text == 'BY MR. JONES:  Tell me. Please.'
+    assert typed.incoming.text == 'BY JOHN:  Tell me. Please.'
+    restored = review_model.build_review(typed.original, typed.incoming, metadata)
+    for accept, name in ((True, 'JOHN'), (False, 'MR. JONES')):
+        final, _ = resolve_review(restored, metadata, 0, accept)
+        assert final.original.text == final.incoming.text == f'BY {name}:  Tell me. Please.'
+        assert final.original.elements[0].value == name
+        assert dict(final.original.definitions)['COUNSEL'] == name
+
+
+def test_renaming_repeated_byline_fields_remains_one_decision():
+    from app.src.review_editing import resolve_review
+
+    old = revision('BY :  Tell me.\nBY :  Go on.')
+    for position in (old.text.rindex(':'), old.text.index(':')):
+        old = old.insert_field(position, 'COUNSEL', 'MR. JONES')
+    new = old.set_field('COUNSEL', 'JOHN')
+    model = review_model.build_review(old, new)
+    assert [edit.field for edit in model.edits] == ['COUNSEL']
+    final, _ = resolve_review(model, None, 0, True)
+    assert not final.edits
+    assert final.original.text == 'BY JOHN:  Tell me.\nBY JOHN:  Go on.'
+    assert all(e.value == 'JOHN' for e in final.original.elements)
+
+
+@pytest.mark.parametrize('other_name', ['Alex', 'Jane'])
+@pytest.mark.parametrize('accept', [True, False])
+def test_resolving_linked_name_keeps_separate_replacement_of_an_occurrence(accept, other_name):
+    from app.src.review_editing import resolve_review
+
+    old = revision(' and  testified.').insert_field(5, 'NAME', 'Jane').insert_field(0, 'NAME', 'Jane')
+    new = old.set_field('NAME', 'Josephine')
+    other = new.elements[1]
+    new = new._replace(other.start, other.end, other_name)
+    original, incoming = (old, new) if accept else (new, old)
+    model = review_model.build_review(original, incoming)
+    name = next(i for i, edit in enumerate(model.edits) if edit.field == 'NAME')
+    result, metadata = resolve_review(model, None, name, accept)
+    target = result.original if accept else result.incoming
+    assert target.text == 'Josephine and Josephine testified.'
+    plain_text = f'Josephine and {other_name} testified.'
+    assert (result.incoming if accept else result.original).text == plain_text
+    reopened = review_model.build_review(result.original, result.incoming, metadata)
+    assert len(reopened.edits) == 1
+    for keep, text in ((accept, plain_text), (not accept, target.text)):
+        final, _ = resolve_review(reopened, metadata, 0, keep)
+        assert final.original.text == final.incoming.text == text
+        assert len(final.original.elements) == (1 if keep == accept else 2)
+
+
 def test_shared_edit_keeps_each_sides_audio_and_unrelated_decisions():
     old, new = (Revision((AnchoredSpan(side, (ref,), ('clock',), text),))
                 for side, ref, text in [('old', 1, 'red beside large'), ('new', 2, 'blue beside small')])
