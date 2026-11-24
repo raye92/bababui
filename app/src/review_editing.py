@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 
 from app.src.review_model import model_from_edits
 from app.src.suggestion_filter import track_decisions
-from app.src.suggestions import Suggestion, distance_to_ranges, preview_ranges, resolve, resolve_all, same_passage
+from app.src.suggestions import GROUPING_VERSION, Suggestion, distance_to_ranges, preview_ranges, resolve, resolve_all, same_passage
 
 
 @dataclass
@@ -223,6 +223,7 @@ def _metadata(review, model):
         'version': 1, 'evidence': {'speakers': {}, 'occurrences': []}, 'overrides': {}, 'locations': []}
     result['locations'] = [dict(row) for row in result['locations']]
     result['overrides'] = dict(result['overrides'])
+    result['grouping_version'] = GROUPING_VERSION
     result['pending_decisions'] = [
         {'kind': e.kind, 'field': e.field, 'ranges': e.ranges, 'highlights': preview_ranges(e),
          'definitions': e.definitions}
@@ -250,7 +251,7 @@ def restore_decisions(original, incoming, records):
     edits = []
     for record in records:
         if not isinstance(record, dict) or record.get('kind') not in (
-                'text', 'structure', 'field', 'metadata', 'speaker', 'quotation', 'word_join'):
+                'text', 'structure', 'field', 'metadata', 'speaker', 'turn_label', 'byline_move', 'quotation', 'word_join'):
             raise ValueError('Invalid saved review decision.')
         names, field = record.get('definitions', ()), record.get('field')
         if (not isinstance(names, (tuple, list)) or any(not isinstance(k, str) for k in names)

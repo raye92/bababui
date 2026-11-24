@@ -107,14 +107,38 @@ and correct/incorrect example markers are written as text.
 The button reloads this file on each run. This is the only editor formatting
 prompt. Evaluation keeps its own saved prompts.
 
-## Saving and recovery
+## How review edits are grouped
 
-The inline diff compares transcript content, without printed line numbers,
-page layout, or wrapping. Headings, examiner labels, questions, answers, and
-speaker turns are matched in order. Changed words are highlighted inside
-paired passages. Accept and Reject apply to those passages. Numbered documents
-are wrapped and numbered again after each decision. Formatting alone does not
-create a pending change.
+Each suggestion owns one or more exact ranges in Original and Incoming. Accept
+and Reject apply to those ranges. Several suggestions can appear on the same
+printed line or in one red/green passage.
+
+| What changed | How the editor groups it |
+| --- | --- |
+| Words or punctuation | The character diff finds local replacements and can join neighboring changes separated by very little matching text. Shared letters can be highlighted to show a whole word. A surviving sentence keeps its own punctuation edit when nearby turns are added or removed. [Character diff](src/advanced_diff.py) · [Boundary rules](src/diff_heuristics.py) |
+| Speaker tags and Q/A | The editor uses ordered phrases from the testimony to find corresponding turns across headings, interruptions, splits and joins. A complete named label changing to Q or A gets one decision. Changes inside the matched speech get separate decisions. Repeated replies use surrounding turns and surviving labels for context. Off-record notes bound the search. [Spoken alignment](src/spoken_edits.py) |
+| Inserted or deleted dialogue | Consecutive unmatched dialogue can stay in one section, including a new sentence at the end of a matched turn. The next confidently matched turn starts its own comparison. An unambiguous relocated examiner byline gets one decision with a removal and an insertion. Repeated candidates and conflicting native speaker fields keep separate decisions. [Turn and byline rules](src/spoken_edits.py) |
+| Attribution and native fields | A speaker reassignment belongs to that occurrence. A rename of a shared native field belongs to all linked occurrences. Fields and generated labels stay whole. A difference confined to native metadata has its own card. [Speaker matching](src/suggestion_filter.py) · [Decision construction](src/suggestions.py) |
+| Word joins and quotation marks | The space in a joined or split word groups with dependent spelling changes to that word. Paired opening and closing quotation marks form one decision, including an attached endpoint correction. Independent edits inside the quotation keep their own controls. [Word and quote rules](src/suggestions.py) |
+| Inline display | A paired quotation shows the affected Original lines together, followed by the Incoming lines. A unique adjacent deletion and addition can also share visual context when enough spoken words match. Native page boundaries and line wrapping determine where rows print. [Display sections](src/review_model.py) · [Related passages](src/related_suggestions.py) |
+| Filters and saved decisions | Enabled automatic rules evaluate complete eligible wording edits. An ordinary period or question mark can qualify on its own. On reopening an older filtered review, the editor repairs generated groups, preserves custom ranges and highlights, and records newly accepted punctuation in one undoable batch. [Automatic rules](src/suggestion_filter.py) · [Saved review upgrades](src/review_upgrade.py) · [Manual decisions](src/review_editing.py) |
+
+For a shared inline passage, the adjacent deletion and addition must be each
+other's only match. They need at least five shared words, four distinct shared
+words, a run of four in order, and 70% coverage of the shorter side. Each edit
+must gain or lose at least five words and fit within 150 words and six paragraph
+breaks per side. A gap with testimony, an off-record note, or more than 160
+characters on either side separates the passages. [Display pairing rules](src/related_suggestions.py)
+
+For automatic speaker identification, an unnamed speaker needs at least two
+votes and a strict majority from uniquely aligned named turns. Reviewers can
+resolve ties and ambiguous native identities. The wording filters cover
+punctuation, capitalization, equivalent contractions, short/common words,
+ordinal suffixes, positive confirmations and number forms. Numeric punctuation,
+negation and native label boundaries have additional guards. Trailing whitespace
+and off-record discussion have their own rules. [Filter and speaker rules](src/suggestion_filter.py) · [Off-record matching](src/off_record.py)
+
+## Saving and recovery
 
 Open the Settings tab for automated edits, AI models, and the Hotkeys reference.
 While reviewing a suggestion, **A** accepts it and **D** rejects it. With audio

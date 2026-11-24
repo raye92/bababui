@@ -34,7 +34,7 @@ def change_diff(change):
     # apply every linked occurrence within a displayed paragraph together.
     spans = []
     for span in preview_ranges(change):
-        if spans and (not change.field or '\n' not in original[spans[-1][-1][1]:span[0]]):
+        if spans and change.kind != 'byline_move' and (not change.field or '\n' not in original[spans[-1][-1][1]:span[0]]):
             spans[-1].append(span)
         else:
             spans.append([span])
@@ -305,6 +305,10 @@ class ReviewView(QWidget):
             title = 'Speaker attribution · Needs review'
         elif change.kind == 'metadata':
             title = 'Native fields and symbols'
+        elif change.kind == 'byline_move':
+            title = 'Move examiner byline'
+        elif change.kind == 'turn_label':
+            title = 'Change turn label'
         elif change.kind == 'structure':
             old = sum(change.original.text.count('\n', a, b) for a, b, _, _ in change.ranges)
             new = sum(change.incoming.text.count('\n', c, d) for _, _, c, d in change.ranges)

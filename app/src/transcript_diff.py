@@ -105,6 +105,12 @@ def align_blocks(left, right):
     # Pure insertions/deletions already preserve every surviving source block.
     if {op[0] for op in direct} <= {'equal', 'insert'} or {op[0] for op in direct} <= {'equal', 'delete'}:
         return direct
+    # A complete one-to-one alignment already assigns each answer to its
+    # question. Rediffing just the questions discards those answer anchors.
+    if len(direct) == len(left) == len(right) and all(
+            (a, b, c, d) == (i, i+1, i, i+1) and left[i].kind == right[i].kind
+            for i, (_, a, b, c, d) in enumerate(direct)):
+        return direct
 
     def units(blocks):
         result = []

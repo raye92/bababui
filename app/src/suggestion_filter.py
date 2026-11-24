@@ -243,14 +243,17 @@ def automatic_reason(change, *, disabled_rules=frozenset()):
     return 'punctuation/case/contraction' if aa == bb else 'short/common words'
 
 
-def _delete_trailing(revision, side, review, records):
+def _delete_trailing(revision, side, review, records, *, start_at=0, protected=()):
     text = revision.text
     edits = []
-    for match in TRAILING_WHITESPACE.finditer(text):
+    for match in TRAILING_WHITESPACE.finditer(text, start_at):
         start, end = match.span()
         last_element = bisect_left(revision.elements, end, key=lambda element: element.start) - 1
         if last_element >= 0:
             start = max(start, revision.elements[last_element].end)
+        for a, b in protected:
+            if a < end and start < b:
+                start = max(start, b)
         if start < end:
             edits.append((start, end))
             records.append({'side': side, 'range': [start, end], 'before': text[start:end],
@@ -265,7 +268,7 @@ def _delete_trailing(revision, side, review, records):
 def auto_accept(state, *, disabled_rules=frozenset()):
     """Apply one undoable native batch once per AI result, keeping an audit log."""
     from copy import deepcopy
-    from app.src.suggestions import suggestions, resolve
+    from app.src.suggestions import GROUPING_VERSION, suggestions, resolve
     if (state.review or {}).get('automatic_filter') == 1:
         return []
     review = deepcopy(state.review) if state.review else {
@@ -291,7 +294,7 @@ def auto_accept(state, *, disabled_rules=frozenset()):
         old_text = incoming.text
         original, incoming = resolve(original, incoming, change, True)
         track_decision(review, change, old_text, incoming.text)
-    review.update(automatic_filter=1, automatic_changes=[
+    review.update(automatic_filter=1, grouping_version=GROUPING_VERSION, automatic_changes=[
         *review.get('off_record_changes', []), *whitespace_records, *reversed(records)])
     state.original, state.incoming, state.review = original, incoming, review
     return review['automatic_changes']
@@ -613,7 +616,8 @@ def begin_review(state, text, *, exclude_off_record=True, index_fields=None, nor
             locations.append({**occurrence, 'start': offset+label.start('name'),
                               'end': offset+label.end('name'), 'resolved': False})
     state.incoming = incoming
-    state.review = {'version': 1, 'evidence': evidence, 'overrides': {}, 'locations': locations}
+    from app.src.suggestions import GROUPING_VERSION
+    state.review = {'version': 1, 'grouping_version': GROUPING_VERSION, 'evidence': evidence, 'overrides': {}, 'locations': locations}
     if excluded:
         state.review['off_record_changes'] = excluded
     return undo
@@ -622,7 +626,8 @@ def begin_review(state, text, *, exclude_off_record=True, index_fields=None, nor
 def validate_review(review, text):
     """Reject malformed persisted evidence before it reaches review controls."""
     try:
-        if not isinstance(review, dict) or review['version'] != 1:
+        if (not isinstance(review, dict) or review['version'] != 1
+                or type(review.get('grouping_version', 1)) is not int or review.get('grouping_version', 1) < 1):
             raise ValueError()
         speakers = review['evidence']['speakers']
         if not isinstance(speakers, dict) or not isinstance(review['evidence']['occurrences'], list):

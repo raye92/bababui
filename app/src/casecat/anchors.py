@@ -283,6 +283,7 @@ class Revision:
         if edits is None:
             from app.src.suggestions import text_edits
             edits = text_edits(self.text, text)
+        edits = tuple(edits)
         changes = [(a, b, text[c:d]) for a, b, c, d in edits]
         # A proposal can change a field's displayed name too. Gather all edits
         # to each definition before applying ranges, since a linked update can
@@ -297,9 +298,9 @@ class Revision:
             else:
                 ordinary.append((start, end, content, None))
         definitions = {}
-        for field, edits in field_changes.items():
+        for field, replacements in field_changes.items():
             value = self.text[field.start:field.end]
-            for start, end, content in reversed(edits):
+            for start, end, content in reversed(replacements):
                 value = value[:start-field.start] + content + value[end-field.start:]
             _validate_field_value(value)
             if field.name in definitions and definitions[field.name] != value:
@@ -310,7 +311,9 @@ class Revision:
                 if not any(a < field.end and b > field.start for a, b, _, _ in ordinary):
                     ordinary.append((field.start, field.end, definitions[field.name], field))
         result = self
-        for start, end, content, field in sorted(ordinary, key=lambda change: change[0], reverse=True):
+        # A new paragraph can be inserted at the start of a replaced turn
+        # label. Apply the replacement before inserting at its left boundary.
+        for start, end, content, field in reversed(sorted(ordinary, key=lambda change: change[:2])):
             if field:
                 from .fields import rendered_value
                 updated = replace(field, value=content)
@@ -322,6 +325,11 @@ class Revision:
             values = dict(result.definitions)
             values.update(definitions)
             result = replace(result, definitions=tuple(sorted(values.items())))
+        if result.text == text and any(e.name == 'By-line' or e.kind == 'field' for e in self.elements):
+            from app.src.spoken_edits import byline_moves, restore_bylines
+            moves = byline_moves(self, result, edits)
+            if moves:
+                result = restore_bylines(self, result, moves)
         return result
 
     def to_dict(self):

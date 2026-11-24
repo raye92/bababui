@@ -3,7 +3,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from functools import cached_property
 
-from app.src.suggestions import Suggestion, preview_ranges, suggestions
+from app.src.suggestions import GROUPING_VERSION, Suggestion, preview_ranges, suggestions
 
 
 @dataclass(frozen=True)
@@ -200,7 +200,11 @@ def build_review(original, incoming, review=None):
     """Build fine native decisions once; visual sections never merge decisions."""
     if review and 'pending_decisions' in review:
         from app.src.review_editing import restore_decisions
-        edits = restore_decisions(original, incoming, review['pending_decisions'])
+        if review.get('grouping_version', 1) < GROUPING_VERSION:
+            from app.src.review_upgrade import upgraded_edits
+            edits, _ = upgraded_edits(original, incoming, review)
+        else:
+            edits = restore_decisions(original, incoming, review['pending_decisions'])
     else:
         edits = tuple(suggestions(original, incoming))
     return model_from_edits(original, incoming, edits)
@@ -214,4 +218,19 @@ def model_from_edits(original, incoming, edits):
                              for span in edit.highlights))
     else:
         spans = _display_spans(original, incoming, edits)
+    # Print all original rows of a quotation together, then all incoming
+    # rows. Each endpoint and intervening wording edit keeps its own ranges.
+    quotations = {i for i, edit in enumerate(edits) if edit.kind == 'quotation' and len(edit.ranges) > 1}
+    if quotations:
+        last = {owner: j for j, (*_, owners) in enumerate(spans) for owner in owners if owner in quotations}
+        combined = []
+        end = -1
+        for j, (a, b, c, d, owners) in enumerate(spans):
+            if j <= end:
+                x, y, z, w, pending = combined.pop()
+                a, b, c, d = min(a, x), max(b, y), min(c, z), max(d, w)
+                owners = tuple(sorted(set(owners + pending)))
+            end = max((last.get(i, end) for i in owners), default=end)
+            combined.append((a, b, c, d, owners))
+        spans = tuple(combined)
     return ReviewModel(original, incoming, edits, comparison_spans=spans)

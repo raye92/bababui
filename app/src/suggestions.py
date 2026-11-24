@@ -6,6 +6,8 @@ from unicodedata import category
 from app.src import advanced_diff
 from app.src.casecat.elements import QA_SYMBOL
 
+GROUPING_VERSION = 2
+
 
 @dataclass(frozen=True)
 class Suggestion:
@@ -263,7 +265,8 @@ def propose(original, text, *, normalize_continuations=None, labels=None):
     if continuations:
         continuations = _prepare_continuations(original, old, new, continuations, sources, labels)
     text = '\n'.join(new)
-    revision = original.revise(text, edits=text_edits(original.text, text))
+    raw = text_edits(original.text, text, labels=labels)
+    revision = original.revise(text, edits=raw)
     return normalize_continuations(revision, continuations) if continuations else revision
 
 
@@ -273,7 +276,7 @@ def _token_edits(a, b, start, end, ns, ne):
             for i, j, k, l in advanced_diff.text_edits(a[start:end], b[ns:ne])]
 
 
-def text_edits(original, incoming):
+def _inner_edits(original, incoming):
     """Keep equivalent wording edits outside unchanged native Q/A symbols."""
     edits = advanced_diff.text_edits(original, incoming)
     for index, (a, b, c, d) in enumerate(edits):
@@ -298,6 +301,15 @@ def text_edits(original, incoming):
                 and original[b:b+shift] == incoming[d:d+shift] == padding):
             edits[index] = (a+shift, b+shift, c+shift, d+shift)
     return edits
+
+
+def text_edits(original, incoming, *, labels=None):
+    from app.src.spoken_edits import isolate_bylines, passage_edits, refine
+    from app.src.suggestion_filter import LABEL
+    labels = labels or LABEL
+    raw = passage_edits(original, incoming, labels, _inner_edits)
+    raw, _ = refine(original, incoming, raw, labels, _inner_edits)
+    return isolate_bylines(original, incoming, raw)
 
 
 def _attribution_span(text, start, end):
@@ -541,10 +553,8 @@ def _atomic_intervals(revision, labels, start, end):
     return intervals
 
 
-def _expanded_text_edits(original, incoming, left_start, left_end, right_start, right_end):
+def _expanded_text_edits(original, incoming, left_start, left_end, right_start, right_end, raw):
     old, new = original.text, incoming.text
-    raw = [(a+left_start, b+left_start, c+right_start, d+right_start)
-           for a, b, c, d in text_edits(old[left_start:left_end], new[right_start:right_end])]
     if not raw:
         return []
     old_labels, new_labels = set(), set()
@@ -591,21 +601,66 @@ def _expanded_text_edits(original, incoming, left_start, left_end, right_start, 
     return expanded
 
 
-def suggestions(original, incoming):
+def _initial_edits(original, incoming):
     from app.src.suggestion_filter import speaker_replacements
-
-    if original == incoming:
-        return []
-    a, b = original.text, incoming.text
     speakers = tuple(speaker_replacements(original, incoming))
-    result = [Suggestion(original, incoming, (span,), 'speaker') for span in speakers]
     # Diff the text between speaker decisions so even a completely rewritten
     # answer can be accepted independently of its attribution.
-    expanded, fields = [], {}
+    a, b = original.text, incoming.text
+    raw = []
     previous_a = previous_c = 0
     for start, end, ns, ne in (*speakers, (len(a), len(a), len(b), len(b))):
-        expanded.extend(_expanded_text_edits(original, incoming, previous_a, start, previous_c, ns))
+        raw.extend((x+previous_a, y+previous_a, z+previous_c, w+previous_c) for x,y,z,w in
+                   _inner_edits(a[previous_a:start], b[previous_c:ns]))
+        if (start, end, ns, ne) in speakers:
+            raw.append((start, end, ns, ne))
         previous_a, previous_c = end, ne
+    return speakers, raw
+
+
+def suggestions(original, incoming, *, legacy=False):
+    if original == incoming:
+        return []
+    return _decisions(original, incoming, *_initial_edits(original, incoming), legacy=legacy)
+
+
+def review_generations(original, incoming):
+    """Share the original paragraph diff when upgrading saved decisions."""
+    if original == incoming:
+        return (), ()
+    speakers, raw = _initial_edits(original, incoming)
+    return tuple(tuple(_decisions(original, incoming, speakers, raw, legacy=legacy)) for legacy in (True, False))
+
+
+def _decisions(original, incoming, speakers, raw, *, legacy):
+    from app.src.suggestion_filter import _label_pattern
+    from app.src.casecat.elements import speaker_number
+    from app.src.spoken_edits import atomic_boundaries, byline_moves, isolate_bylines, refine
+
+    a, b = original.text, incoming.text
+    roles, moves = set(), []
+    if not legacy:
+        labels = _label_pattern(e for rev in (original, incoming) for e in rev.elements
+                                if e.kind == 'field' and speaker_number(e.name))
+        raw, roles = refine(a, b, raw, labels, _inner_edits, speakers)
+        raw = isolate_bylines(a, b, raw)
+        moves = byline_moves(original, incoming, raw)
+    specials = {s: 'speaker' for s in speakers}
+    specials.update((s, 'turn_label') for s in roles if atomic_boundaries(original, incoming, s))
+    specials.update((s, 'byline_move') for move in moves for s in move)
+    result = [Suggestion(original, incoming, move, 'byline_move') for move in moves]
+    expanded, ordinary, fields = [], [], {}
+    previous_a = previous_c = 0
+    for span in (*raw, (len(a), len(a), len(b), len(b))):
+        start, end, ns, ne = span
+        if span not in specials and span != (len(a), len(a), len(b), len(b)):
+            ordinary.append(span)
+            continue
+        expanded.extend(_expanded_text_edits(original, incoming, previous_a, start, previous_c, ns, ordinary))
+        if span in specials and specials[span] != 'byline_move':
+            result.append(Suggestion(original, incoming, (span,), specials[span]))
+        previous_a, previous_c = end, ne
+        ordinary = []
     left_fields = [e for e in original.elements if e.kind == 'field']
     right_fields = {(e.start, e.name): e for e in incoming.elements if e.kind == 'field'}
     for span in expanded:
@@ -629,7 +684,7 @@ def suggestions(original, incoming):
     result += [Suggestion(original, incoming, tuple(ranges), 'field', name) for name, ranges in fields.items()]
     if not result and (original.elements != incoming.elements or original.definitions != incoming.definitions):
         result.append(Suggestion(original, incoming, (), 'metadata'))
-    result.sort(key=lambda s: s.ranges[0][0] if s.ranges else 0)
+    result.sort(key=lambda s: s.ranges[0] if s.ranges else (0, 0, 0, 0))
     return _group_decisions(a, b, result)
 
 
@@ -648,11 +703,15 @@ def resolve(original, incoming, change, accept, *, defer_fields=False):
             target = target.set_field(change.field, value)
         else:
             for a, b, c, d in reversed(change.ranges):
-                target = target.adopt(a, b, source, c, d, at_destination=True) if accept else target.adopt(c, d, source, a, b)
+                start, end, x, y = (a, b, c, d) if accept else (c, d, a, b)
+                target = target.adopt(start, end, source, x, y, at_destination=True, exact_position=not accept)
     else:
         for a, b, c, d in reversed(change.ranges):
             start, end, x, y = (a, b, c, d) if accept else (c, d, a, b)
-            target = target.adopt(start, end, source, x, y, at_destination=accept, update_fields=not defer_fields)
+            # Both revisions have their own ordered stroke stream. A saved
+            # proposal can place a surviving turn at a different source clock.
+            target = target.adopt(start, end, source, x, y, at_destination=True,
+                                  exact_position=not accept, update_fields=not defer_fields)
     original, incoming = (target, incoming) if accept else (original, target)
     if original.text == incoming.text and original.elements == incoming.elements and original.definitions == incoming.definitions:
         incoming = original

@@ -45,6 +45,7 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self._text = ''
         self._edits, self._highlights = (), []
         self._focused = []
+        self._separate_focus = False
         self.caret_affinity = None
         self.affinity_position = -1
         self._block_styles = []
@@ -196,6 +197,7 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
 
     def highlight_edit(self, selected):
         self._focused = [cursor for _, _, index, cursor in self._highlights if index == selected]
+        self._separate_focus = 0 <= selected < len(self._edits) and self._edits[selected].kind == 'byline_move'
         self.viewport().update()
 
     def apply_native_revision(self, revision, position=None, *, edit_range=None):
@@ -261,7 +263,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._focused:
-            draw_focus_outlines(QPainter(self.viewport()), self, (self._focus_rect(),))
+            rects = [self._highlight_rect(c) for c in self._focused] if self._separate_focus else (self._focus_rect(),)
+            draw_focus_outlines(QPainter(self.viewport()), self, rects)
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)

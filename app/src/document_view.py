@@ -1027,8 +1027,12 @@ class DocumentView(QWidget):
     def _automatic_review(self, automatic_before=None):
         state = self.document.native
         original, incoming = state.original, state.incoming
-        records = auto_accept_document(state, disabled_rules=self.disabled_auto_accept_rules)
-        self._record_automatic_review(automatic_before, original, incoming, records)
+        previous_version = (state.review or {}).get('grouping_version')
+        undo = []
+        records = auto_accept_document(state, disabled_rules=self.disabled_auto_accept_rules, remember_undo=undo.append)
+        self._record_automatic_review(undo[0] if undo else automatic_before, original, incoming, records)
+        if state.review and previous_version != state.review.get('grouping_version'):
+            self.document.dirty = True
 
     def _record_automatic_review(self, automatic_before, original, incoming, records):
         if records:

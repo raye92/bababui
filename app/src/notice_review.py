@@ -147,10 +147,17 @@ def begin_document_review(state, text, *, exclude_off_record=True, full_document
     return joined_snapshot(head, head, undo)
 
 
-def auto_accept_document(state, *, disabled_rules):
+def auto_accept_document(state, *, disabled_rules, remember_undo=None):
     from app.src.suggestion_filter import auto_accept
-    if (state.review or {}).get('automatic_filter') == 1:
-        return auto_accept(state, disabled_rules=disabled_rules)
+    from app.src.suggestions import GROUPING_VERSION
+    review = state.review or {}
+    filtered = review.get('automatic_filter') == 1
+    if (filtered and review.get('grouping_version', 1) < GROUPING_VERSION
+            or not filtered and 'pending_decisions' in review):
+        from app.src.review_upgrade import upgrade_automatic
+        return upgrade_automatic(state, disabled_rules, remember_undo)
+    if filtered:
+        return []
     a = state.body_position(state.original)
     if not a:
         return auto_accept(state, disabled_rules=disabled_rules)
