@@ -15,7 +15,7 @@ from app.src.ai_review import AssistedReview, review_edits
 from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
-from app.src.suggestion_filter import auto_accept, begin_review
+from app.src.suggestion_filter import auto_accept
 from shared.storage import atomic_bytes
 
 
@@ -166,16 +166,15 @@ class ProcessingWorker(QThread):
 
     def _review(self, text, report):
         request = self.request
-        from app.src.notice_review import split_revision, joined_snapshot, response_body
-        from app.src.suggestion_filter import index_speaker_fields
+        from app.src.notice_review import begin_body_review, split_revision, joined_snapshot, response_body
         head = None
         original = request.original
         if request.body_start:
             head, original = split_revision(original, request.body_start)
             text = response_body(head.text, text)
         state = SimpleNamespace(original=original)
-        off_record_undo = begin_review(state, text, exclude_off_record='off_record' not in request.disabled_rules,
-                                       index_fields=index_speaker_fields(head) if head is not None else None)
+        off_record_undo = begin_body_review(state, text, request.bundle, request.job, head=head,
+                                            exclude_off_record='off_record' not in request.disabled_rules)
         before_rules = state.original, state.incoming, state.review
         auto_accept(state, disabled_rules=request.disabled_rules)
         after_rules = state.original, state.incoming, state.review

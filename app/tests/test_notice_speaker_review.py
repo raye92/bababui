@@ -79,7 +79,8 @@ def test_mixed_labels_keep_evidence_positions_and_allow_a_confirmed_index_speake
             return original, incoming, review, 'No automatic decisions.'
 
         monkeypatch.setattr(jobs, 'review_edits', verify_body)
-        request = SimpleNamespace(original=state.original, body_start=start, disabled_rules=frozenset(),
+        request = SimpleNamespace(original=state.original, body_start=start, bundle=state.bundle, job=state.job,
+                                  disabled_rules=frozenset(),
                                   review_model='test', document_id='job', config={})
         worker = jobs.ProcessingWorker(request, None)
         result = worker._review(proposal, lambda message: None)

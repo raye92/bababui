@@ -121,15 +121,28 @@ def response_body(prefix, text):
     return speaker + text[cut:].lstrip('\r\n') if cut else text
 
 
-def begin_document_review(state, text, *, exclude_off_record=True, full_document=False):
+def begin_body_review(state, text, bundle, job, *, head=None, exclude_off_record=True):
+    from app.src.casecat.presentation import apply_continuation_layout
     from app.src.suggestion_filter import begin_review, index_speaker_fields
+
+    def normalize_continuations(revision, candidates):
+        full = join_revision(head, revision) if head is not None else revision
+        offset = len(head.text) if head is not None else 0
+        return apply_continuation_layout(job.with_revision(full), bundle, revision, offset, candidates)
+
+    return begin_review(state, text, exclude_off_record=exclude_off_record,
+                        index_fields=index_speaker_fields(head) if head is not None else None,
+                        normalize_continuations=normalize_continuations if job and bundle else None)
+
+
+def begin_document_review(state, text, *, exclude_off_record=True, full_document=False):
     start = state.body_position(state.original)
     if not start:
-        return begin_review(state, text, exclude_off_record=exclude_off_record)
+        return begin_body_review(state, text, state.bundle, state.job, exclude_off_record=exclude_off_record)
     head, body = split_revision(state.original, start)
     draft = SimpleNamespace(original=body)
     text = text[state.body_position(state.incoming):] if full_document else response_body(head.text, text)
-    undo = begin_review(draft, text, exclude_off_record=exclude_off_record, index_fields=index_speaker_fields(head))
+    undo = begin_body_review(draft, text, state.bundle, state.job, head=head, exclude_off_record=exclude_off_record)
     _, state.incoming, state.review = joined_snapshot(head, head, (body, draft.incoming, draft.review))
     return joined_snapshot(head, head, undo)
 

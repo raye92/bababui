@@ -35,6 +35,23 @@ def prepare_editor_presentation(job, bundle):
         return job.text, {}, frozenset()
 
 
+def apply_continuation_layout(job, bundle, body, body_start, paragraphs):
+    """Keep plain-text padding only where the native layout supplies no indent."""
+    layouts = read_layouts(job.native_bytes)
+    base_left = layouts[0].paragraphs[0].left if layouts and layouts[0].paragraphs else None
+    _, styles, _ = prepare_editor_presentation(job, bundle)
+    starts = [0, *(m.end() for m in re.finditer('\n', body.text))]
+    for index in sorted(paragraphs, reverse=True):
+        start = starts[index]
+        style = styles.get(body_start + start)
+        if (base_left is not None and isinstance(style, ParagraphStyle) and not style.prefix_length
+                and style.alignment != 2 and style.first == style.continuation
+                and style.first > min(base_left, style.left)):
+            continue
+        body = body.replace(start, start, ' ' * 10)
+    return body
+
+
 @lru_cache(maxsize=8)
 def presentation(job, bundle):
     if job.revision != job.baseline:

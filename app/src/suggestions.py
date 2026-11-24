@@ -167,21 +167,104 @@ def _paragraph_ops(left, right):
     return result
 
 
-def propose(original, text):
+def _continuation_prefix(line, labels):
+    """Separate a source turn marker from the literal whitespace before its first word."""
+    question_or_answer = QA_SYMBOL.match(line)
+    speaker = labels.match(line)
+    prefix = 0
+    if question_or_answer:
+        prefix = question_or_answer.end()
+    elif speaker and not speaker['prefix'].strip():
+        prefix = speaker.end()
+        prefix += min(2, len(line[prefix:]) - len(line[prefix:].lstrip(' ')))
+    body = line[prefix:]
+    return prefix, body[:len(body) - len(body.lstrip(' \t'))]
+
+
+def _prepare_continuations(original, old, new, candidates, sources, labels):
+    prefixes = [_continuation_prefix(line, labels) for line in old]
+    unmatched = candidates - sources.keys()
+    if unmatched:
+        # A split or merge has no one-to-one paragraph pair. Follow the first
+        # word through the character diff to keep an authored source indent.
+        target = '\n'.join(new)
+        edits = text_edits(original.text, target)
+        ends = [b for _, b, _, _ in edits]
+        starts = [0, *(m.end() for m in re.finditer('\n', target))]
+        by_word = {starts[j] + 10: j for j in unmatched}
+        by_break = {starts[j] - 1: j for j in unmatched}
+
+        def retained(position):
+            index = bisect_right(ends, position)
+            if index < len(edits) and edits[index][0] <= position:
+                return None
+            return position + (edits[index-1][3] - ends[index-1] if index else 0)
+
+        start = 0
+        for i, (line, (prefix, indent)) in enumerate(zip(old, prefixes)):
+            word = start + prefix + len(indent)
+            if word < start + len(line):
+                mapped = retained(word)
+                j = by_word.get(mapped)
+                if j is None and start:
+                    boundary = by_break.get(retained(start - 1))
+                    if mapped is None or bisect_right(starts, mapped) - 1 == boundary:
+                        j = boundary
+                if j is not None:
+                    sources[j] = i
+            start += len(line) + 1
+
+    inherited = set()
+    for j in candidates:
+        source = sources.get(j)
+        prefix, indent = prefixes[source] if source is not None else (0, '')
+        new[j] = indent + new[j][10:]
+        if source is None or prefix:
+            inherited.add(j)
+    return inherited
+
+
+def propose(original, text, *, normalize_continuations=None, labels=None):
     """Keep existing paragraph indentation and generated Q/A label spacing."""
+    from app.src.suggestion_filter import LABEL
+    from shared.transcript_formatting import TranscriptFormatter
+
     old = original.text.split('\n')
     new = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    labels = labels or LABEL
+    continuations = set()
+    if normalize_continuations:
+        continuations = {j for j, line in enumerate(new) if j and re.match(r'^ {10}\S', line)
+                         and not labels.match(line) and not line[10:].startswith(('(', '['))
+                         and not TranscriptFormatter.structural_line.fullmatch(line.strip())}
+    sources = {}
     # Use normalized labels for matching, but never write normalized body text.
     aa = [(q + ' ' + body).strip() for _, q, _, body in map(_layout, old)]
     bb = [(q + ' ' + body).strip() for _, q, _, body in map(_layout, new)]
     for _, a, b, c, d in _paragraph_ops(aa, bb):
         if b-a == d-c:
             for i, j in zip(range(a, b), range(c, d)):
+                if j in continuations:
+                    sources[j] = i
+                    continue
                 indent, label, space, _ = _layout(old[i])
-                _, new_label, new_space, body = _layout(new[j])
+                new_indent, new_label, new_space, body = _layout(new[j])
+                if normalize_continuations and not new_indent and body and not labels.match(new[j]):
+                    prefix, literal_indent = _continuation_prefix(old[i], labels)
+                    if prefix:
+                        source_body = old[i][prefix + len(literal_indent):]
+                        # An initial "A " can be part of the testimony or a shorthand answer label.
+                        marker = new_label + new_space
+                        if (not new_label or new[j] == source_body or
+                                (new_space == ' ' and source_body.startswith(marker) and not body.startswith(marker))):
+                            new[j] = literal_indent + new[j]
+                            continue
                 new[j] = indent + new_label + (space if label and new_label else new_space) + body
+    if continuations:
+        continuations = _prepare_continuations(original, old, new, continuations, sources, labels)
     text = '\n'.join(new)
-    return original.revise(text, edits=text_edits(original.text, text))
+    revision = original.revise(text, edits=text_edits(original.text, text))
+    return normalize_continuations(revision, continuations) if continuations else revision
 
 
 def _token_edits(a, b, start, end, ns, ne):

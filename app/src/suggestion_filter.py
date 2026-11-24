@@ -478,7 +478,7 @@ def _restore_trailing(original, text, *, labels=LABEL):
     return text
 
 
-def prepare(original, text, *, evidence=None, overrides=None, index_fields=None):
+def prepare(original, text, *, evidence=None, overrides=None, index_fields=None, normalize_continuations=None):
     """Return a structured proposal and JSON-safe, frozen speaker evidence."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     labels = _label_pattern(index_fields)
@@ -553,7 +553,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
                         if p[2] and _label_range(p) in fields}
     base = replace(original, elements=tuple(e for e in original.elements if e not in speaker_elements))
     from app.src.suggestions import propose
-    revision = propose(base, text)
+    revision = propose(base, text, normalize_continuations=normalize_continuations, labels=labels)
     _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text, labels=labels)
     aligned_sources = {j: old[i] for i,j in projected_pairs}
     values = field_values(original)
@@ -579,7 +579,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None)
     return revision, evidence
 
 
-def begin_review(state, text, *, exclude_off_record=True, index_fields=None):
+def begin_review(state, text, *, exclude_off_record=True, index_fields=None, normalize_continuations=None):
     """Freeze evidence and return an optional pre-exclusion undo snapshot."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     undo, excluded = None, []
@@ -591,11 +591,13 @@ def begin_review(state, text, *, exclude_off_record=True, index_fields=None):
             # Build raw speaker evidence only for Undo, never use it to vote in
             # the filtered proposal. It has different paragraph offsets.
             raw = SimpleNamespace(original=state.original)
-            begin_review(raw, text, exclude_off_record=False, index_fields=index_fields)
+            begin_review(raw, text, exclude_off_record=False, index_fields=index_fields,
+                         normalize_continuations=normalize_continuations)
             raw.review.update(automatic_filter=1, automatic_changes=[])
             undo = (state.original, raw.incoming, raw.review)
             text = filtered
-    incoming, evidence = prepare(state.original, text, index_fields=index_fields)
+    incoming, evidence = prepare(state.original, text, index_fields=index_fields,
+                                 normalize_continuations=normalize_continuations)
     if (incoming.text == state.original.text and incoming.elements == state.original.elements
             and incoming.definitions == state.original.definitions):
         incoming = state.original
