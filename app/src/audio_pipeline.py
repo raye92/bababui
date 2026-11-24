@@ -12,10 +12,11 @@ import tempfile
 import time
 
 from app.src.speech_alignment import recover_word_times
+from app.src.transcription_output import OutputError, SegmentOutput
 from app.src.vocabulary_reconciliation import normalized_vocabulary, reconcile_vocabulary
 from shared import media
 from shared.transcription import GeminiTranscriber
-from shared.storage import file_lock
+from shared.storage import atomic_copy, file_lock
 
 
 AUDIO_MODEL = 'gemini-3.5-transcribe'
@@ -322,12 +323,13 @@ def save_json(path, data):
 
 
 class AudioPipeline:
-    def __init__(self, key, cache, sdk=None, *, testing=False):
+    def __init__(self, key, cache, sdk=None, *, output=None, legacy_cache=None):
         # Interactions retries 429 internally even with attempts=1 unless it is excluded.
         self.client = GeminiTranscriber(key, sdk, retry_options={
             'attempts': 1, 'http_status_codes': [408, 409, 500, 502, 503, 504]})
         self.cache = Path(cache)
-        self.testing = testing
+        self.legacy_cache = legacy_cache
+        self.output = output
 
     def _upload(self, path):
         sdk = self.client.client()
@@ -342,35 +344,39 @@ class AudioPipeline:
             raise ValueError('Audio upload processing failed.')
         return uploaded.uri
 
-    def _request(self, uri, config, progress):
+    def _request(self, uri, config, progress, segment, kind='response'):
         sdk = self.client.client()
         for attempt in range(2):
             try:
-                response = sdk.interactions.create(model=AUDIO_MODEL,
+                raw = sdk.interactions.with_raw_response.create(model=AUDIO_MODEL,
                     input=[{'type': 'audio', 'uri': uri, 'mime_type': 'audio/wav'}], store=False,
                     generation_config={'max_output_tokens': 16384, 'transcription_config': config},
                     automatic_continuation=False, timeout=1800)
                 break
             except Exception as exc:
                 status_code = getattr(exc, 'status_code', getattr(exc, 'code', None))
+                error_response = getattr(exc, 'response', None)
+                if segment and error_response is not None:
+                    segment.response(f'{kind} - HTTP {status_code} attempt {attempt+1}', error_response.text)
                 if status_code != 429 or attempt:
                     raise
                 progress('Transcription rate limit reached (429). Waiting 60 seconds before retrying this chunk...')
                 time.sleep(60)
                 progress('Retrying transcription for this chunk...')
-        if self.testing:
-            self._save_response(response)
+        if segment is not None:
+            segment.response(f'{kind} (retry)' if attempt else kind, raw.text())
+        response = raw.parse()
         status = getattr(response.status, 'value', response.status)
         if status not in ('completed', 'incomplete'):
             raise ValueError('Transcription did not complete; existing text was preserved.')
         return status, response
 
-    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False, vocabulary=()):
+    def transcribe_segment(self, path, progress=lambda message: None, *, timing_only=False, vocabulary=(), segment=None):
         uri = self._upload(path)
         speaker = {'type': 'verbatim', 'diarization_mode': 'speaker'}
         timed_config = {'mode': {**speaker, 'timestamp_granularities': ['word']}}
         config = {'mode': {'type': 'verbatim'}, 'custom_vocabulary': list(vocabulary)} if vocabulary else timed_config
-        status, response = self._request(uri, config, progress)
+        status, response = self._request(uri, config, progress, segment)
         if status == 'completed':
             try:
                 return parse_words(response, timestamps=not vocabulary)
@@ -394,26 +400,28 @@ class AudioPipeline:
                 cutoff = prefix[-1].end
                 start = cutoff - OVERLAP_SECONDS
                 progress('Resuming incomplete transcription with one minute of overlap...')
-                complete, resumed = self._continue_segment(path, start, duration, timed_config, progress)
+                complete, resumed = self._continue_segment(path, start, duration, timed_config, progress, segment)
                 if complete:
                     merged = _merge_continuation(prefix, resumed, start)
                     if merged is not None:
                         return merged
 
         progress('Retrying the full chunk with speaker labels only...')
-        status, fallback = self._request(uri, {'mode': speaker}, progress)
+        status, fallback = self._request(uri, {'mode': speaker}, progress, segment, 'speaker fallback response')
         if status != 'completed':
             raise ValueError('Transcription did not complete; existing text was preserved.')
         words = parse_words(fallback, timestamps=False)
         # Keep the first measurement where both requests timed the same wording.
         return recover_word_times(recover_word_times(words, resumed), prefix)
 
-    def _continue_segment(self, path, start, duration, config, progress):
+    def _continue_segment(self, path, start, duration, config, progress, segment):
         try:
             with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
                 clip = Path(temporary) / 'continuation.wav'
                 media.prepare(path, {'start': start, 'end': duration}, clip)
-                status, response = self._request(self._upload(clip), config, progress)
+                status, response = self._request(self._upload(clip), config, progress, segment, 'continuation response')
+        except OutputError:
+            raise
         except Exception:
             # The original upload is still available for the full-chunk fallback.
             return False, []
@@ -424,23 +432,6 @@ class AudioPipeline:
             status = 'incomplete'
             words = parse_words(response, partial=True)
         return status == 'completed', _shift_words(_bounded_words(words, duration - start), start)
-
-    @staticmethod
-    def _save_response(response):
-        # Preserve the response before validation, including malformed timestamps.
-        debug_dir = Path(tempfile.gettempdir()) / 'bababui-transcriptions'
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        debug_path = debug_dir / f'response-{time.time_ns()}.json'
-        payload = response.model_dump(mode='json') if hasattr(response, 'model_dump') else vars(response)
-        debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=vars),
-                              encoding='utf-8')
-        debug_path.with_suffix('.txt').write_text('\n'.join(
-            block.text
-            for step in getattr(response, 'steps', None) or []
-            if getattr(step, 'type', None) == 'model_output'
-            for block in getattr(step, 'content', None) or []
-            if getattr(block, 'type', None) == 'text' and isinstance(getattr(block, 'text', None), str)),
-            encoding='utf-8')
 
     def run(self, path, progress=lambda message: None, *, vocabulary=()):
         path = Path(path)
@@ -455,11 +446,21 @@ class AudioPipeline:
         with file_lock(directory / 'cache.lock'):
             return self._run_locked(path, plan, directory, progress, digest, normalized_vocabulary(vocabulary))
 
-    def _segment_words(self, path, start, end, cached, progress, digest, *, timing_only=False, vocabulary=(),
+    def _segment_words(self, path, start, end, cached, progress, digest, *, label, timing_only=False, vocabulary=(),
                        continuation_reviews=None):
         review = _OverlapReview()
         review_path = cached.with_name('review-' + cached.name)
-        if cached.exists():
+        if self.legacy_cache and not cached.exists():
+            old = self.legacy_cache / cached.relative_to(self.cache)
+            if old.is_file():
+                for sidecar in (old.with_name(review_path.name), old.with_suffix('.responses')):
+                    if sidecar.is_file():
+                        atomic_copy(sidecar, cached.with_name(sidecar.name))
+                atomic_copy(old, cached)
+        segment = SegmentOutput(self.output, label)
+        cache_hit = cached.exists()
+        if cache_hit:
+            segment.restore_responses(cached)
             words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
             if continuation_reviews is not None and review_path.exists():
                 review = _OverlapReview(**json.loads(review_path.read_text(encoding='utf-8')))
@@ -469,27 +470,32 @@ class AudioPipeline:
                 media.prepare(path, {'start': start, 'end': end}, prepared)
                 if timing_only:
                     try:
-                        words = self.transcribe_segment(prepared, progress, timing_only=True)
+                        words = self.transcribe_segment(prepared, progress, timing_only=True, segment=segment)
+                    except OutputError:
+                        raise
                     except Exception:
                         # A failed optional API call must leave the completed transcript usable.
                         progress('Word timing request failed. Keeping the completed transcription.')
                         return None
                 elif vocabulary:
-                    words = self.transcribe_segment(prepared, progress, vocabulary=vocabulary)
+                    words = self.transcribe_segment(prepared, progress, vocabulary=vocabulary, segment=segment)
                 else:
-                    words = self.transcribe_segment(prepared, progress)
+                    words = self.transcribe_segment(prepared, progress, segment=segment)
                     if isinstance(words, _ResumedWords):
                         review = words.review
             check_wav_digest(path, digest)
         words = _bounded_words(words, end - start)
-        if not cached.exists() and (not timing_only or any(w.start is not None for w in words)):
+        if not cache_hit and (not timing_only or any(w.start is not None for w in words)):
             if continuation_reviews is not None:
                 # Publish review information before the word list marks this chunk complete.
                 if review.unmatched or review.cut is not None:
                     save_json(review_path, asdict(review))
                 else:
                     review_path.unlink(missing_ok=True)
+            segment.cache_responses(cached)
             save_json(cached, [asdict(w) for w in words])
+        if self.output and cached.exists():
+            self.output.copy(f' - {label}.json', cached)
         if continuation_reviews is not None:
             continuation_reviews.append(review)
         return words
@@ -500,7 +506,8 @@ class AudioPipeline:
         for offset in range(0, math.ceil(end - start), step):
             clip_start, clip_end = start + offset, min(start + offset + step, end)
             cached = directory / 'word-timing' / f'{clip_start}-{clip_end}.json'
-            clip = self._segment_words(path, clip_start, clip_end, cached, progress, digest, timing_only=True)
+            clip = self._segment_words(path, clip_start, clip_end, cached, progress, digest, timing_only=True,
+                                       label=f'timing clip {clip_start:g}-{clip_end:g}s')
             if clip is None:
                 break
             observations.extend(_shift_words(clip, offset))
@@ -515,7 +522,9 @@ class AudioPipeline:
             progress(f'Transcribing vocabulary window {i} of {len(plan)}...')
             try:
                 words = self._segment_words(path, start, end, directory / f'window-{i}.json',
-                                            progress, digest, vocabulary=vocabulary)
+                                            progress, digest, vocabulary=vocabulary, label=f'vocabulary window {i}')
+            except OutputError:
+                raise
             except Exception:
                 check_wav_digest(path, digest)
                 warning = f'Vocabulary window {i} of {len(plan)} failed. Kept the speaker transcription for this window.'
@@ -530,7 +539,7 @@ class AudioPipeline:
         for i, (start, end) in enumerate(plan):
             progress(f'Transcribing speaker and timing chunk {i+1} of {len(plan)}...')
             words = self._segment_words(path, start, end, directory / f'chunk-{i}.json', progress, digest,
-                                        continuation_reviews=continuation_reviews)
+                                        label=f'chunk {i+1}', continuation_reviews=continuation_reviews)
             if not any(w.start is not None for w in words):
                 progress(f'Recovering word timestamps for chunk {i+1} from shorter audio clips...')
                 words = self._recover_timing(path, start, end, words, directory, progress, digest)

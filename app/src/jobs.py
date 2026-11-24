@@ -16,20 +16,7 @@ from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
 from app.src.speech_alignment import NO_TIMESTAMPS, UNAVAILABLE, align_speech
 from app.src.suggestion_filter import auto_accept
-from shared.storage import atomic_bytes
-
-
-_raw_export_lock = Lock()
-
-
-def save_raw_transcription(wav_path, text):
-    path = Path(wav_path).with_suffix('.raw.txt')
-    data = text.encode('utf-8')
-    with _raw_export_lock:
-        # Shared transcription jobs can finish together for the same WAV.
-        if not path.exists() or path.read_bytes() != data:
-            atomic_bytes(path, data)
-    return path
+from app.src.transcription_output import RunOutput
 
 
 class TranscriptionCoordinator:
@@ -37,7 +24,7 @@ class TranscriptionCoordinator:
         self._lock = Lock()
         self._active = {}
 
-    def run(self, path, model, pipeline, progress, *, vocabulary=()):
+    def run(self, path, model, pipeline, progress, *, vocabulary=(), output=None):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != '.wav':
             raise ValueError('Choose an existing .wav file.')
@@ -49,16 +36,20 @@ class TranscriptionCoordinator:
                 self._active[key] = Lock(), {}
             recording_lock, contexts = self._active[key]
             sharing = bool(contexts)
-            future = contexts.get(vocabulary)
-            leader = future is None
+            leader = vocabulary not in contexts
             if leader:
-                contexts[vocabulary] = future = Future()
+                contexts[vocabulary] = Future(), output
+            future, source_output = contexts[vocabulary]
         if sharing:
             progress('Waiting for shared transcription...')
         if not leader:
-            result = future.result()
-            check_wav_digest(path, key[0])
-            return result
+            try:
+                return future.result()
+            finally:
+                check_wav_digest(path, key[0])
+                if output and source_output:
+                    for suffix, source in source_output.files.items():
+                        output.copy(suffix, source)
         try:
             # Another tab may use the same base cache with different names.
             with recording_lock:
@@ -107,6 +98,7 @@ class ProcessingWorker(QThread):
                  processor_factory=ProcessingClient):
         super().__init__()
         self.request, self.coordinator = request, coordinator
+        self.output = None
         self.pipeline_factory, self.processor_factory = pipeline_factory, processor_factory
 
     def run(self):
@@ -116,16 +108,25 @@ class ProcessingWorker(QThread):
             processor.check_ready()
             if not request.prompt.strip():
                 raise ValueError('Fill in app/src/bababui_prompt.md before processing.')
-            pipeline = self.pipeline_factory(request.config.get('gemini_api_key', ''),
-                                             APP_DIR/'data'/'transcriptions',
-                                             testing=request.config.get('testing', False))
+            directory = APP_DIR / 'data' / 'transcriptions'
+            name = Path(request.bundle.name if request.bundle else request.wav_path).stem
+            if request.bundle and len(request.bundle.jobs) > 1:
+                key = request.job.key
+                job_name = Path(key).name
+                if sum(Path(other).name.casefold() == job_name.casefold() for other in request.bundle.jobs) > 1:
+                    job_name = key.replace('/', ' - ')
+                name = f'{name[:40]} - {job_name[-36:]}'
+            cache = APP_DIR / 'data' / 'transcription-cache'
+            self.output = RunOutput.create(directory, name)
+            pipeline = self.pipeline_factory(request.config.get('gemini_api_key', ''), cache,
+                                             output=self.output, legacy_cache=directory)
             report = lambda message: self.progress.emit(request.document_id, message)
             report('Checking WAV...')
             transcription = self.coordinator.run(request.wav_path, request.transcription_model, pipeline, report,
-                                                 vocabulary=request.vocabulary)
+                                                 vocabulary=request.vocabulary, output=self.output)
             text, warnings = transcription.text, list(transcription.warnings)
             report('Saving raw transcription...')
-            save_raw_transcription(request.wav_path, text)
+            self.output.save_text(text)
             report('Formatting transcript...')
             result = processor.complete(text, request.prompt)
             alignment = None
@@ -186,12 +187,11 @@ class ProcessingWorker(QThread):
 
         try:
             original, incoming, review, summary = review_edits(
-                *after_rules, request.review_model, complete, request.document_id,
-                testing=request.config.get('testing', False))
+                *after_rules, complete)
             after_ai = original, incoming, review
         except (OSError, ValueError):
             after_ai = after_rules
-            summary = 'AI-assisted review could not be applied and recorded. Edits remain pending.'
+            summary = 'AI-assisted review could not be applied. Edits remain pending.'
         if head is not None:
             off_record_undo, before_rules, after_rules, after_ai = (
                 joined_snapshot(head, head, snapshot) for snapshot in (off_record_undo, before_rules, after_rules, after_ai))
@@ -204,6 +204,7 @@ class JobManager(QObject):
     failed = Signal(str, str)
     progress = Signal(str, str)
     completed = Signal(str)
+    output_folder = Signal(str, str)
 
     def __init__(self, parent=None, worker_factory=ProcessingWorker):
         super().__init__(parent)
@@ -227,5 +228,7 @@ class JobManager(QObject):
         worker = self.sender()
         identifier = worker.request.document_id
         self.workers.pop(identifier, None)
+        if worker.output:
+            self.output_folder.emit(identifier, str(worker.output.directory))
         worker.deleteLater()
         self.completed.emit(identifier)

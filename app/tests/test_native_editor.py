@@ -524,7 +524,7 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
     calls = []
 
     class Pipeline:
-        def __init__(self, *_, testing=False):
+        def __init__(self, *_, **kwargs):
             pass
 
         def run(self, path, progress):
@@ -543,11 +543,6 @@ def test_ai_review_runs_after_local_filters_and_can_be_undone(native_window, tmp
                 return 'I saw a blue car?\nI saw a dog.'
             return '{"1":"accept","2":"reject"}'
 
-    def review(*args, **kwargs):
-        from app.src.ai_review import review_edits
-        return review_edits(*args, directory=tmp_path, **kwargs)
-
-    monkeypatch.setattr(jobs, 'review_edits', review)
     native_window.jobs.worker_factory = lambda request, coordinator: jobs.ProcessingWorker(
         request, coordinator, Pipeline, Processor)
     wav = tmp_path/'test.wav'

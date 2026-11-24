@@ -60,6 +60,7 @@ class TranscriptEditor(QMainWindow):
         self.jobs.reviewed.connect(self._reviewed)
         self.jobs.failed.connect(self._failed)
         self.jobs.progress.connect(self._progress)
+        self.jobs.output_folder.connect(self._output_folder)
         self.jobs.completed.connect(self._completed)
         self.tabs = EditorTabs()
         self.tabs.setTabBar(AudioTabBar())
@@ -796,6 +797,11 @@ class TranscriptEditor(QMainWindow):
         if view:
             view.document.status = message
             self.document_changed(view)
+
+    def _output_folder(self, identifier, folder):
+        view = self.find_view(identifier)
+        if view:
+            view.document.status += f' Output folder: {folder}'
 
     def _completed(self, identifier):
         view = self.find_view(identifier)

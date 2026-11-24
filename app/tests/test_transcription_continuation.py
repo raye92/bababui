@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace as NS
+from app.tests.audio_responses import raw_interactions
 
 import pytest
 
@@ -58,7 +59,7 @@ def recording(tmp_path, monkeypatch):
 
         monkeypatch.setattr(media, 'prepare', prepare)
         monkeypatch.setattr(media, 'probe', duration_of)
-        sdk = NS(files=NS(upload=upload), interactions=NS(create=create))
+        sdk = NS(files=NS(upload=upload), interactions=raw_interactions(create))
         return AudioPipeline('fake', tmp_path / 'cache', sdk), wav, requests
     return setup
 
@@ -76,7 +77,12 @@ def test_resumes_at_mealer_cutoff_and_matches_speakers_through_next_chunk(record
     pipeline, wav, requests = recording(1840, [
         response('incomplete', first), response('completed', resumed), response('completed', following)])
 
+    from app.src.transcription_output import RunOutput
+    output = RunOutput.create(wav.parent / 'runs', 'Hearing')
+    pipeline.output = output
     result = pipeline.run(wav)
+    assert json.loads((output.directory / 'Hearing - chunk 1 - response.json').read_bytes())['status'] == 'incomplete'
+    assert json.loads((output.directory / 'Hearing - chunk 1 - continuation response.json').read_bytes())['status'] == 'completed'
 
     assert result.text.splitlines() == [f'Speaker 1: Opening. {question}',
                                         f'Speaker 2: {answer} Finished.',
@@ -169,7 +175,12 @@ def test_resume_without_spoken_overlap_keeps_prefix_in_short_final_chunk(recordi
     pipeline, wav, requests = recording(1900, [
         response('completed', first), response('incomplete', prefix), response('completed', retry)])
 
+    from app.src.transcription_output import RunOutput
+    output = RunOutput.create(wav.parent / 'runs', 'Hearing')
+    pipeline.output = output
     result = pipeline.run(wav)
+    assert json.loads((output.directory / 'Hearing - chunk 2 - response.json').read_bytes())['status'] == 'incomplete'
+    assert json.loads((output.directory / 'Hearing - chunk 2 - continuation response.json').read_bytes())['status'] == 'completed'
 
     assert result.text.splitlines() == ['Speaker 1: Opening.', 'Speaker 2: Ready.',
                                         f'Speaker 3: {shared} These are my recorded words.',
@@ -193,3 +204,23 @@ def test_partial_annotation_cut_inside_utf8_keeps_the_earlier_timed_words(record
     assert result.text == 'Speaker 1: Early words here. Please read these five pages Café closed.'
     assert next(w.start for w in result.words if w.text == 'Café') == 90
     assert requests == [(0, 160, ['word']), (30, 160, ['word'])]
+
+def test_failed_continuation_export_stops_before_fallback(recording, monkeypatch):
+    from app.src import transcription_output
+
+    prefix = passage('Words from the initial response.', 'a', 82)
+    pipeline, wav, requests = recording(160, [
+        response('incomplete', prefix), response('completed', prefix)])
+    pipeline.output = transcription_output.RunOutput.create(wav.parent / 'runs', 'Hearing')
+    write = transcription_output.atomic_bytes
+
+    def fail_continuation(path, data):
+        if 'continuation response' in path.name:
+            raise OSError('disk full')
+        write(path, data)
+
+    monkeypatch.setattr(transcription_output, 'atomic_bytes', fail_continuation)
+    with pytest.raises(OSError, match='disk full'):
+        pipeline.run(wav)
+    assert len(requests) == 2
+    assert pipeline.output.path(' - chunk 1 - response.json').is_file()

@@ -4,15 +4,11 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import json
-from pathlib import Path
 import re
-import tempfile
-from uuid import uuid4
 
 from app.src.processing import DEFAULT_MODEL
 from app.src.suggestion_filter import LABEL, PUNCTUATION, track_decision
 from app.src.suggestions import preview_context, resolve, suggestions, word_context
-from shared.storage import atomic_bytes
 
 
 DEFAULT_REVIEW_MODEL = DEFAULT_MODEL
@@ -113,8 +109,8 @@ def _unique_ids(pairs):
     return result
 
 
-def review_edits(original, incoming, review, model, complete, document_id, *, testing=False, directory=None):
-    """Apply validated decisions as a batch, with an optional diagnostic log."""
+def review_edits(original, incoming, review, complete):
+    """Apply validated decisions as a batch."""
     edits = list(candidates(original, incoming))
     payload = [{'id': str(index), **item} for index, (_, item) in enumerate(edits, 1)]
     decisions, failure = {}, ''
@@ -131,24 +127,18 @@ def review_edits(original, incoming, review, model, complete, document_id, *, te
         except Exception:
             failure = 'AI-assisted review failed or returned invalid decisions. Edits remain pending.'
 
-    records = [{**item, 'decision': decisions.get(item['id'], 'abstain')} for item in payload]
-    counts = Counter(item['decision'] for item in records)
+    counts = Counter()
     review = deepcopy(review)
-    for (edit, _), record in reversed(list(zip(edits, records))):
-        if record['decision'] == 'abstain':
+    for (edit, _), item in zip(reversed(edits), reversed(payload)):
+        decision = decisions.get(item['id'], 'abstain')
+        counts[decision] += 1
+        if decision == 'abstain':
             continue
         change = replace(edit, original=original, incoming=incoming)
         previous = incoming.text
-        original, incoming = resolve(original, incoming, change, record['decision'] == 'accept')
+        original, incoming = resolve(original, incoming, change, decision == 'accept')
         track_decision(review, change, previous, incoming.text)
 
     summary = (f"Total edits: {len(edits)}, accepted: {counts['accept']}, "
                f"rejected: {counts['reject']}, abstained: {counts['abstain']}")
-    if testing:
-        lines = [summary, f'Model: {model}', f'Document: {document_id}']
-        if failure:
-            lines.append(failure)
-        lines.extend(json.dumps(record, ensure_ascii=False) for record in records)
-        folder = Path(tempfile.gettempdir())/'bababui-transcriptions' if directory is None else directory
-        atomic_bytes(folder/f'ai-review-{uuid4().hex}.txt', ('\n'.join(lines) + '\n').encode('utf-8'))
     return original, incoming, review, summary + (f'. {failure}' if failure else '')

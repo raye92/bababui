@@ -61,8 +61,7 @@ def test_candidates_use_same_truncated_excerpt_as_edit_card():
         item['original'].replace('day', 'daydate'))
 
 
-@pytest.mark.parametrize('testing', [False, True])
-def test_review_resolves_both_sides_and_optionally_logs_one_batch(tmp_path, testing):
+def test_review_resolves_both_sides_in_one_batch():
     original = revision('Last day of work.\nI saw a blue car.\nI left that day.')
     incoming = original.revise('Last date of work.\nI saw a red car.\nI left on that day.')
     calls = []
@@ -71,8 +70,7 @@ def test_review_resolves_both_sides_and_optionally_logs_one_batch(tmp_path, test
         calls.append(json.loads(payload))
         return '{"1":"accept","2":"reject","3":"abstain"}'
 
-    left, right, _, summary = review_edits(original, incoming, None, 'gemini-3.8-flash',
-                                          complete, 'test-document', testing=testing, directory=tmp_path)
+    left, right, _, summary = review_edits(original, incoming, None, complete)
     assert len(calls) == 1
     assert calls[0][0]['original'] == 'Last day of work.'
     assert calls[0][0]['proposed'] == 'Last date of work.'
@@ -80,22 +78,14 @@ def test_review_resolves_both_sides_and_optionally_logs_one_batch(tmp_path, test
     assert right.text == 'Last date of work.\nI saw a blue car.\nI left on that day.'
     assert len(suggestions(left, right)) == 1
     assert summary == 'Total edits: 3, accepted: 1, rejected: 1, abstained: 1'
-    if testing:
-        log, = tmp_path.glob('*.txt')
-        lines = log.read_text(encoding='utf-8').splitlines()
-        assert lines[0] == summary
-        assert [json.loads(line)['decision'] for line in lines[3:]] == ['accept', 'reject', 'abstain']
-    else:
-        assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize('output', [
     'invalid JSON', '{}', '{"1":"accept","1":"reject"}', '{"1":"accept","99":"accept"}',
 ])
-def test_invalid_model_output_leaves_edits_pending(tmp_path, output):
+def test_invalid_model_output_leaves_edits_pending(output):
     original = revision('Last day of work.')
     incoming = original.revise('Last date of work.')
-    left, right, _, summary = review_edits(original, incoming, None, 'gemini-3.8-flash',
-                                          lambda *_: output, 'test', directory=tmp_path)
+    left, right, _, summary = review_edits(original, incoming, None, lambda *_: output)
     assert (left, right) == (original, incoming)
     assert 'abstained: 1' in summary

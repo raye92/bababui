@@ -16,8 +16,6 @@ Install FFmpeg and FFprobe on PATH, or set `FFMPEG_PATH` and `FFPROBE_PATH`.
 Copy `.env.example` to `.env` if needed. Set `GEMINI_API_KEY` for transcription
 and Gemini formatting; set `DEEPSEEK_API_KEY` for DeepSeek formatting.
 Environment variables take precedence over `app/.env`.
-Set `TESTING=TRUE` to save Gemini transcription responses and AI review logs in
-the system temp folder under `bababui-transcriptions`. The default is `FALSE`.
 
 ## Audio workflow
 
@@ -29,12 +27,17 @@ ZIP onto it. The editor uses the WAV in the job. You can also attach a WAV after
 import. Duplicating a tab keeps its transcript, pending revisions, audio, notice,
 and model settings.
 
-BABABUI validates the WAV, transcribes it with Gemini 3.5 Transcribe and speaker
-tags, and automatically saves the raw speaker-labeled text beside the WAV as
-`<wav-name>.raw.txt` before calling the editing model. This file is also written
-when cached transcription is reused, and remains available if editing fails.
-Each run replaces this raw export; save review edits in a separate file. The WAV
-folder must be writable. BABABUI then formats the transcription and writes the
+BABABUI transcribes the WAV with Gemini 3.5 Transcribe and saves the results in
+a folder named after the imported ZIP under `app/data/transcriptions/`. For
+`Hearing.zip`, `Hearing/Hearing.txt` contains the combined speaker transcript.
+`Hearing - chunk 1.json` contains parsed words and timestamps. Each full Gemini
+reply is saved as JSON, with its chunk, continuation, fallback, retry, timing
+clip, or vocabulary window identified in the filename.
+
+Each run gets a separate folder. Repeated names get ` (2)`, ` (3)`, and so on.
+The tab status shows the folder path. Cached runs copy the available files.
+The combined transcript is saved before formatting, so it is available if the
+editing model fails. BABABUI then formats the transcription and writes the
 result to Incoming. The current
 transcript is never sent to the model and stays unchanged until revisions are
 accepted. Only that tab is locked during processing; scrolling and view switching
@@ -167,7 +170,8 @@ five seconds by default. Change the skip interval under Hotkeys.
 
 - `data/session.json`: local recovery for all open tabs, including unsaved text.
 - `data/save-locks/`: locks protecting document saves across app instances.
-- `data/transcriptions/`: cached word annotations, keyed by WAV content and model.
+- `data/transcriptions/` holds named transcription runs.
+- `data/transcription-cache/` holds reusable word annotations and Gemini responses keyed by WAV content and model.
   Retrying formatting reuses completed transcription chunks. Gemini automatically
   deletes uploaded audio after 48 hours. Local caches contain transcript data
   and can be deleted when unused.

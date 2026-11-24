@@ -1,3 +1,4 @@
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from threading import Event
@@ -15,19 +16,22 @@ def test_shared_transcription_one_call_and_same_outcome(tmp_path, fails):
     copy.write_bytes(wav.read_bytes())
     started, release, waiting = Event(), Event(), Event()
     calls = []
+    from app.src.transcription_output import RunOutput
+    outputs = [RunOutput.create(tmp_path / 'runs', name) for name in ('First', 'Second')]
     class Pipeline:
         def run(self, path, progress):
             calls.append(path)
             started.set()
             assert release.wait(5)
+            outputs[0].save(' - chunk 1 - response.json', b'{"status":"incomplete"}')
             if fails:
                 raise ValueError('Transcription failed')
             return Transcription('Speaker 1: Hello', (), (), 1000, sha256(path.read_bytes()).hexdigest())
     coordinator = TranscriptionCoordinator()
     with ThreadPoolExecutor(2) as pool:
-        a = pool.submit(coordinator.run, wav, 'gemini-3.5-transcribe', Pipeline(), lambda _: None)
+        a = pool.submit(coordinator.run, wav, 'gemini-3.5-transcribe', Pipeline(), lambda _: None, output=outputs[0])
         assert started.wait(5)
-        b = pool.submit(coordinator.run, copy, 'gemini-3.5-transcribe', Pipeline(), lambda _: waiting.set())
+        b = pool.submit(coordinator.run, copy, 'gemini-3.5-transcribe', Pipeline(), lambda _: waiting.set(), output=outputs[1])
         assert waiting.wait(5)
         release.set()
         for result in (a, b):
@@ -37,6 +41,8 @@ def test_shared_transcription_one_call_and_same_outcome(tmp_path, fails):
             else:
                 assert result.result(5).text == 'Speaker 1: Hello'
     assert len(calls) == 1
+    for output in outputs:
+        assert output.path(' - chunk 1 - response.json').read_bytes() == b'{"status":"incomplete"}'
 
 
 @pytest.mark.parametrize('other_names', [(), ('Other',)])
@@ -83,12 +89,13 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     entered, release = Event(), Event()
     calls = []
     class Pipeline:
-        def __init__(self, *args, testing=False):
-            pass
+        def __init__(self, *args, output, legacy_cache=None):
+            self.output = output
         def run(self, path, progress):
             calls.append('transcribe')
             entered.set()
             assert release.wait(5)
+            self.output.save(' - chunk 1 - response.json', b'{"status":"completed"}')
             return Transcription('Audio transcript', (), (), 1000, sha256(path.read_bytes()).hexdigest())
     class Processor:
         def __init__(self, config, model):
@@ -96,7 +103,7 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
         def check_ready(self):
             pass
         def complete(self, text, prompt):
-            assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == text
+            assert any(f.read_text(encoding='utf-8') == text for f in (tmp_path / 'data/transcriptions').glob('*/*.txt'))
             calls.append((self.model, text, prompt))
             if self.model == 'fail':
                 raise ValueError('Formatting failed')
@@ -107,6 +114,8 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     results, failures, finished, progress = [], [], [], []
     manager.succeeded.connect(lambda *args: results.append(args))
     manager.failed.connect(lambda *args: failures.append(args))
+    folders = {}
+    manager.output_folder.connect(lambda doc, folder: folders.update({doc: Path(folder)}))
     manager.completed.connect(finished.append)
     manager.progress.connect(lambda *args: progress.append(args))
     manager.start(Request('first', str(wav), 'success', 'gemini-3.5-transcribe', 'Captured prompt', {}))
@@ -131,6 +140,10 @@ def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     assert results == [('first', 'success', [], None)]
     assert failures == [('second', 'Formatting failed')]
     assert set(finished) == {'first', 'second'} and not manager.workers
+    assert {path.name for path in folders.values()} == {'one', 'one (2)'}
+    for folder in folders.values():
+        assert (folder / f'{folder.name}.txt').read_text() == 'Audio transcript'
+        assert (folder / f'{folder.name} - chunk 1 - response.json').read_bytes() == b'{"status":"completed"}'
     assert calls.count('transcribe') == 1
     assert ('success', 'Audio transcript', 'Captured prompt') in calls
 
@@ -146,7 +159,7 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
         + '\n'.join(f'     Q    Question {i}?' for i in range(23)))
 
     class Pipeline:
-        def __init__(self, *args, testing=False):
+        def __init__(self, *args, output=None, legacy_cache=None):
             pass
 
         def run(self, path, progress):
@@ -162,7 +175,7 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
 
         def complete(self, text, prompt):
             assert text == 'Speaker 2: Question?'
-            assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == text
+            assert any(f.read_text(encoding='utf-8') == text for f in (tmp_path / 'data/transcriptions').glob('*/*.txt'))
             return output
 
     worker = ProcessingWorker(
@@ -205,10 +218,10 @@ def test_worker_delivers_timing_with_incoming_review(tmp_path, monkeypatch, reco
     monkeypatch.setattr(media, 'prepare', lambda path, segment, dest: clips.append(segment))
 
     class Pipeline(AudioPipeline):
-        def __init__(self, *args, testing=False):
-            super().__init__('fake', tmp_path / 'cache')
+        def __init__(self, *args, output=None, legacy_cache=None):
+            super().__init__('fake', tmp_path / 'cache', output=output)
 
-        def transcribe_segment(self, path, progress, *, timing_only=False):
+        def transcribe_segment(self, path, progress, *, timing_only=False, segment=None):
             words = ('Alpha', 'beta', 'gamma.')
             if recording == 'no timestamps' or (not timing_only and recording != 'timed original'):
                 return [Word(word, 'first', None, None) for word in words]
@@ -235,7 +248,7 @@ def test_worker_delivers_timing_with_incoming_review(tmp_path, monkeypatch, reco
     worker.run()
     _, incoming, warnings, alignment = results[0]
     assert incoming == 'Alpha New beta gamma.'
-    assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') == 'Speaker 1: Alpha beta gamma.'
+    assert worker.output.path('.txt').read_text(encoding='utf-8') == 'Speaker 1: Alpha beta gamma.'
     if recording == 'no timestamps':
         assert warnings == ['No word timestamps for chunk 1.', NO_TIMESTAMPS]
         assert alignment is None

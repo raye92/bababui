@@ -181,9 +181,9 @@ def test_two_tabs_with_different_names_share_base_calls_and_format_their_own_raw
 
     class Pipeline(AudioPipeline):
         def __init__(self, *args, **kwargs):
-            super().__init__('fake', tmp_path / 'cache')
+            super().__init__('fake', tmp_path / 'cache', **kwargs)
 
-        def transcribe_segment(self, path, progress, *, vocabulary=()):
+        def transcribe_segment(self, path, progress, *, vocabulary=(), segment=None):
             calls.append(vocabulary)
             if not vocabulary:
                 entered.set()
@@ -223,4 +223,4 @@ def test_two_tabs_with_different_names_share_base_calls_and_format_their_own_raw
     assert len(calls) == 3 and calls.count(()) == 1
     assert sorted(formatted) == [('Smith', 'Speaker 1: They called Smith yesterday.'),
                                  ('Smythe', 'Speaker 1: They called Smythe yesterday.')]
-    assert wav.with_suffix('.raw.txt').read_text(encoding='utf-8') in {text for _, text in formatted}
+    assert {w.output.path('.txt').read_text(encoding='utf-8') for w in workers} == {text for _, text in formatted}

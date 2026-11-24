@@ -1,5 +1,6 @@
 import hashlib
 from types import SimpleNamespace as NS
+from app.tests.audio_responses import raw_interactions
 
 import pytest
 
@@ -147,22 +148,24 @@ def test_invalid_edge_word_is_kept_for_text_review(position):
     assert words[position].text == ('One', 'two')[position]
 
 
-@pytest.mark.parametrize('testing', [False, True])
-def test_real_sdk_contract_and_cache(tmp_path, monkeypatch, testing):
+def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
+    import json
+    from app.src.transcription_output import RunOutput
     import httpx
     from google import genai
     from app.src.audio_pipeline import AudioPipeline, AUDIO_MODEL, media, save_json
     requests = []
     text = 'Hello there.'
+    reply = {'status': 'completed', 'steps': [
+        {'type': 'model_output', 'content': [{'type': 'text', 'text': text, 'annotations': [
+            {'type': 'word_info', 'speaker': 's1', 'start_index': 0, 'end_index': 5,
+             'start_offset': '0s', 'end_offset': '0.5s', 'future_field': [1, 2]},
+            {'type': 'word_info', 'speaker': 's1', 'start_index': 6, 'end_index': 12,
+             'start_offset': '0.5s', 'end_offset': '1s'}]}]}]}
+
     def transport(request):
-        import json
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json={'status': 'completed', 'steps': [
-            {'type': 'model_output', 'content': [{'type': 'text', 'text': text, 'annotations': [
-                {'type': 'word_info', 'speaker': 's1', 'start_index': 0, 'end_index': 5,
-                 'start_offset': '0s', 'end_offset': '0.5s'},
-                {'type': 'word_info', 'speaker': 's1', 'start_index': 6, 'end_index': 12,
-                 'start_offset': '0.5s', 'end_offset': '1s'}]}]}]})
+        return httpx.Response(200, json=reply)
     files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'))
     wav = tmp_path / 'source.wav'
     wav.write_bytes(b'wav')
@@ -170,22 +173,21 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch, testing):
     save_json(directory/'state.json', {'remote': 'files/old'})
     monkeypatch.setattr(media, 'probe', lambda _: 1)
     monkeypatch.setattr(media, 'prepare', lambda *a: None)
-    monkeypatch.setattr('app.src.audio_pipeline.tempfile.gettempdir', lambda: str(tmp_path))
     with genai.Client(api_key='fake', http_options={'client_args': {
             'transport': httpx.MockTransport(transport)}}) as sdk:
-        pipeline = AudioPipeline('fake', tmp_path/'cache', NS(files=files, interactions=sdk.interactions),
-                                 testing=testing)
-        result = pipeline.run(wav)
-        assert result.text == 'Speaker 1: Hello there.' and not result.warnings
-        assert result.words == (Word('Hello', 'Speaker 1', 0, .5), Word('there.', 'Speaker 1', .5, 1))
-        assert result.wav_sha256 == hashlib.sha256(b'wav').hexdigest()
-        assert pipeline.run(wav) == result
-    dumps = tmp_path/'bababui-transcriptions'
-    if testing:
-        response, = dumps.glob('response-*.json')
-        assert response.with_suffix('.txt').read_text(encoding='utf-8') == text
-    else:
-        assert not dumps.exists()
+        for version in ('Hearing', 'Hearing (2)'):
+            output = RunOutput.create(tmp_path/'runs', 'Hearing')
+            assert output.directory.name == version
+            pipeline = AudioPipeline('fake', tmp_path/'cache', NS(files=files, interactions=sdk.interactions),
+                                     output=output)
+            result = pipeline.run(wav)
+            assert result.text == 'Speaker 1: Hello there.' and not result.warnings
+            assert result.words == (Word('Hello', 'Speaker 1', 0, .5), Word('there.', 'Speaker 1', .5, 1))
+            assert result.wav_sha256 == hashlib.sha256(b'wav').hexdigest()
+            payload = json.loads((output.directory / f'{version} - chunk 1 - response.json').read_bytes())
+            assert payload == reply
+            words = json.loads((output.directory / f'{version} - chunk 1.json').read_bytes())
+            assert words[0]['start'] == 0 and words[1]['text'] == 'there.'
     assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
     assert len(requests) == 1
     assert requests[0]['generation_config']['transcription_config']['mode'] == {
@@ -204,6 +206,7 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
     import json
     import httpx
     from google import genai
+    from app.src.transcription_output import RunOutput
     from app.src.audio_pipeline import AudioPipeline, media
 
     requests, uploads, waits, progress = [], [], [], []
@@ -235,8 +238,9 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
     with genai.Client(api_key='fake', http_options={'retry_options': {
             'attempts': 1, 'http_status_codes': [503]},
             'client_args': {'transport': httpx.MockTransport(transport)}}) as sdk:
+        output = RunOutput.create(tmp_path / 'runs', 'Hearing')
         pipeline = AudioPipeline('fake', tmp_path / 'cache',
-                                 NS(files=NS(upload=upload), interactions=sdk.interactions))
+                                 NS(files=NS(upload=upload), interactions=sdk.interactions), output=output)
         if statuses[-1] == 200:
             result = pipeline.run(wav, progress.append)
             assert result.text.splitlines() == [f'Speaker {i}: {word}' for i, word in enumerate(transcript, 1)]
@@ -247,6 +251,10 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
             assert getattr(caught.value, 'status_code', getattr(caught.value, 'code', None)) == statuses[-1]
         assert len(list(pipeline.cache.rglob('chunk-*.json'))) == prior_chunks + (statuses[-1] == 200)
 
+    for attempt, status in enumerate(statuses, 1):
+        if status != 200:
+            error_file = output.path(f' - chunk {len(transcript)} - response - HTTP {status} attempt {attempt}.json')
+            assert json.loads(error_file.read_bytes())['error']['code'] == status
     assert len(uploads) == len(transcript)
     assert len(requests) == prior_chunks + len(statuses)
     assert waits == ([60] if statuses[0] == 429 else [])
@@ -297,7 +305,7 @@ def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(t
     wav.write_bytes(b'wav')
     monkeypatch.setattr(media, 'probe', lambda _: 2942)
     monkeypatch.setattr(media, 'prepare', lambda path, clip, destination: prepared.append(clip))
-    sdk = NS(files=NS(upload=upload), interactions=NS(create=create))
+    sdk = NS(files=NS(upload=upload), interactions=raw_interactions(create))
     pipeline = AudioPipeline('fake', tmp_path/'cache', sdk)
 
     result = pipeline.run(wav)
@@ -333,7 +341,7 @@ def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_pat
     wav.write_bytes(b'recording')
     cache = tmp_path / 'cache'
     digest = hashlib.sha256(wav.read_bytes()).hexdigest()
-    directory = cache / AUDIO_MODEL / 'overlap-v1' / digest
+    directory = tmp_path / 'legacy' / AUDIO_MODEL / 'overlap-v1' / digest
     original = [Word(word, speaker, None, None)
                 for speaker, passage in [('a', 'Bring the papers.'), ('b', 'Yes, I will.')]
                 for word in ([passage] if whole_turns else passage.split())]
@@ -341,9 +349,9 @@ def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_pat
     clips = []
     monkeypatch.setattr(media, 'probe', lambda _: 360)
     monkeypatch.setattr(media, 'prepare', lambda path, segment, dest: clips.append(segment))
-    pipeline = AudioPipeline('fake', cache)
+    pipeline = AudioPipeline('fake', cache, legacy_cache=tmp_path / 'legacy')
 
-    def transcribe(path, progress, *, timing_only):
+    def transcribe(path, progress, *, timing_only, segment):
         assert timing_only
         passage = 'bring the papers' if clips[-1]['start'] == 0 else 'yes I will'
         return [Word(word, 'different label', i + 2, i + 2.5) for i, word in enumerate(passage.split())]
@@ -353,6 +361,7 @@ def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_pat
 
     assert result.text == 'Speaker 1: Bring the papers.\nSpeaker 2: Yes, I will.'
     assert [w.start for w in result.words] == [2, 3, 4, 182, 183, 184]
+    assert (cache / AUDIO_MODEL / 'overlap-v1' / digest / 'chunk-0.json').read_bytes() == (directory / 'chunk-0.json').read_bytes()
     assert not result.warnings
     assert pipeline.run(wav) == result
     assert clips == [{'start': 0, 'end': 180}, {'start': 180, 'end': 360}]
@@ -387,7 +396,7 @@ def test_partial_run_reuses_first_chunk(tmp_path, monkeypatch):
     monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(segment))
     pipeline = AudioPipeline('fake', tmp_path/'cache')
     attempts = []
-    def transcribe(path, progress=lambda message: None):
+    def transcribe(path, progress=lambda message: None, *, segment):
         attempts.append(path)
         if len(attempts) == 2:
             raise ValueError('temporary failure')
@@ -433,7 +442,7 @@ def test_replaced_wav_cannot_populate_the_old_recording_cache(tmp_path, monkeypa
     monkeypatch.setattr(media, 'prepare', lambda *args: None)
     pipeline = AudioPipeline('fake', tmp_path / 'cache')
 
-    def transcribe(path, progress=lambda message: None):
+    def transcribe(path, progress=lambda message: None, *, segment):
         wav.write_bytes(b'different audio')
         return [Word('Word', 'a', 0, .1)]
 
