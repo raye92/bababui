@@ -2,7 +2,8 @@
 from bisect import bisect_right
 from collections import Counter
 from html import escape
-from PySide6.QtCore import QEvent, Signal, Qt
+from PySide6.QtCore import QEvent, QRectF, Signal, Qt
+from PySide6.QtGui import QPainter, QPainterPath
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, QHBoxLayout,
     QFrame, QLabel, QPushButton, QToolButton, QComboBox, QProgressBar, QSizePolicy)
 from app.src.suggestion_filter import LABEL, speaker_choices, speaker_name_key
@@ -93,6 +94,22 @@ class SpeakerCombo(QComboBox):
     def wheelEvent(self, event):
         # Wheel motion over the closed control scrolls the speaker list.
         event.ignore()
+
+
+class SpeakerMatchBar(QProgressBar):
+    def paintEvent(self, event):
+        fraction = max(0, self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
+        bounds = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = bounds.height() / 2
+        track = QPainterPath()
+        track.addRoundedRect(bounds, radius, radius)
+        accent = self.palette().accent().color()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(accent)
+        painter.drawPath(track)
+        painter.setClipRect(QRectF(0, 0, self.width() * fraction, self.height()))
+        painter.fillPath(track, accent)
 
 
 def _attribution_edits(model, locations, needs_check, mappings):
@@ -333,6 +350,11 @@ class ReviewView(QWidget):
         box = QWidget()
         rows = QVBoxLayout(box)
         rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(8)
+        box.setStyleSheet(
+            'QFrame#speakerSection { border: 1px solid palette(placeholder-text); border-radius: 4px; }'
+            'QLabel#speakerHeading { font-weight: bold; }'
+        )
         summaries = (self.review or {}).get('evidence', {}).get('speakers', {})
         overrides = (self.review or {}).get('overrides', {})
         choices = speaker_choices(original) if summaries else {}
@@ -365,18 +387,27 @@ class ReviewView(QWidget):
             matches = matches_by_speaker[speaker]
             mismatches = len(self.needs_review.intersection(self.speaker_edits.get(speaker, ())))
             total_matches += matches
+            section = QFrame()
+            section.setObjectName('speakerSection')
+            rows.addWidget(section)
+            content = QVBoxLayout(section)
+            content.setContentsMargins(10, 8, 10, 10)
+            content.setSpacing(5)
             heading = QHBoxLayout()
-            label = QLabel(f'{speaker} → {mapped or "Needs review"}')
+            label = QLabel(speaker)
+            label.setObjectName('speakerHeading')
             label.setWordWrap(True)
             label.setTextFormat(Qt.PlainText)
             heading.addWidget(label, 1)
             button = QPushButton('Review')
+            button.setAccessibleName(f'Review {speaker}')
             button.setToolTip('Review pending attribution differences for this speaker.')
             button.setEnabled(bool(self.speaker_edits.get(speaker)))
             button.clicked.connect(lambda _, s=speaker: self.filter_speaker(s))
             heading.addWidget(button, 0, Qt.AlignRight)
-            rows.addLayout(heading)
+            content.addLayout(heading)
             combo = SpeakerCombo()
+            combo.setAccessibleName(f'Assigned name for {speaker}')
             combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo.addItem('Needs review', None)
             for name in names:
@@ -388,15 +419,28 @@ class ReviewView(QWidget):
             combo.activated.connect(lambda i, s=speaker, c=combo, snapshot=box:
                                     self.mapping_requested.emit(s, c.itemData(i))
                                     if self.speaker_scroll.widget() is snapshot else None)
-            rows.addWidget(combo)
-            bar = QProgressBar()
+            assignment = QHBoxLayout()
+            assignment.addWidget(QLabel('Assigned to'))
+            assignment.addWidget(combo, 1)
+            content.addLayout(assignment)
+            bar = SpeakerMatchBar()
             bar.setRange(0, max(1, matches+mismatches))
             bar.setValue(matches)
-            bar.setFormat(f'{matches} {"match" if matches == 1 else "matches"} · '
-                          f'{mismatches} {"mismatch" if mismatches == 1 else "mismatches"}')
+            counts = (f'{matches} {"match" if matches == 1 else "matches"} · '
+                      f'{mismatches} {"mismatch" if mismatches == 1 else "mismatches"}')
+            bar.setAccessibleName(f'Matches for {speaker}')
+            bar.setFormat(counts)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(8)
+            bar.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             votes = '\n'.join(f'{name}: {count}' for name, count in summary['counts'].items())
             bar.setToolTip('Mismatches are pending speaker changes.\nSpeaker identification votes\n' + votes)
-            rows.addWidget(bar)
+            count_label = QLabel(counts)
+            count_label.setToolTip(bar.toolTip())
+            match_row = QHBoxLayout()
+            match_row.addWidget(bar, 1)
+            match_row.addWidget(count_label)
+            content.addLayout(match_row)
         scrollbar = self.speaker_scroll.verticalScrollBar()
         position = scrollbar.value() if self.review is self._shown_review else 0
         self._shown_review = self.review
