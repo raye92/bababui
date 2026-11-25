@@ -355,7 +355,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             return
         from dataclasses import replace
         from app.src.casecat.anchors import utf16_index
-        from app.src.casecat.elements import NativeElement
+        from app.src.casecat.elements import BYLINE_RAW, NativeElement
         revision = self._native_source[1].revision
         start = utf16_index(revision.text, self.textCursor().selectionStart())
         end = utf16_index(revision.text, self.textCursor().selectionEnd())
@@ -371,8 +371,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         content = 'BY ' if label == 'By-line' else f'     {label}    '
         revision = revision._replace(start, end, prefix + content)
         if label == 'By-line':
-            element = NativeElement(start+len(prefix), start+len(prefix)+3, 'symbol',
-                                    '160500110602000000425920', 'By-line')
+            element = NativeElement(start+len(prefix), start+len(prefix)+3, 'symbol', BYLINE_RAW, 'By-line')
             kept = [e for e in revision.elements if e.end <= element.start or e.start >= element.end]
             revision = replace(revision, elements=tuple(sorted((*kept, element), key=lambda e: (e.start, e.end))))
         self.apply_native_revision(revision, start+len(prefix)+len(content), edit_range=(start, end))

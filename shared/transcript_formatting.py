@@ -16,7 +16,7 @@ class TranscriptFormatter:
     )
     structural_line = re.compile(r"^(?:[A-Z -]*EXAMINATION|BY .+:|/{3,})$")
     examination_heading = re.compile(r"^(?:FURTHER )?EXAMINATION$")
-    examiner_line = re.compile(r"^BY .+:$")
+    examiner_line = re.compile(r"^BY [^:\n]+:$")
     numeric_answer = re.compile(r"^[+-]?\d[\d,./:%-]*$")
 
     def _content_lines(self, text):

@@ -2,12 +2,18 @@
 
 Positions address logical text, never page numbers or Qt's display formatting.
 """
+from bisect import bisect_right
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import re
 
+from shared.transcript_formatting import TranscriptFormatter
+
 
 QA_SYMBOL = re.compile(r'(?m)^     [QA]    ')
+BYLINE_STYLE = 5
+CENTERED_STYLE = 7
+BYLINE_RAW = '160500110602000000425920'  # By-line, two-line orphan control, "BY ".
 # CATalyst's Center Justify command adds this paragraph delta immediately
 # after the native paragraph symbol. It never changes the paragraph style.
 CENTER_JUSTIFY = bytes.fromhex('1503030000000c0200')
@@ -26,12 +32,83 @@ class NativeElement:
     uppercase: bool = False
 
 
+def examination_style(line):
+    line = line.rstrip(' \t')
+    if TranscriptFormatter.examination_heading.fullmatch(line):
+        return CENTERED_STYLE
+    if TranscriptFormatter.examiner_line.fullmatch(line):
+        return BYLINE_STYLE
+    return None
+
+
+def examination_paragraphs(revision, original, original_styles=()):
+    """Find new examination paragraphs while respecting styles on unchanged source lines."""
+    lines = revision.text.split('\n')
+    fields = [e for e in revision.elements if e.kind == 'field']
+    ends = [e.end for e in fields]
+    wanted = {}
+    start = 0
+    for index, line in enumerate(lines):
+        style = examination_style(line)
+        if style is not None:
+            field = bisect_right(ends, start)
+            prefix_end = start + (3 if style == BYLINE_STYLE else len(line.rstrip()))
+            if field == len(fields) or fields[field].start >= prefix_end:
+                wanted[index] = (start, style)
+        start += len(line) + 1
+    if not wanted:
+        return {}
+
+    source = original.text.split('\n')
+    styles = dict(original_styles)
+    protected = set()
+    start = 0
+    for index, line in enumerate(source):
+        style = examination_style(line)
+        if style and styles.get(start) != style:
+            protected.add(index)
+        start += len(line) + 1
+    if protected:
+        for old, new, count in SequenceMatcher(None, source, lines).get_matching_blocks():
+            for index in range(old, old + count):
+                if index in protected:
+                    wanted.pop(new + index - old, None)
+    return dict(wanted.values())
+
+
+def with_byline_symbols(elements, styles):
+    """Give each examiner prefix its native symbol, keeping existing fields and controls."""
+    if not styles:
+        return elements
+    ends = [e.end for e in elements]
+    added = []
+    for start, style in styles.items():
+        if style != BYLINE_STYLE:
+            continue
+        index = bisect_right(ends, start)
+        if index == len(elements) or elements[index].start >= start + 3:
+            added.append(NativeElement(start, start + 3, 'symbol', BYLINE_RAW, 'By-line'))
+    return tuple(sorted((*elements, *added), key=lambda e: (e.start, e.end))) if added else elements
+
+
 def field_name(raw):
     if raw[:2] != b'\x15\x07':
         return None
     if len(raw) < 11 or raw[-1] != 0:
         raise ValueError('Invalid native field record.')
     return raw[10:-1].decode('cp1252')
+
+
+def validate_exported_elements(expected, restored):
+    """Check record identity after reimport, including lookalike literal text."""
+    def references(elements, kind):
+        return {(e.start, e.end, e.raw) for e in elements if e.kind == kind and e.start < e.end}
+
+    # The writer can infer extra paragraph symbols from edited indentation.
+    # Zero-width layout controls have no corresponding editable text range.
+    if (references(expected, 'field') != references(restored, 'field')
+            or not references(expected, 'symbol') <= references(restored, 'symbol')):
+        raise ValueError('Export validation found a changed native field or paragraph symbol.')
 
 
 def speaker_number(name):
@@ -80,17 +157,20 @@ def edited_elements(elements, text, start, end, content, preserve=None):
 
 
 def paragraph_symbols(text, elements):
-    result = [e for e in elements if e.kind != 'symbol' or e.start == 0 or text[e.start - 1] == '\n']
+    result = [e for e in elements if e.kind != 'symbol' or (
+        (e.start == 0 or text[e.start - 1] == '\n')
+        and not (e.name == 'Colloquy' and QA_SYMBOL.match(text, e.start)))]
     if '     Q    ' not in text and '     A    ' not in text:
         return tuple(result)
+    added = []
     i = 0
     for match in QA_SYMBOL.finditer(text):
-        while i < len(elements) and elements[i].end <= match.start():
+        while i < len(result) and result[i].end <= match.start():
             i += 1
-        if i == len(elements) or elements[i].start >= match.end():
-            result.append(NativeElement(match.start(), match.end(), 'symbol',
-                                        '160200' if match[0][5] == 'Q' else '160300'))
-    return tuple(sorted(result, key=lambda element: (element.start, element.end)))
+        if i == len(result) or result[i].start >= match.end():
+            added.append(NativeElement(match.start(), match.end(), 'symbol',
+                                       '160200' if match[0][5] == 'Q' else '160300'))
+    return tuple(sorted((*result, *added), key=lambda element: (element.start, element.end)))
 
 
 def validate_elements(revision, baseline):
@@ -116,7 +196,7 @@ def validate_elements(revision, baseline):
                     and (element.start == 0 or text[element.start-1] == '\n')):
                 label = ''
             if element.name == 'By-line':
-                allowed = ('160500425920', '160500110602000000425920')
+                allowed = ('160500425920', BYLINE_RAW)
                 if element.raw in allowed or (source and element.raw == source.raw):
                     label = 'BY '
             if label is None or text[element.start:element.end] != label:

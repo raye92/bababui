@@ -9,7 +9,7 @@ import wave
 
 from .anchors import Revision
 from .codec import matches_steno_note, records, u32
-from .structure import group_targets
+from .structure import native_group_targets
 from .timing import AudioMap, raw_recording_events, recording_events
 
 
@@ -119,7 +119,7 @@ def retime_export(bundle, job, native, metadata, alignment):
         targets = job.baseline
         if job.revision != job.baseline:
             targets = Revision(tuple(replace(span, content=text) for span, text in
-                                     zip(job.baseline.spans, group_targets(job))))
+                                     zip(job.baseline.spans, native_group_targets(job))))
         times = alignment.export_strokes(targets)
         clocks = _recording_clocks(events, times, original.duration_ms)
         native, notes = _rewrite_strokes(native, job.notes_bytes, clocks)

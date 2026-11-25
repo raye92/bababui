@@ -8,7 +8,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
-from itertools import accumulate, chain
+from itertools import accumulate, chain, pairwise
 from pathlib import PureWindowsPath
 import re
 import struct
@@ -19,7 +19,7 @@ from app.src.suggestion_filter import LABEL
 
 from .codec import records, u32, validate_job
 from .layout import read_layouts, read_deltas
-from .elements import CENTER_JUSTIFY
+from .elements import CENTERED_STYLE, CENTER_JUSTIFY
 from .rendering import TextRenderer, render_record
 from .caption import caption_display, caption_value, cover_end
 
@@ -136,6 +136,36 @@ def group_targets(job):
     return result
 
 
+def native_group_targets(job):
+    """Place each indivisible native element at one physical stroke."""
+    targets = group_targets(job)
+    text = job.text
+    ends = list(accumulate(map(len, targets)))
+    for element in job.export_elements:
+        first = bisect_right(ends, element.start)
+        last = bisect_left(ends, element.end)
+        if first < last:
+            # Native records cannot span strokes. Use the final affected one,
+            # as range replacements do, and leave wording outside the element.
+            ends[first:last] = [element.start] * (last - first)
+    targets = [text[start:end] for start, end in pairwise(chain((0,), ends))]
+
+    # A surviving symbol owns its paragraph break, even if range deletion left
+    # that break anchored to the preceding source group.
+    paragraph_symbols = {e.start for e in job.export_elements
+                         if e.kind == 'symbol' and e.raw.startswith('16')}
+    boundary = 0
+    for index, target in enumerate(targets):
+        owns_break = boundary in paragraph_symbols or target.startswith(('     Q    ', '     A    '))
+        boundary += len(target)
+        if index and target and owns_break:
+            previous = next((i for i in range(index-1, -1, -1) if targets[i]), None)
+            if previous is not None and targets[previous].endswith('\n'):
+                targets[previous] = targets[previous][:-1]
+                targets[index] = '\n' + targets[index]
+    return targets
+
+
 def encode_text(text, *, paragraph_start=False, atoms=None):
     """Encode editable wording and supported paragraph starts in Windows-1252."""
     if any(ord(c) < 32 and c not in '\n\t' for c in text):
@@ -143,8 +173,7 @@ def encode_text(text, *, paragraph_start=False, atoms=None):
     result = bytearray()
     atoms = atoms or {}
     if atoms and text:
-        # A paragraph atom owns its break. Expose that boundary to the style
-        # encoder so it can also recognize a heading immediately before it.
+        # Each native paragraph symbol owns its break in the encoded stream.
         text = ''.join('\n' + char if atoms.get(char, b'').startswith(b'\x16') else char
                        for char in text)
     # Prefixes are logical paragraph labels, never generated page/line numbers.
@@ -153,8 +182,6 @@ def encode_text(text, *, paragraph_start=False, atoms=None):
         # 16 08 00. Whole-document pagination also depends on other controls;
         # neither record alone resolves that remaining compatibility gap.
         style, body = 255, paragraph
-        if (index or paragraph_start) and re.fullmatch(r'(?:FURTHER )?EXAMINATION', paragraph):
-            style = 7  # Native Centered Paragraph Style, not padding spaces.
         if paragraph_start and index == 1 and not text.split('\n', 1)[0]:
             style = 8
         for prefix, value in (('     Q    ', 2), ('     A    ', 3)):
@@ -483,9 +510,9 @@ def _rewritten_tokens(job, groups, targets, elements, element_starts):
     # Match native elements by identity, not by the letters displayed inside
     # them. A field value edit must never turn its reference into literal text.
     original_elements = {e.source: e for e in job.baseline.elements}
-    current_elements = {e.source: e for e in job.revision.elements if e.source is not None}
+    current_elements = {e.source: e for e in elements if e.source is not None}
     markers, atoms = {}, {}
-    for element in (*job.baseline.elements, *job.revision.elements):
+    for element in (*job.baseline.elements, *elements):
         if element.name == 'Center Justify' and element.kind == 'symbol':
             continue
         key = element.source if element.source is not None else element
@@ -546,20 +573,7 @@ def _opening_paragraph_edits(edits, text):
 def _write_revision(job, bundle, legacy_joins):
     text = job.text
     groups = source_groups(job.with_revision(job.baseline), bundle)
-    targets = group_targets(job)
-    # A surviving symbol owns its paragraph break, even if range deletion left
-    # that break anchored to the preceding source group.
-    paragraph_symbols = {e.start for e in job.revision.elements
-                         if e.kind == 'symbol' and bytes.fromhex(e.raw).startswith(b'\x16')}
-    boundary = 0
-    for index, target in enumerate(targets):
-        owns_break = boundary in paragraph_symbols or target.startswith(('     Q    ', '     A    '))
-        boundary += len(target)
-        if index and target and owns_break:
-            previous = next((i for i in range(index-1, -1, -1) if targets[i]), None)
-            if previous is not None and targets[previous].endswith('\n'):
-                targets[previous] = targets[previous][:-1]
-                targets[index] = '\n' + targets[index]
+    targets = native_group_targets(job)
     stream, positions = bytearray(), []
     start = u32(job.native_bytes, 532)
     speakers, all_caps = rendering_settings(job, bundle)
@@ -571,7 +585,7 @@ def _write_revision(job, bundle, legacy_joins):
     speakers.update({name: caption_display(caption_value(name, value)) if wrapped else value for name, value in values.items()
                      if value != baseline_values.get(name)})
     centers = {e.start for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'}
-    elements = tuple(e for e in job.revision.elements if not (e.kind == 'symbol' and e.name == 'Center Justify'))
+    elements = tuple(e for e in job.export_elements if not (e.kind == 'symbol' and e.name == 'Center Justify'))
     element_starts = [element.start for element in elements]
     layouts = read_layouts(job.native_bytes)
     colloquy_indents = (_colloquy_indents(text, elements, element_starts)
@@ -580,6 +594,8 @@ def _write_revision(job, bundle, legacy_joins):
     renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
     retained_gaps = _retained_join_gaps(job.baseline, groups, targets, legacy_joins)
     centered = 0 in centers
+    examination_styles = job.examination_styles
+    use_style_geometry = False
     edits = _rewritten_tokens(job, groups, targets, elements, element_starts)
     for token, generated, retained in _opening_paragraph_edits(edits, text):
         if renderer.cover_tables and token.offset >= end_cover:
@@ -587,8 +603,23 @@ def _write_revision(job, bundle, legacy_joins):
         encoded = bytearray()
         rewritten = generated + retained
         for record_start, raw in records(rewritten, 0, len(rewritten)):
-            if centered and raw[:2] == b'\x15\x03':
-                payload = b''.join(bytes([kind]) + value for kind, value in read_deltas(raw[6:]) if kind != 12)
+            # A heading can span strokes or diff fragments. Set the style at
+            # the complete paragraph's position without moving any wording.
+            if raw[0] == 0x16:
+                wanted = examination_styles.get(visible + int(renderer.has_content))
+                use_style_geometry = wanted is not None and (record_start < len(generated)
+                                                              or int.from_bytes(raw[1:], 'little') != wanted)
+                if wanted == CENTERED_STYLE:
+                    raw = b'\x16\x07\x00'
+            elif not renderer.has_content and examination_styles.get(0) == CENTERED_STYLE and raw[0] >= 32:
+                encoded += b'\x16\x07\x00'
+                renderer.paragraph(CENTERED_STYLE)
+                use_style_geometry = True
+            if (centered or use_style_geometry) and raw[:2] == b'\x15\x03':
+                # A newly assigned style supplies its own indent and alignment.
+                overridden = (10, 12) if use_style_geometry else (12,)
+                payload = b''.join(bytes([kind]) + value for kind, value in read_deltas(raw[6:])
+                                   if kind not in overridden)
                 if not payload:
                     continue
                 raw = raw[:2] + struct.pack('<I', len(payload)) + payload

@@ -182,10 +182,7 @@ def _presentation(job, groups):
         position = 0
         for paragraph in text.split('\n'):
             style = styles.get(position)
-            if re.fullmatch(r'(?:FURTHER )?EXAMINATION', paragraph) and len(definitions) >= 7:
-                current = definitions[6]
-                styles[position] = current
-            elif isinstance(style, ParagraphStyle):
+            if isinstance(style, ParagraphStyle):
                 current = style
             else:
                 qa = QA_PREFIX.match(paragraph)

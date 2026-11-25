@@ -235,6 +235,10 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False, alignment
         if (restored.text != job.text or restored.notes_bytes != notes
                 or restored.audio_member != names.get(job.audio_member, job.audio_member)):
             raise ValueError('Export validation found changed text, steno, or audio association.')
+        from .elements import validate_exported_elements
+        validate_exported_elements(job.export_elements, restored.revision.elements)
+        if not job.examination_styles.items() <= dict(restored.paragraph_styles).items():
+            raise ValueError('Export validation found a changed examination paragraph style.')
         if expected_stroke_ms is not None:
             from .retiming import AudioExportError
             from .timing import AudioMap

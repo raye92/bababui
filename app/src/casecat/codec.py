@@ -1,11 +1,12 @@
 """Native transcript reader with immutable steno, audio and source assets."""
 from dataclasses import dataclass, replace
+from functools import cached_property
 import struct
 import xml.etree.ElementTree as ET
 
 from .anchors import AnchoredSpan, Revision
 from .rendering import TextRenderer, render_record
-from .elements import NativeElement, field_name
+from .elements import NativeElement, examination_paragraphs, field_name, with_byline_symbols
 from .caption import CAPTION_NAMES, cover_end, is_cell
 
 
@@ -68,6 +69,7 @@ class NativeJob:
     # One effective playback clock per embedded stroke occurrence. Reused
     # records keep their source bytes but inherit the preceding passage clock.
     stroke_clocks: tuple[int, ...]
+    paragraph_styles: tuple[tuple[int, int], ...]
 
     @property
     def text(self):
@@ -75,6 +77,17 @@ class NativeJob:
 
     def with_revision(self, revision):
         return replace(self, revision=revision)
+
+    @cached_property
+    def examination_styles(self):
+        if self.revision == self.baseline:
+            return {}
+        return examination_paragraphs(self.revision, self.baseline, self.paragraph_styles)
+
+    @cached_property
+    def export_elements(self):
+        # Previously saved edits may contain only the displayed "BY " prefix.
+        return with_byline_symbols(self.revision.elements, self.examination_styles)
 
 
 def load_job(bundle, key):
@@ -109,6 +122,7 @@ def load_job(bundle, key):
             raise ValueError('Invalid job metadata XML.') from exc
     spans, refs, content, audio, formatting = [], (), [], [], []
     elements, position, content_length, byline = [], 0, 0, None
+    paragraph_styles = []
     stroke = 0
     differing_clock_offset = None
     original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
@@ -200,6 +214,9 @@ def load_job(bundle, key):
             renderer.control(raw)
         after = before + (len(content[-1]) if len(content) > part_count else 0)
         content_length = after
+        if op == 0x16:
+            paragraph_start = position + before + int(content[-1].startswith('\n'))
+            paragraph_styles.append((paragraph_start, int.from_bytes(raw[1:], 'little')))
         if op == 0x15 and raw[1] == 7:
             elements.append(NativeElement(position + before, position + after, 'field',
                                           raw.hex(), field_name(raw), offset, value,
@@ -232,7 +249,7 @@ def load_job(bundle, key):
     if audio_member is None:
         warnings.append(NO_WAV_NOTICE)
     return NativeJob(key, bundle.digest, native, notes, audio_member, revision, revision,
-                     tuple(warnings), tuple(stroke_clocks))
+                     tuple(warnings), tuple(stroke_clocks), tuple(paragraph_styles))
 
 
 def validate_job(bundle, job):

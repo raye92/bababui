@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 import re
 from unicodedata import category
 from app.src import advanced_diff
-from app.src.casecat.elements import QA_SYMBOL
+from app.src.casecat.elements import QA_SYMBOL, examination_paragraphs, examination_style, with_byline_symbols
 
 GROUPING_VERSION = 2
 
@@ -246,6 +246,8 @@ def propose(original, text, *, normalize_continuations=None, labels=None):
     for _, a, b, c, d in _paragraph_ops(aa, bb):
         if b-a == d-c:
             for i, j in zip(range(a, b), range(c, d)):
+                if not new[j].strip() or examination_style(new[j]):
+                    continue
                 if j in continuations:
                     sources[j] = i
                     continue
@@ -267,7 +269,10 @@ def propose(original, text, *, normalize_continuations=None, labels=None):
     text = '\n'.join(new)
     raw = text_edits(original.text, text, labels=labels)
     revision = original.revise(text, edits=raw)
-    return normalize_continuations(revision, continuations) if continuations else revision
+    if continuations:
+        revision = normalize_continuations(revision, continuations)
+    elements = with_byline_symbols(revision.elements, examination_paragraphs(revision, original))
+    return replace(revision, elements=elements) if elements is not revision.elements else revision
 
 
 def _token_edits(a, b, start, end, ns, ne):

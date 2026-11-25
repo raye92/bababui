@@ -5,6 +5,7 @@ import re
 from types import SimpleNamespace
 
 from app.src.casecat.anchors import Revision
+from app.src.casecat.elements import BYLINE_STYLE, CENTERED_STYLE, examination_style
 
 
 def split_revision(revision, start):
@@ -121,6 +122,24 @@ def response_body(prefix, text):
     return speaker + text[cut:].lstrip('\r\n') if cut else text
 
 
+def _format_examinations(text):
+    """Put the numbered blank line in the proposal before speaker offsets are recorded."""
+    lines = []
+    for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        stripped = line.lstrip(' \t')
+        style = examination_style(stripped)
+        if style:
+            line = stripped
+        if style == BYLINE_STYLE:
+            last = len(lines)
+            while last and not lines[last - 1].strip():
+                last -= 1
+            if last and examination_style(lines[last - 1]) == CENTERED_STYLE:
+                lines[last:] = ['']
+        lines.append(line)
+    return '\n'.join(lines)
+
+
 def begin_body_review(state, text, bundle, job, *, head=None, exclude_off_record=True):
     from app.src.casecat.presentation import apply_continuation_layout
     from app.src.suggestion_filter import begin_review, index_speaker_fields
@@ -130,7 +149,7 @@ def begin_body_review(state, text, bundle, job, *, head=None, exclude_off_record
         offset = len(head.text) if head is not None else 0
         return apply_continuation_layout(job.with_revision(full), bundle, revision, offset, candidates)
 
-    return begin_review(state, text, exclude_off_record=exclude_off_record,
+    return begin_review(state, _format_examinations(text), exclude_off_record=exclude_off_record,
                         index_fields=index_speaker_fields(head) if head is not None else None,
                         normalize_continuations=normalize_continuations if job and bundle else None)
 
