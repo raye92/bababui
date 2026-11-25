@@ -972,6 +972,10 @@ class DocumentView(QWidget):
         self.schedule_restore(anchor)
         self.changed.emit()
 
+    def receive_transcription(self, warnings, alignment):
+        self.document.status = 'Raw transcription saved.'
+        self._finish_receive(warnings, alignment)
+
     def receive(self, text, warnings, alignment=None):
         self.capture_position()
         try:
@@ -998,12 +1002,14 @@ class DocumentView(QWidget):
         self._review_redo.clear()
         state.original, state.incoming, state.review = result.after_rules
         before_original, before_incoming, _ = result.before_rules
+        self.document.status = 'Automated review complete.'
         self._record_automatic_review(result.off_record_undo, before_original, before_incoming,
                                       state.review['automatic_changes'])
         state.original, state.incoming, state.review = result.after_ai
         if result.after_ai[:2] != result.after_rules[:2]:
             self._review_undo.append(result.after_rules)
-        self.document.status = f'AI-assisted review. {result.summary}'
+        if result.summary:
+            self.document.status = f'AI-assisted review. {result.summary}'
         self._finish_receive(warnings, alignment)
 
     def _finish_receive(self, warnings, alignment):

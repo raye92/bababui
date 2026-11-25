@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace as NS
 from app.tests.audio_responses import raw_interactions
 
@@ -192,6 +193,69 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
     assert len(requests) == 1
     assert requests[0]['generation_config']['transcription_config']['mode'] == {
         'type': 'verbatim', 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}
+
+
+def test_clean_rerun_discards_only_this_recordings_caches(tmp_path, monkeypatch):
+    import json
+    from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, media, save_json
+
+    cache, legacy = tmp_path / 'cache', tmp_path / 'transcriptions'
+    wav, other = tmp_path / 'hearing.wav', tmp_path / 'other.wav'
+    wav.write_bytes(b'first recording')
+    other.write_bytes(b'second recording')
+    calls = []
+    monkeypatch.setattr(media, 'probe', lambda _: 10)
+    monkeypatch.setattr(media, 'prepare', lambda *args: None)
+
+    class Pipeline(AudioPipeline):
+        def transcribe_segment(self, path, progress, *, vocabulary=(), segment=None):
+            calls.append(vocabulary)
+            return [Word('Testimony', 'a', 0, 1)]
+
+    pipeline = Pipeline('fake', cache, legacy_cache=legacy)
+    for recording, name in ((wav, 'Jones'), (wav, 'Lee'), (other, 'Jones')):
+        pipeline.run(recording, vocabulary=(name,))
+    digest = hashlib.sha256(wav.read_bytes()).hexdigest()
+    base = Path(AUDIO_MODEL) / 'overlap-v1' / digest
+    save_json(cache / base / 'word-timing' / 'old.json', [])
+    save_json(legacy / base / 'chunk-0.json', [])
+    old_key = hashlib.sha256(json.dumps((digest, ('Jones',))).encode()).hexdigest()
+    old_window = legacy / AUDIO_MODEL / 'vocabulary-v1' / old_key / 'window-1.json'
+    save_json(old_window, [])
+    exported = legacy / 'Hearing' / 'Hearing.txt'
+    exported.parent.mkdir()
+    exported.write_text('Saved transcript')
+    calls.clear()
+
+    Pipeline('fake', cache, legacy_cache=legacy, cache_mode='clean').run(wav, vocabulary=('Jones',))
+    assert calls == [(), ('Jones',)]
+    assert not (cache / base / 'word-timing' / 'old.json').exists()
+    assert not (legacy / base / 'chunk-0.json').exists()
+    assert not old_window.exists()
+    lee_key = hashlib.sha256(json.dumps((digest, ('Lee',))).encode()).hexdigest()
+    assert not (cache / AUDIO_MODEL / 'vocabulary-v1' / lee_key).exists()
+    assert exported.read_text() == 'Saved transcript'
+    calls.clear()
+    pipeline.run(other, vocabulary=('Jones',))
+    pipeline.run(wav, vocabulary=('Lee',))
+    assert calls == [('Lee',)]
+
+
+def test_formatter_can_read_legacy_chunks_without_transcribing_missing_audio(tmp_path, monkeypatch):
+    from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, media, save_json
+
+    wav = tmp_path / 'hearing.wav'
+    wav.write_bytes(b'audio')
+    digest = hashlib.sha256(wav.read_bytes()).hexdigest()
+    legacy = tmp_path / 'transcriptions'
+    pipeline = AudioPipeline('', tmp_path / 'cache', legacy_cache=legacy, cache_mode='saved')
+    monkeypatch.setattr(media, 'probe', lambda _: 10)
+    monkeypatch.setattr(media, 'prepare', lambda *args: pytest.fail('Tried to transcribe missing audio'))
+    with pytest.raises(ValueError, match='Select Transcription'):
+        pipeline.run(wav)
+    words = [{'text': 'Saved speech.', 'speaker': 'a', 'start': 0, 'end': 1}]
+    save_json(legacy / AUDIO_MODEL / 'overlap-v1' / digest / 'chunk-0.json', words)
+    assert pipeline.run(wav).text == 'Speaker 1: Saved speech.'
 
 
 def test_completed_text_without_annotations_is_kept_for_timing_recovery():

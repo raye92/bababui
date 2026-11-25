@@ -1,5 +1,6 @@
 """WAV transcription and timestamp-aware, best-effort speaker stitching."""
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 import hashlib
@@ -8,6 +9,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import time
 
@@ -16,7 +18,7 @@ from app.src.transcription_output import OutputError, SegmentOutput
 from app.src.vocabulary_reconciliation import normalized_vocabulary, reconcile_vocabulary
 from shared import media
 from shared.transcription import GeminiTranscriber
-from shared.storage import atomic_copy, file_lock
+from shared.storage import atomic_bytes, atomic_copy, file_lock
 
 
 AUDIO_MODEL = 'gemini-3.5-transcribe'
@@ -119,10 +121,14 @@ def parse_words(response, *, timestamps=True, partial=False):
     return words
 
 
-def check_wav_digest(path, digest):
+def wav_sha256(path):
     with path.open('rb') as stream:
-        if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
-            raise ValueError('The WAV changed during transcription. Run BABABUI again.')
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def check_wav_digest(path, digest, message='The WAV changed during transcription. Run BABABUI again.'):
+    if wav_sha256(path) != digest:
+        raise ValueError(message)
 
 
 def render(words):
@@ -323,12 +329,13 @@ def save_json(path, data):
 
 
 class AudioPipeline:
-    def __init__(self, key, cache, sdk=None, *, output=None, legacy_cache=None):
+    def __init__(self, key, cache, sdk=None, *, output=None, legacy_cache=None, cache_mode='reuse'):
         # Interactions retries 429 internally even with attempts=1 unless it is excluded.
         self.client = GeminiTranscriber(key, sdk, retry_options={
             'attempts': 1, 'http_status_codes': [408, 409, 500, 502, 503, 504]})
         self.cache = Path(cache)
-        self.legacy_cache = legacy_cache
+        self.legacy_cache = Path(legacy_cache) if legacy_cache else None
+        self.cache_mode = cache_mode
         self.output = output
 
     def _upload(self, path):
@@ -433,24 +440,88 @@ class AudioPipeline:
             words = parse_words(response, partial=True)
         return status == 'completed', _shift_words(_bounded_words(words, duration - start), start)
 
-    def run(self, path, progress=lambda message: None, *, vocabulary=()):
+    def run(self, path, progress=lambda message: None, *, vocabulary=(), expected_digest=None):
         path = Path(path)
         if not path.is_file() or path.suffix.lower() != '.wav':
             raise ValueError('Choose an existing .wav file.')
-        with path.open('rb') as stream:
-            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        digest = wav_sha256(path)
+        if expected_digest is not None and expected_digest != digest:
+            raise ValueError('The WAV changed before processing. Run BABABUI again.')
         progress('Validating WAV...')
         duration = media.probe(path)
         plan = segments(duration)
-        directory = self.cache / AUDIO_MODEL / 'overlap-v1' / digest
+        directory = self._recording_directory(digest)
+        vocabulary = normalized_vocabulary(vocabulary)
         with file_lock(directory / 'cache.lock'):
-            return self._run_locked(path, plan, directory, progress, digest, normalized_vocabulary(vocabulary))
+            if self.cache_mode == 'clean':
+                progress('Clearing cached files for this recording...')
+                self._clear_recording_cache(directory, vocabulary)
+            return self._run_locked(path, plan, directory, progress, digest, vocabulary)
+
+    def _recording_directory(self, digest):
+        return self.cache / AUDIO_MODEL / 'overlap-v1' / digest
+
+    @staticmethod
+    def _vocabulary_key(digest, vocabulary):
+        return hashlib.sha256(json.dumps((digest, vocabulary), ensure_ascii=False).encode('utf-8')).hexdigest()
+
+    def _clear_vocabulary_cache(self, key):
+        for root in (self.cache, self.legacy_cache):
+            if root is not None:
+                directory = root / AUDIO_MODEL / 'vocabulary-v1' / key
+                if directory.exists():
+                    self._remove_cache_path(root, directory)
+
+    @staticmethod
+    def _vocabulary_keys(directory):
+        path = directory / 'vocabulary-keys.txt'
+        if not path.exists():
+            return set()
+        keys = set(path.read_text(encoding='ascii').splitlines())
+        if any(not re.fullmatch('[0-9a-f]{64}', key) for key in keys):
+            raise ValueError('Invalid vocabulary cache index for this recording.')
+        return keys
+
+    @staticmethod
+    def _remove_cache_path(root, path):
+        # Only remove entries under the intended cache, including on Windows junctions.
+        relative = path.relative_to(root)
+        if path.resolve() != root.resolve() / relative:
+            raise ValueError('The recording cache points outside its expected directory.')
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+
+    def _clear_recording_cache(self, directory, vocabulary):
+        relative = directory.relative_to(self.cache)
+        old = self.legacy_cache / relative if self.legacy_cache else None
+        roots = [self.cache]
+        legacy_lock = nullcontext()
+        if old and old.is_dir() and old.resolve() != directory.resolve():
+            roots.append(self.legacy_cache)
+            legacy_lock = file_lock(old / 'cache.lock')
+        with legacy_lock:
+            keys = {self._vocabulary_key(directory.name, vocabulary)} if vocabulary else set()
+            for root in roots:
+                keys.update(self._vocabulary_keys(root / relative))
+            for key in keys:
+                self._clear_vocabulary_cache(key)
+            # Older vocabulary directories have opaque keys and no recording ID.
+            # Discard any unindexed variant when its names next identify it.
+            (directory / 'clean-start').touch()
+            for root in roots:
+                for entry in (root / relative).iterdir():
+                    if entry.name not in ('cache.lock', 'clean-start'):
+                        self._remove_cache_path(root, entry)
 
     def _segment_words(self, path, start, end, cached, progress, digest, *, label, timing_only=False, vocabulary=(),
                        continuation_reviews=None):
         review = _OverlapReview()
         review_path = cached.with_name('review-' + cached.name)
-        if self.legacy_cache and not cached.exists():
+        reuse = self.cache_mode in ('reuse', 'saved')
+        if (reuse and self.legacy_cache and not cached.exists()
+                and not (self._recording_directory(digest) / 'clean-start').exists()):
             old = self.legacy_cache / cached.relative_to(self.cache)
             if old.is_file():
                 for sidecar in (old.with_name(review_path.name), old.with_suffix('.responses')):
@@ -458,12 +529,16 @@ class AudioPipeline:
                         atomic_copy(sidecar, cached.with_name(sidecar.name))
                 atomic_copy(old, cached)
         segment = SegmentOutput(self.output, label)
-        cache_hit = cached.exists()
+        cache_hit = reuse and cached.exists()
         if cache_hit:
             segment.restore_responses(cached)
             words = [Word(**w) for w in json.loads(cached.read_text(encoding='utf-8'))]
             if continuation_reviews is not None and review_path.exists():
                 review = _OverlapReview(**json.loads(review_path.read_text(encoding='utf-8')))
+        elif self.cache_mode == 'saved':
+            if timing_only:
+                return None
+            raise ValueError('No saved transcription is available for this recording. Select Transcription to create one.')
         else:
             with tempfile.TemporaryDirectory(prefix='bababui-audio-') as temporary:
                 prepared = Path(temporary) / 'segment.wav'
@@ -485,7 +560,12 @@ class AudioPipeline:
                         review = words.review
             check_wav_digest(path, digest)
         words = _bounded_words(words, end - start)
-        if not cache_hit and (not timing_only or any(w.start is not None for w in words)):
+        usable = not timing_only or any(w.start is not None for w in words)
+        if not cache_hit and usable:
+            # The word list marks a complete entry. A refresh must not leave
+            # old words paired with new sidecars if publishing is interrupted.
+            if self.cache_mode == 'refresh':
+                cached.unlink(missing_ok=True)
             if continuation_reviews is not None:
                 # Publish review information before the word list marks this chunk complete.
                 if review.unmatched or review.cut is not None:
@@ -494,7 +574,7 @@ class AudioPipeline:
                     review_path.unlink(missing_ok=True)
             segment.cache_responses(cached)
             save_json(cached, [asdict(w) for w in words])
-        if self.output and cached.exists():
+        if self.output and (cache_hit or usable):
             self.output.copy(f' - {label}.json', cached)
         if continuation_reviews is not None:
             continuation_reviews.append(review)
@@ -514,7 +594,14 @@ class AudioPipeline:
         return recover_word_times(words, observations)
 
     def _vocabulary_windows(self, path, duration, progress, digest, vocabulary):
-        key = hashlib.sha256(json.dumps((digest, vocabulary), ensure_ascii=False).encode('utf-8')).hexdigest()
+        key = self._vocabulary_key(digest, vocabulary)
+        recording = self._recording_directory(digest)
+        keys = self._vocabulary_keys(recording)
+        if key not in keys:
+            if (recording / 'clean-start').exists():
+                self._clear_vocabulary_cache(key)
+            keys.add(key)
+            atomic_bytes(recording / 'vocabulary-keys.txt', '\n'.join(sorted(keys)).encode('ascii'))
         directory = self.cache / AUDIO_MODEL / 'vocabulary-v1' / key
         plan = segments(duration, vocabulary=True)
         windows, warnings = [], []

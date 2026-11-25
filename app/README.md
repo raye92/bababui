@@ -34,7 +34,7 @@ a folder named after the imported ZIP under `app/data/transcriptions/`. For
 reply is saved as JSON, with its chunk, continuation, fallback, retry, timing
 clip, or vocabulary window identified in the filename.
 
-Each run gets a separate folder. Repeated names get ` (2)`, ` (3)`, and so on.
+Each transcription run gets a separate folder. Repeated names get ` (2)`, ` (3)`, and so on.
 The tab status shows the folder path. Cached runs copy the available files.
 The combined transcript is saved before formatting, so it is available if the
 editing model fails. BABABUI then formats the transcription and writes the
@@ -46,6 +46,17 @@ header. Other tabs can edit and process concurrently. Simultaneous requests
 for identical audio share transcription, then format independently. Background
 results and warnings stay in their own tabs. Wait for a tab to finish before
 closing it, and for all requests to finish before exiting.
+
+Press **BABABUI** again to open the rerun menu. **Clean fresh rerun** is selected
+by default. It clears the recording's cached files and runs all three steps.
+**Choose steps** lets you select the steps to rerun. **Cancel** closes the menu.
+[View the rerun menu](screenshots/rerun-menu.png)
+
+- **Transcription** transcribes the WAV again and saves a new raw transcript.
+- **Formatting** turns the new or previously saved raw transcript into Incoming
+  and always runs automated review on the new result.
+- **Automated review** applies the enabled edit rules to Incoming and uses the
+  AI review model when enabled in Settings.
 
 WAVs can be up to 1 hour 57 minutes long. Speaker labels and word timing use up
 to four 30-minute chunks starting at minutes 0, 29, 58, and 87. With confirmed
@@ -172,7 +183,9 @@ five seconds by default. Change the skip interval under Hotkeys.
 - `data/save-locks/`: locks protecting document saves across app instances.
 - `data/transcriptions/` holds named transcription runs.
 - `data/transcription-cache/` holds reusable word annotations and Gemini responses keyed by WAV content and model.
-  Retrying formatting reuses completed transcription chunks. Gemini automatically
+  A clean rerun clears speaker chunks, timing clips, responses and vocabulary
+  entries for the recording. Older vocabulary entries with unindexed names are
+  discarded when those names are next used. Gemini automatically
   deletes uploaded audio after 48 hours. Local caches contain transcript data
   and can be deleted when unused.
 

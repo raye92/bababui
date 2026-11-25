@@ -77,6 +77,34 @@ def test_changed_waiting_tab_does_not_receive_or_upload_a_different_recording(tm
     assert paths == [first_wav]
 
 
+def test_fresh_transcription_waits_and_runs_again_after_an_identical_request(tmp_path):
+    wav = tmp_path / 'hearing.wav'
+    wav.write_bytes(b'audio')
+    digest = sha256(wav.read_bytes()).hexdigest()
+    entered, release, waiting = Event(), Event(), Event()
+    calls = []
+
+    class Pipeline:
+        def run(self, path, progress, *, expected_digest=None):
+            calls.append(expected_digest)
+            entered.set()
+            assert release.wait(5)
+            return Transcription(str(len(calls)), (), (), 1000, digest)
+
+    coordinator = TranscriptionCoordinator()
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(coordinator.run, wav, 'model', Pipeline(), lambda _: None)
+        assert entered.wait(5)
+        fresh = pool.submit(coordinator.run, wav, 'model', Pipeline(), lambda _: waiting.set(), fresh=True)
+        try:
+            assert waiting.wait(5)
+            assert calls == [None]
+        finally:
+            release.set()
+        assert first.result().text == '1' and fresh.result().text == '2'
+    assert calls == [None, digest]
+
+
 def test_real_threads_route_results_and_failures_with_frozen_requests(tmp_path):
     import os
     import time
@@ -192,6 +220,68 @@ def test_worker_leaves_page_layout_to_casecat(tmp_path):
     assert warnings == ['Transcription warning']
     assert incoming == output
     assert alignment is None
+
+
+@pytest.mark.parametrize('transcribe,format_text,review', [
+    (True, False, False), (False, True, False), (False, False, True),
+    (True, True, False), (True, False, True), (False, True, True), (True, True, True),
+])
+def test_selected_stages_use_their_own_inputs(tmp_path, transcribe, format_text, review):
+    from app.src import jobs
+    from app.tests.test_ai_review import revision
+
+    wav = tmp_path / 'source.wav'
+    wav.write_bytes(b'speech')
+    digest = sha256(wav.read_bytes()).hexdigest()
+    calls, saved, graded, plain, errors = [], [], [], [], []
+
+    class Pipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, path, progress, **kwargs):
+            calls.append('transcribe')
+            return Transcription('New raw speech', (), (), 1000, digest)
+
+    class Processor:
+        def __init__(self, _, model):
+            self.model = model
+
+        def check_ready(self):
+            assert format_text
+
+        def complete(self, text, prompt):
+            calls.append(self.model)
+            if self.model == 'formatter':
+                assert text == ('New raw speech' if transcribe else 'Saved raw speech')
+                return 'I saw a tan car.'
+            import json
+            assert json.loads(text)[0]['proposed_word'] == ('tan' if format_text else 'red')
+            return '{"1":"accept"}'
+
+    steps = jobs.RunSteps(transcribe, format_text, review, 'refresh' if transcribe else 'reuse')
+    expected_review = format_text or review
+    assert steps.review == expected_review
+    worker = jobs.ProcessingWorker(jobs.Request(
+        'doc', str(wav), 'formatter', 'transcriber', 'Format' if format_text else '', {},
+        original=revision('I saw a blue car.'), review_model='reviewer', steps=steps,
+        raw_transcript='Saved raw speech', raw_wav_sha256=digest,
+        incoming=revision('I saw a red car.') if review and not format_text else None),
+        TranscriptionCoordinator(), Pipeline, Processor)
+    worker.transcribed.connect(lambda *args: saved.append(args))
+    worker.succeeded.connect(lambda *args: plain.append(args))
+    worker.reviewed.connect(lambda *args: graded.append(args))
+    worker.failed.connect(lambda *args: errors.append(args))
+    worker.run()
+    assert not errors
+    assert calls == [name for name, enabled in (
+        ('transcribe', transcribe), ('formatter', format_text), ('reviewer', expected_review)) if enabled]
+    assert saved == ([('doc', 'New raw speech', digest)] if transcribe else [])
+    assert bool(worker.output) == transcribe
+    if expected_review:
+        assert graded[0][1].after_ai[0].text == ('I saw a tan car.' if format_text else 'I saw a red car.')
+    else:
+        assert len(plain) == 1
 
 
 @pytest.mark.parametrize('recording', ['timed original', 'untimed original', 'untimed attachment', 'no timestamps'])

@@ -7,6 +7,7 @@ from pathlib import Path
 import uuid
 
 from app.src.processing import DEFAULT_MODEL
+from app.src.speech_alignment import SHA256
 from shared.storage import atomic_bytes, file_lock
 from app.src.casecat import archive, codec, project
 
@@ -28,6 +29,9 @@ class Document:
     view: int = 0
     center_line: int = 0
     native: project.NativeState | None = None
+    processing_started: bool = False
+    raw_transcript: str = ''
+    raw_wav_sha256: str = ''
 
     @property
     def original(self):
@@ -46,6 +50,8 @@ class Document:
         return Document(wav_path=self.wav_path, audio_override=self.audio_override, dirty=bool(self.native),
                         model=self.model, transcription_model=self.transcription_model,
                         view=self.view, center_line=self.center_line, warnings=list(self.warnings),
+                        processing_started=self.processing_started, raw_transcript=self.raw_transcript,
+                        raw_wav_sha256=self.raw_wav_sha256,
                         native=self.native.duplicate() if self.native else None)
 
     def update_warnings(self, warnings=()):
@@ -98,6 +104,10 @@ def _restore_document(raw, native=None):
         if not isinstance(raw, dict) or 'native' in raw:
             raise ValueError('Invalid document metadata.')
         raw = dict(raw)
+        if 'processing_started' not in raw:
+            # Existing projects predate explicit run history.
+            raw['processing_started'] = bool(raw.get('busy') or native and (native.review or native.alignment)
+                                             or 'Output folder: ' in str(raw.get('status', '')))
         for side in ('original', 'incoming'):
             if side in raw:
                 text = raw.pop(side)
@@ -108,7 +118,10 @@ def _restore_document(raw, native=None):
                     (doc.id, doc.original, doc.incoming, doc.model, doc.transcription_model, doc.status))
                 or type(doc.view) is not int or doc.view not in (0, 1)
                 or type(doc.center_line) is not int or doc.center_line < 0
-                or any(type(value) is not bool for value in (doc.busy, doc.dirty))
+                or any(type(value) is not bool for value in (doc.busy, doc.dirty, doc.processing_started))
+                or not isinstance(doc.raw_transcript, str) or not isinstance(doc.raw_wav_sha256, str)
+                or bool(doc.raw_transcript) != bool(doc.raw_wav_sha256)
+                or (doc.raw_wav_sha256 and not SHA256.fullmatch(doc.raw_wav_sha256))
                 or not isinstance(doc.warnings, list) or any(not isinstance(w, str) for w in doc.warnings)
                 or any(p is not None and (not isinstance(p, str) or '\0' in p) for p in (doc.save_path, doc.wav_path, doc.audio_override))):
             raise ValueError('Invalid document metadata.')

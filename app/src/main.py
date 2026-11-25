@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QToolBar, QMessageBox,
     QFileDialog, QSizePolicy, QLabel, QInputDialog)
 from app.src.processing import MODELS, DEFAULT_MODEL, PROMPT_FILE, APP_DIR, load_config
 from app.src.ai_review import DEFAULT_REVIEW_MODEL
-from app.src.audio_pipeline import AUDIO_MODEL
+from app.src.audio_pipeline import AUDIO_MODEL, wav_sha256
 from app.src.documents import (Document, canonical, save_document, open_document,
     suggested_path, save_session, load_session_state, import_casecat)
 from app.src.casecat.archive import inspect_archive
@@ -29,7 +29,8 @@ from app.src.playback import DEFAULT_FORWARD_SECONDS
 from app.src.settings_page import SettingsPage
 from app.src.smart_keys import SmartKeyProfile
 from app.src.tab_bar import AudioTabBar, NewTabButton, EditorTabs
-from app.src.jobs import JobManager, Request
+from app.src.jobs import JobManager, Request, RunSteps
+from app.src.rerun_dialog import RerunDialog
 from app.src.notice_dialog import NoticeWizard, read_notice
 from app.src.notice_model import NoticeDetails
 
@@ -56,6 +57,8 @@ class TranscriptEditor(QMainWindow):
         self._recovery_executor = self._recovery_future = None
         self.recovery_finished.connect(self._recovery_done, Qt.QueuedConnection)
         self.jobs = jobs if jobs is not None else JobManager(self)
+        self._run_steps = {}
+        self.jobs.transcribed.connect(self._transcribed)
         self.jobs.succeeded.connect(self._succeeded)
         self.jobs.reviewed.connect(self._reviewed)
         self.jobs.failed.connect(self._failed)
@@ -191,7 +194,6 @@ class TranscriptEditor(QMainWindow):
         self.button_sound = QMediaPlayer(self)
         self.button_sound.setAudioOutput(QAudioOutput(self.button_sound))
         self.button_sound.setSource(QUrl.fromLocalFile(str(APP_DIR / 'assets' / 'BABABUI.mp3')))
-        self.bababui_btn.clicked.connect(self._play_button_sound)
         self.bababui_btn.clicked.connect(self.run_bababui)
         row.addWidget(self.bababui_btn)
         self.progress = QProgressBar()
@@ -650,15 +652,26 @@ class TranscriptEditor(QMainWindow):
         path = Path(path).resolve()
         if not path.is_file() or path.suffix.lower() != '.wav':
             return
-        view.document.audio_override = view.document.wav_path = str(path)
-        view.document.update_warnings(view.document.warnings)
+        doc = view.document
+        same_recording = doc.wav_path and canonical(path) == canonical(doc.wav_path)
+        if doc.raw_wav_sha256:
+            try:
+                same_recording = wav_sha256(path) == doc.raw_wav_sha256
+            except OSError as exc:
+                self.show_status(str(exc))
+                return
+        if not same_recording:
+            doc.processing_started = False
+            doc.raw_transcript = doc.raw_wav_sha256 = ''
+        doc.audio_override = doc.wav_path = str(path)
+        doc.update_warnings(doc.warnings)
         if view.playback:
             view.playback.stop()
             view.layout().removeWidget(view.playback)
             view.playback.deleteLater()
             view.playback = None
         view.setup_playback(view.layout())
-        view.document.status = 'WAV attached. Click BABABUI to process.'
+        doc.status = 'WAV attached. Click BABABUI to process.'
         view.edited()
         self.tabs.setCurrentWidget(view)
 
@@ -755,24 +768,41 @@ class TranscriptEditor(QMainWindow):
             doc.status = 'Import a CaseCAT ZIP with audio or attach a WAV to an imported job.'
             self.document_changed(view)
             return
+        steps = RunSteps()
+        if doc.processing_started:
+            recording = doc.audio_override or doc.native.job.audio_member or doc.wav_path
+            steps = RerunDialog.choose(self, Path(recording).name)
+            if steps is None:
+                return
         try:
+            existing_incoming = doc.native.incoming if steps.review and not steps.format else None
             request = Request(doc.id, doc.wav_path, doc.model, doc.transcription_model,
-                              PROMPT_FILE.read_text(encoding='utf-8'), dict(load_config()),
+                              PROMPT_FILE.read_text(encoding='utf-8') if steps.format else '', dict(load_config()),
                               original=doc.native.original,
                               review_model=(self.settings_page.ai_review_model.currentData()
-                                            if self.settings_page.ai_review_enabled.isChecked() else None),
+                                            if steps.review and self.settings_page.ai_review_enabled.isChecked() else None),
                               disabled_rules=frozenset(self.disabled_auto_accept_rules),
                               bundle=doc.native.bundle, job=doc.native.job,
+                              steps=steps, raw_transcript=doc.raw_transcript, raw_wav_sha256=doc.raw_wav_sha256,
+                              incoming=existing_incoming,
+                              incoming_body_start=doc.native.body_position(existing_incoming) if existing_incoming else 0,
                               body_start=doc.native.body_position(doc.native.original),
                               vocabulary=(doc.native.notice.details.with_current_names(doc.native.original).vocabulary()
                                           if doc.native.notice else ()))
             view.set_busy(True)
+            self._run_steps[doc.id] = steps
+            doc.processing_started = True
+            if steps.audio_cache == 'clean':
+                doc.raw_transcript = doc.raw_wav_sha256 = ''
             doc.status = 'Starting...'
-            doc.update_warnings()
+            if steps.transcribe:
+                doc.update_warnings()
             self.document_changed(view)
             self.persist_session()
             self.jobs.start(request)
+            self._play_button_sound()
         except (OSError, ValueError) as exc:
+            self._run_steps.pop(doc.id, None)
             view.set_busy(False)
             self._failed(doc.id, str(exc))
 
@@ -782,14 +812,29 @@ class TranscriptEditor(QMainWindow):
             view.document.status = message
             self.document_changed(view)
 
+    def _transcribed(self, identifier, text, digest):
+        view = self.find_view(identifier)
+        if view:
+            view.document.raw_transcript = text
+            view.document.raw_wav_sha256 = digest
+            view.edited()
+
     def _succeeded(self, identifier, text, warnings, alignment):
         view = self.find_view(identifier)
         if view:
-            view.receive(text, warnings, alignment)
+            steps = self._run_steps.get(identifier, RunSteps())
+            if steps.format or steps.review:
+                if not steps.transcribe:
+                    warnings = [*view.document.warnings, *warnings]
+                view.receive(text, warnings, alignment)
+            else:
+                view.receive_transcription(warnings, alignment)
 
     def _reviewed(self, identifier, result, warnings, alignment):
         view = self.find_view(identifier)
         if view:
+            if not self._run_steps.get(identifier, RunSteps()).transcribe:
+                warnings = [*view.document.warnings, *warnings]
             view.receive_reviewed(result, warnings, alignment)
 
     def _failed(self, identifier, message):
@@ -804,6 +849,7 @@ class TranscriptEditor(QMainWindow):
             view.document.status += f' Output folder: {folder}'
 
     def _completed(self, identifier):
+        self._run_steps.pop(identifier, None)
         view = self.find_view(identifier)
         if view:
             view.set_busy(False)

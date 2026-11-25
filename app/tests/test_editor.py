@@ -67,6 +67,159 @@ def test_bababui_button_plays_bundled_sound(window, tmp_path, monkeypatch):
     assert len(requests) == 1
 
 
+def test_repeat_button_confirms_before_start_and_remembers_the_recording(window, tmp_path, monkeypatch):
+    from hashlib import sha256
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QCheckBox, QRadioButton
+    from app.src.documents import load_session
+
+    wav = tmp_path / 'hearing.wav'
+    wav.write_bytes(b'audio')
+    window.attach_wav(0, wav)
+    requests = []
+    monkeypatch.setattr(window.jobs, 'start', requests.append)
+    window.bababui_btn.click()
+    doc = window.current.document
+    window.jobs.completed.emit(doc.id)
+    before = (doc.status, list(doc.warnings), doc.original, doc.incoming, doc.dirty)
+    observed = []
+
+    def respond(action):
+        def choose():
+            dialog = QApplication.activeModalWidget()
+            if dialog is None:
+                return
+            radios = dialog.findChildren(QRadioButton)
+            checks = dialog.findChildren(QCheckBox)
+            run = next(b for b in dialog.findChildren(QPushButton) if b.isDefault())
+            observed.append((radios[0].isChecked(), [check.text() for check in checks]))
+            if action == 'cancel':
+                QTest.keyClick(dialog, Qt.Key_Escape)
+            elif action == 'custom':
+                radios[1].click()
+                for check in checks:
+                    check.setChecked(False)
+                observed.append(run.isEnabled())
+                checks[1].click()
+                observed.append((checks[2].isChecked(), checks[2].isEnabled()))
+                checks[2].click()
+                run.click()
+            else:
+                QTest.keyClick(dialog, Qt.Key_Return)
+        QTimer.singleShot(0, choose)
+        window.bababui_btn.click()
+        QApplication.processEvents()
+
+    respond('cancel')
+    assert len(requests) == 1 and not doc.busy
+    assert (doc.status, doc.warnings, doc.original, doc.incoming, doc.dirty) == before
+    assert observed == [(True, ['Transcription', 'Formatting', 'Automated review'])]
+    respond('clean')
+    steps = requests[-1].steps
+    assert steps.transcribe and steps.format and steps.review and steps.audio_cache == 'clean'
+    window.jobs.completed.emit(doc.id)
+    respond('custom')
+    steps = requests[-1].steps
+    assert not steps.transcribe and steps.format and steps.review
+    assert observed[-2:] == [False, (True, False)]
+    window.jobs.completed.emit(doc.id)
+    assert load_session(window.session_path)[0][0].processing_started
+    assert doc.duplicate().processing_started
+    window.jobs.transcribed.emit(doc.id, 'Saved speech', sha256(wav.read_bytes()).hexdigest())
+    copy = tmp_path / 'hearing-copy.wav'
+    copy.write_bytes(wav.read_bytes())
+    window.attach_wav(0, copy)
+    assert doc.processing_started and doc.raw_transcript == 'Saved speech'
+    other = tmp_path / 'new.wav'
+    other.write_bytes(b'new audio')
+    window.attach_wav(0, other)
+    window.bababui_btn.click()
+    assert len(requests) == 4 and requests[-1].steps.audio_cache == 'reuse'
+
+
+@pytest.mark.parametrize('ai_enabled', [False, True])
+def test_review_only_preserves_pending_native_fields(window, tmp_path, monkeypatch, ai_enabled):
+    from app.src.jobs import RunSteps
+
+    wav = tmp_path / 'hearing.wav'
+    wav.write_bytes(b'audio')
+    window.attach_wav(0, wav)
+    doc = window.current.document
+    original = doc.native.original
+    proposed = original.define_field('WITNESS', 'MS. WITNESS')
+    doc.set_text('incoming', proposed.text, revision=proposed)
+    doc.processing_started = True
+    window.settings_page.ai_review_enabled.setChecked(ai_enabled)
+    monkeypatch.setattr(main.RerunDialog, 'choose', lambda *_: RunSteps(False, False, True))
+    window.run_bababui()
+    deadline = monotonic() + 5
+    while doc.busy and monotonic() < deadline:
+        QTest.qWait(5)
+    assert not doc.busy
+    assert doc.native.original == original and doc.native.incoming == proposed
+    assert window.current.diff_view.changes[0].kind == 'metadata'
+
+
+def test_raw_transcript_survives_a_formatting_failure_and_project_reopen(window, tmp_path, monkeypatch):
+    from hashlib import sha256
+    from app.src.audio_pipeline import Transcription
+    from app.src.documents import save_document
+    from app.src.jobs import ProcessingWorker, RunSteps
+
+    wav = tmp_path / 'hearing.wav'
+    wav.write_bytes(b'audio')
+    window.attach_wav(0, wav)
+    window.current.editor.setPlainText('Formatted speech?')
+    window.settings_page.ai_review_enabled.setChecked(False)
+    calls = []
+
+    class Pipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, path, progress):
+            calls.append('transcribe')
+            return Transcription('Saved raw speech', (), (), 1000, sha256(path.read_bytes()).hexdigest())
+
+    class Processor:
+        def __init__(self, *args):
+            pass
+
+        def check_ready(self):
+            pass
+
+        def complete(self, text, prompt):
+            calls.append(text)
+            if len(calls) == 2:
+                raise ValueError('Formatting failed')
+            return 'Formatted speech.'
+
+    window.jobs.worker_factory = lambda request, coordinator: ProcessingWorker(request, coordinator, Pipeline, Processor)
+
+    def run():
+        doc = window.current.document
+        window.run_bababui()
+        deadline = monotonic() + 5
+        while doc.busy and monotonic() < deadline:
+            QTest.qWait(5)
+        assert not doc.busy
+        return doc
+
+    first = run()
+    assert 'Formatting failed' in first.status
+    assert first.raw_transcript == 'Saved raw speech'
+    target = tmp_path / 'hearing.bababui'
+    save_document(first, target)
+    window.close_tab(window.tabs.currentIndex())
+    window.open_file(target)
+    restored = window.current
+    assert restored.document.processing_started
+    monkeypatch.setattr(main.RerunDialog, 'choose', lambda *_: RunSteps(False, True, False))
+    finished = run()
+    assert finished.original == finished.incoming == 'Formatted speech.'
+    assert calls == ['transcribe', 'Saved raw speech', 'Saved raw speech']
+
+
 def test_toolbar_tabs_shortcuts_and_dirty_dot(window):
     assert not window.toolbar.isMovable() and not window.toolbar.isFloatable()
     assert window.tabs.count() == 1 and window.current.document.dirty
