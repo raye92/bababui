@@ -109,7 +109,8 @@ def test_note_is_a_barrier_to_inferred_turn_conversions():
     assert_replay(left, right, edits)
 
 
-def test_long_proposal_computes_character_edits_in_anchored_passages(monkeypatch):
+@pytest.mark.parametrize('stage', ['proposal', 'review'])
+def test_long_transcript_compares_character_edits_in_passages(monkeypatch, stage):
     from app.src import advanced_diff
     from app.src.suggestions import text_edits
     old = '\n'.join(f'MS. DAY:  Did you inspect loading bay {i} before the shipment arrived?' for i in range(320))
@@ -119,8 +120,12 @@ def test_long_proposal_computes_character_edits_in_anchored_passages(monkeypatch
         assert max(len(a), len(b)) < len(old), 'The full character comparison exceeds the interactive diff budget'
         return inner(a, b)
     monkeypatch.setattr(advanced_diff, 'text_edits', bounded)
-    ranges = text_edits(old, new)
-    for a, b, c, d in reversed(ranges):
+    if stage == 'review':
+        ranges = build_review(revision(old), revision(new)).ranges
+    else:
+        ranges = text_edits(old, new)
+    assert any(old[a:b] == 'before' and new[c:d] == 'after' for a, b, c, d in ranges)
+    for a, b, c, d in sorted(ranges, reverse=True):
         old = old[:a] + new[c:d] + old[b:]
     assert old == new
 

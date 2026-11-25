@@ -602,7 +602,8 @@ def _expanded_text_edits(original, incoming, left_start, left_end, right_start, 
 
 
 def _initial_edits(original, incoming):
-    from app.src.suggestion_filter import speaker_replacements
+    from app.src.spoken_edits import passage_edits
+    from app.src.suggestion_filter import LABEL, speaker_replacements
     speakers = tuple(speaker_replacements(original, incoming))
     # Diff the text between speaker decisions so even a completely rewritten
     # answer can be accepted independently of its attribution.
@@ -610,8 +611,8 @@ def _initial_edits(original, incoming):
     raw = []
     previous_a = previous_c = 0
     for start, end, ns, ne in (*speakers, (len(a), len(a), len(b), len(b))):
-        raw.extend((x+previous_a, y+previous_a, z+previous_c, w+previous_c) for x,y,z,w in
-                   _inner_edits(a[previous_a:start], b[previous_c:ns]))
+        edits = passage_edits(a[previous_a:start], b[previous_c:ns], LABEL, _inner_edits)
+        raw.extend((x+previous_a, y+previous_a, z+previous_c, w+previous_c) for x, y, z, w in edits)
         if (start, end, ns, ne) in speakers:
             raw.append((start, end, ns, ne))
         previous_a, previous_c = end, ne
