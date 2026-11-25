@@ -128,6 +128,38 @@ def test_accept_all_export_uses_colloquy_indent_for_new_speaker_turns(tmp_path):
     assert paragraph_styles == [5, 2, 3, 4, 4, 4, 255]
 
 
+@pytest.mark.parametrize('source_style, prefix, replace_all, opening_styles', [
+    (1, 'EXAMINATION\n', False, [7, 255]),
+    (255, 'EXAMINATION\n', True, [7, 255]),
+    (255, '     Q    ', True, [2]),
+    (1, 'Opening. ', True, [1]),
+    (1, '\n', False, [1, 8]),
+], ids=['heading', 'heading-after-empty-strokes', 'question', 'plain-text', 'leading-blank'])
+def test_export_preserves_the_first_paragraph(tmp_path, source_style, prefix, replace_all, opening_styles):
+    opening = struct.pack('<BH', 0x16, source_style).decode('cp1252')
+    files = container_files((opening + 'BY COUNSEL: ', '\x0e\x0b', '12:30.'))
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    if replace_all:
+        # Saved whole-transcript edits can leave the first source strokes empty.
+        revision = job.revision.replace(0, len(job.text), prefix + job.text)
+    else:
+        revision = job.revision.replace(0, 0, prefix)
+    target = tmp_path / 'opening.zip'
+
+    export_zip(bundle, job.with_revision(revision), target)
+
+    restored = load_job(inspect_archive(target), job.key)
+    assert restored.text == prefix + 'BY COUNSEL: 12:30.'
+    stream = native_stream(restored)
+    styles = [int.from_bytes(raw[1:], 'little')
+              for _, raw in records(stream, 0, len(stream)) if raw[0] == 0x16]
+    assert styles == opening_styles
+    assert restored.stroke_clocks == job.stroke_clocks
+    assert restored.notes_bytes == job.notes_bytes
+    assert b'\x0e\x0b' in stream
+
+
 def test_export_moves_boundary_to_retained_byline_control(tmp_path):
     byline = b'\x16\x05\x00\x11\x06\x02\x00\x00\x00BY COUNSEL:'
     bundle = inspect_archive(zip_bytes(container_files(('Before. ', byline.decode('cp1252')))))

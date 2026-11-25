@@ -8,7 +8,7 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
-from itertools import accumulate
+from itertools import accumulate, chain
 from pathlib import PureWindowsPath
 import re
 import struct
@@ -473,6 +473,65 @@ def _retained_join_gaps(baseline, groups, targets, legacy_joins):
     return retained
 
 
+def _rewritten_tokens(job, groups, targets, elements, element_starts):
+    # Match native elements by identity, not by the letters displayed inside
+    # them. A field value edit must never turn its reference into literal text.
+    original_elements = {e.source: e for e in job.baseline.elements}
+    current_elements = {e.source: e for e in job.revision.elements if e.source is not None}
+    markers, atoms = {}, {}
+    for element in (*job.baseline.elements, *job.revision.elements):
+        if element.name == 'Center Justify' and element.kind == 'symbol':
+            continue
+        key = element.source if element.source is not None else element
+        if key not in markers:
+            markers[key] = chr(0xf0000 + len(markers))
+        atoms[markers[key]] = bytes.fromhex(element.raw)
+    cursor = 0
+    for group, target in zip(groups, targets):
+        stop = cursor + len(target)
+        first = bisect_left(element_starts, cursor)
+        last = bisect_left(element_starts, stop) if stop > cursor else bisect_right(element_starts, cursor)
+        for element in reversed(elements[first:last]):
+            if element.end <= stop:
+                key = element.source if element.source is not None else element
+                target = target[:element.start-cursor] + markers[key] + target[element.end-cursor:]
+        masked = []
+        for token in group:
+            element = original_elements.get(token.offset)
+            # Older saved revisions represent a colloquy indent as five
+            # ordinary spaces. Match that projection so its source paragraph
+            # survives a later edit elsewhere in the job.
+            if element and element.name == 'Colloquy' and token.offset not in current_elements:
+                element = None
+            if element:
+                updated = current_elements.get(token.offset, element)
+                prefix = '\n' if element.kind == 'symbol' and token.text.startswith('\n') else ''
+                token = replace(token, text=prefix + markers[element.source], raw=bytes.fromhex(updated.raw))
+            masked.append(token)
+        yield from rewrite_group(masked, target, paragraph_start=cursor == 0, atoms=atoms)
+        cursor = stop
+
+
+def _opening_paragraph_edits(edits, text):
+    """Let an explicit first paragraph replace the source's invisible opening style."""
+    if not text or text.startswith('\n'):
+        return edits
+    prefix = []
+    opening = None
+    for edit in edits:
+        token, generated, retained = edit
+        prefix.append(edit)
+        if generated or (retained and token.text):
+            if opening is not None and (generated or retained).startswith(b'\x16'):
+                # Keep the source position for relocation, including when the
+                # new paragraph follows one or more emptied stroke groups.
+                prefix[opening] = (prefix[opening][0], b'', b'')
+            break
+        if retained.startswith(b'\x16'):
+            opening = len(prefix) - 1
+    return chain(prefix, edits)
+
+
 def _write_revision(job, bundle, legacy_joins):
     text = job.text
     groups = source_groups(job.with_revision(job.baseline), bundle)
@@ -500,19 +559,6 @@ def _write_revision(job, bundle, legacy_joins):
     wrapped = bool(end_cover)
     speakers.update({name: caption_display(caption_value(name, value)) if wrapped else value for name, value in values.items()
                      if value != baseline_values.get(name)})
-    # Match native elements by identity, not by the letters displayed inside
-    # them. A field value edit must never turn its reference into literal text.
-    original_elements = {e.source: e for e in job.baseline.elements}
-    current_elements = {e.source: e for e in job.revision.elements if e.source is not None}
-    markers, atoms = {}, {}
-    for element in (*job.baseline.elements, *job.revision.elements):
-        if element.name == 'Center Justify' and element.kind == 'symbol':
-            continue
-        key = element.source if element.source is not None else element
-        if key not in markers:
-            markers[key] = chr(0xf0000 + len(markers))
-        atoms[markers[key]] = bytes.fromhex(element.raw)
-    cursor = 0
     centers = {e.start for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'}
     elements = tuple(e for e in job.revision.elements if not (e.kind == 'symbol' and e.name == 'Center Justify'))
     element_starts = [element.start for element in elements]
@@ -523,86 +569,66 @@ def _write_revision(job, bundle, legacy_joins):
     renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
     retained_gaps = _retained_join_gaps(job.baseline, groups, targets, legacy_joins)
     centered = 0 in centers
-    for group, target in zip(groups, targets):
-        stop = cursor + len(target)
-        first = bisect_left(element_starts, cursor)
-        last = bisect_left(element_starts, stop) if stop > cursor else bisect_right(element_starts, cursor)
-        for element in reversed(elements[first:last]):
-            if element.end <= stop:
-                key = element.source if element.source is not None else element
-                target = target[:element.start-cursor] + markers[key] + target[element.end-cursor:]
-        masked = []
-        for token in group:
-            element = original_elements.get(token.offset)
-            # Older saved revisions represent a colloquy indent as five
-            # ordinary spaces. Match that projection so its source paragraph
-            # survives a later edit elsewhere in the job.
-            if element and element.name == 'Colloquy' and token.offset not in current_elements:
-                element = None
-            if element:
-                updated = current_elements.get(token.offset, element)
-                prefix = '\n' if element.kind == 'symbol' and token.text.startswith('\n') else ''
-                token = replace(token, text=prefix + markers[element.source], raw=bytes.fromhex(updated.raw))
-            masked.append(token)
-        cursor = stop
-        for token, generated, retained in rewrite_group(masked, target, paragraph_start=visible == 0, atoms=atoms):
-            if renderer.cover_tables and token.offset >= end_cover:
-                renderer.cover_tables = False
-            encoded = bytearray()
-            rewritten = generated + retained
-            for record_start, raw in records(rewritten, 0, len(rewritten)):
-                if centered and raw[:2] == b'\x15\x03':
-                    payload = b''.join(bytes([kind]) + value for kind, value in read_deltas(raw[6:]) if kind != 12)
-                    if not payload:
-                        continue
-                    raw = raw[:2] + struct.pack('<I', len(payload)) + payload
-                if raw == token.raw == b'\x04':
-                    # A dictionary join survives edits to unrelated text. It
-                    # must not consume a space at a new word boundary.
-                    gap = _word_gap(text, visible)
-                    if gap and gap != retained_gaps.get(token.offset):
-                        continue
-                if (raw[0] == 0x16 and int.from_bytes(raw[1:], 'little') not in (8, 255)
-                        and not renderer.has_content and text.startswith('\n', visible)):
-                    encoded += b'\x16\xff\x00'
-                    renderer.paragraph(255)
-                rendered = render_record(renderer, raw, speakers)
-                paragraph = raw[0] == 0x16
-                paragraph_start = visible + int(rendered.startswith('\n'))
-                if paragraph:
-                    centered = paragraph_start in centers
-                if rendered and visible == 0 and 0 in centers and (not paragraph or rendered.startswith('\n')):
-                    encoded += CENTER_JUSTIFY
-                    centers.remove(0)
-                if rendered and not text.startswith(rendered, visible) and raw[0] >= 32:
-                    literal = raw.decode('cp1252')
-                    marker = None
-                    if literal.islower() and not all_caps:
-                        if text.startswith(literal, visible):
-                            marker = b'\x12\x8e'
-                        elif text.startswith(literal.upper(), visible):
-                            marker = b'\x12\x0e'
-                    if marker:
-                        encoded += marker
-                        # The marker resets case and punctuation. Rendering the
-                        # literal again reproduces the final character state.
-                        renderer.control(marker)
-                        rendered = render_record(renderer, raw, speakers)
-                if not text.startswith(rendered, visible):
-                    raise ValueError(f'Native rendering cannot preserve the edit at character {visible}.')
-                visible += len(rendered)
-                if raw == b'\x16\xff\x00' and record_start < len(generated) and visible in colloquy_indents:
-                    # The native colloquy style supplies the indent. Consume the
-                    # logical padding even when it is split across stroke groups.
-                    encoded += b'\x16\x04\x00'
-                    indent_end = colloquy_indents[visible]
-                elif visible > indent_end or raw not in (b' ', b'\x01'):
-                    encoded += raw
-                if paragraph and centered:
-                    encoded += CENTER_JUSTIFY
-                    centers.remove(paragraph_start)
-            positions.append((token.offset - start, len(stream), len(token.raw), len(encoded)))
-            stream += encoded
+    edits = _rewritten_tokens(job, groups, targets, elements, element_starts)
+    for token, generated, retained in _opening_paragraph_edits(edits, text):
+        if renderer.cover_tables and token.offset >= end_cover:
+            renderer.cover_tables = False
+        encoded = bytearray()
+        rewritten = generated + retained
+        for record_start, raw in records(rewritten, 0, len(rewritten)):
+            if centered and raw[:2] == b'\x15\x03':
+                payload = b''.join(bytes([kind]) + value for kind, value in read_deltas(raw[6:]) if kind != 12)
+                if not payload:
+                    continue
+                raw = raw[:2] + struct.pack('<I', len(payload)) + payload
+            if raw == token.raw == b'\x04':
+                # A dictionary join survives edits to unrelated text. It
+                # must not consume a space at a new word boundary.
+                gap = _word_gap(text, visible)
+                if gap and gap != retained_gaps.get(token.offset):
+                    continue
+            if (raw[0] == 0x16 and (generated or token.text)
+                    and int.from_bytes(raw[1:], 'little') not in (8, 255)
+                    and not renderer.has_content and text.startswith('\n', visible)):
+                encoded += b'\x16\xff\x00'
+                renderer.paragraph(255)
+            rendered = render_record(renderer, raw, speakers)
+            paragraph = raw[0] == 0x16
+            paragraph_start = visible + int(rendered.startswith('\n'))
+            if paragraph:
+                centered = paragraph_start in centers
+            if rendered and visible == 0 and 0 in centers and (not paragraph or rendered.startswith('\n')):
+                encoded += CENTER_JUSTIFY
+                centers.remove(0)
+            if rendered and not text.startswith(rendered, visible) and raw[0] >= 32:
+                literal = raw.decode('cp1252')
+                marker = None
+                if literal.islower() and not all_caps:
+                    if text.startswith(literal, visible):
+                        marker = b'\x12\x8e'
+                    elif text.startswith(literal.upper(), visible):
+                        marker = b'\x12\x0e'
+                if marker:
+                    encoded += marker
+                    # The marker resets case and punctuation. Rendering the
+                    # literal again reproduces the final character state.
+                    renderer.control(marker)
+                    rendered = render_record(renderer, raw, speakers)
+            if not text.startswith(rendered, visible):
+                raise ValueError(f'Native rendering cannot preserve the edit at character {visible}.')
+            visible += len(rendered)
+            if raw == b'\x16\xff\x00' and record_start < len(generated) and visible in colloquy_indents:
+                # The native colloquy style supplies the indent. Consume the
+                # logical padding even when it is split across stroke groups.
+                encoded += b'\x16\x04\x00'
+                indent_end = colloquy_indents[visible]
+            elif visible > indent_end or raw not in (b' ', b'\x01'):
+                encoded += raw
+            if paragraph and centered:
+                encoded += CENTER_JUSTIFY
+                centers.remove(paragraph_start)
+        positions.append((token.offset - start, len(stream), len(token.raw), len(encoded)))
+        stream += encoded
     if visible != len(text):
         raise ValueError('Native serialization lost displayed content.')
     stream = repair_history(bytes(stream))
