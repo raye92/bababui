@@ -208,7 +208,7 @@ def load_session_state(path):
         for raw in record['documents']:
             native_record = raw.pop('native', None)
             native = project.recover_state(path, native_record, bundles) if native_record else None
-            doc = _restore_document(raw, native)
+            doc = _restore_document(project.without_legacy_text(raw, native_record), native)
             if native:
                 wav = archive.materialize_audio(native.bundle, native.job, NATIVE_ASSET_DIR)
                 doc.wav_path = doc.audio_override or (str(wav) if wav else None)

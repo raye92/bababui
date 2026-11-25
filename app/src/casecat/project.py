@@ -178,7 +178,8 @@ class NativeState:
                 'job': self.job.key, 'source_sha256': self.bundle.digest,
                 'source_name': self.bundle.name, 'source_path': self.bundle.source_path,
                 'original': self.original.to_dict(), 'incoming': self.incoming.to_dict(),
-                'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None}
+                'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None,
+                'text_projection_version': 2}
 
     @classmethod
     def restore(cls, bundle, record, notice=None):
@@ -195,7 +196,12 @@ class NativeState:
                 bundle = bundle.with_job_bytes(record['job'], notice.native_bytes, notice.xml_bytes)
             state = cls.load(bundle, record['job'])
             state.notice = notice
-            if notice and not 0 <= notice.body_start <= len(state.job.text):
+            version = record.get('text_projection_version', 1)
+            if type(version) is not int or version not in (1, 2):
+                raise ValueError('Unsupported native text projection version.')
+            # Saved ranges use the editor text the reviewer originally saw.
+            saved_job = codec.load_job(bundle, record['job'], legacy_projection=True) if version == 1 else state.job
+            if notice and not 0 <= notice.body_start <= len(saved_job.text):
                 raise ValueError('Invalid saved start of testimony.')
             state.original = Revision.from_dict(record['original'])
             state.incoming = Revision.from_dict(record['incoming'])
@@ -207,20 +213,41 @@ class NativeState:
             for side in ('original', 'incoming'):
                 if 'definitions' not in record[side]:
                     from .fields import field_values
-                    values = dict(state.job.baseline.definitions)
+                    values = dict(saved_job.baseline.definitions)
                     values.update(field_values(getattr(state, side)))
                     setattr(state, side, replace(getattr(state, side), definitions=tuple(sorted(values.items()))))
                 if 'all_caps' not in record[side]:
-                    setattr(state, side, replace(getattr(state, side), all_caps=state.job.baseline.all_caps))
+                    setattr(state, side, replace(getattr(state, side), all_caps=saved_job.baseline.all_caps))
                 if 'elements' not in record[side]:
                     revision = getattr(state, side)
-                    restored = state.job.baseline._replace(0, len(state.job.text), revision.text)
+                    restored = saved_job.baseline._replace(0, len(saved_job.text), revision.text)
                     setattr(state, side, replace(revision, elements=restored.elements))
-            codec.validate_job(bundle, state.job.with_revision(state.original))
-            codec.validate_job(bundle, state.job.with_revision(state.incoming))
+            codec.validate_job(bundle, saved_job.with_revision(state.original))
+            codec.validate_job(bundle, saved_job.with_revision(state.incoming))
             if state.review and 'pending_decisions' in state.review:
                 from app.src.review_editing import restore_decisions
                 restore_decisions(state.original, state.incoming, state.review['pending_decisions'])
+            if version == 1 and saved_job.baseline != state.job.baseline:
+                from .project_tabs import source_tabs, restore_tabs, restore_notice_start, restore_tab_review
+                groups = source_tabs(saved_job, bundle)
+                if groups:
+                    original, original_map = restore_tabs(saved_job, state.original, groups)
+                    incoming, incoming_map = ((original, original_map) if state.original == state.incoming
+                                             else restore_tabs(saved_job, state.incoming, groups))
+                    if state.original == saved_job.baseline and original.text == state.job.text:
+                        original = state.job.baseline
+                    if state.incoming == saved_job.baseline and incoming.text == state.job.text:
+                        incoming = state.job.baseline
+                    state.review = restore_tab_review(state.review, original, incoming, original_map, incoming_map)
+                    state.original, state.incoming = original, incoming
+                    if notice:
+                        body_start = restore_notice_start(saved_job, groups, notice.body_start)
+                        if body_start != notice.body_start:
+                            state.notice = replace(notice, body_start=body_start)
+                    if state.review and 'pending_decisions' in state.review:
+                        restore_decisions(state.original, state.incoming, state.review['pending_decisions'])
+                codec.validate_job(bundle, state.job.with_revision(state.original))
+                codec.validate_job(bundle, state.job.with_revision(state.incoming))
             return state
         except (KeyError, TypeError) as exc:
             raise ValueError('Invalid native working project.') from exc
@@ -238,6 +265,20 @@ def project_bytes(state, document):
     # Verify the exact candidate before the existing working project is replaced.
     read_project(data)
     return data
+
+
+def without_legacy_text(document, native):
+    """Check redundant document text against the saved revision projection."""
+    if (not native or native.get('text_projection_version', 1) != 1 or not isinstance(document, dict)
+            or not {'original', 'incoming'}.intersection(document)):
+        return document
+    document = dict(document)
+    for side in ('original', 'incoming'):
+        if side in document:
+            text = ''.join(span['content'] for span in native[side]['spans'])
+            if document.pop(side) != text:
+                raise ValueError('Legacy text disagrees with the structured revision.')
+    return document
 
 
 def read_project(data):
@@ -264,7 +305,7 @@ def read_project(data):
                     raise ValueError('Saved notice is too large.')
                 notice = AttachedNotice.unpack(project.read('notice.zip'), native['notice_sha256'])
             state = NativeState.restore(bundle, native, notice)
-            return state, record['document']
+            return state, without_legacy_text(record['document'], native)
     except (zipfile.BadZipFile, KeyError, TypeError, UnicodeError, RuntimeError, zlib.error, EOFError) as exc:
         raise ValueError('Invalid native working project.') from exc
 

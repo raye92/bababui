@@ -141,6 +141,47 @@ def test_inserted_paragraph_uses_the_observed_native_enter_control():
     assert paragraphs == [b'\x16\xff\x00']
 
 
+@pytest.mark.parametrize('words, remaining, replacement, expected, styles', [
+    (('Intro.', '\x16\xff\x00Keep.'), '\nKeep.', '', '\nKeep.', [255, 255]),
+    (('Intro.', '\x16\xff\x00Keep.'), '', '\n\n', '\n\n', [255, 255, 255]),
+    (('Intro.\x16\x02\x00Question?\x16\x03\x00Yes.\x16\x04\x00THE COURT: Done.',),
+     'THE COURT:', '\n\n', '\n\nTHE COURT: Done.', [255, 255, 255]),
+    (('Intro.', '\x16\x02\x00Question?', '\x16\x03\x00Yes.', '\x16\x04\x00THE COURT: Done.'),
+     'THE COURT:', '\n', '\nTHE COURT: Done.', [255, 255]),
+], ids=['retained-break', 'only-blank-lines', 'same-stroke', 'adjacent-strokes'])
+def test_export_keeps_blank_lines_at_the_start(words, remaining, replacement, expected, styles, tmp_path):
+    from app.src.casecat.archive import export_zip
+
+    bundle = inspect_archive(zip_bytes(container_files(words)))
+    job = codec.load_job(bundle, bundle.jobs[0])
+    end = job.text.index(remaining) if remaining else len(job.text)
+    revision = job.baseline.replace(0, end, replacement)
+    target = tmp_path / 'opening.zip'
+
+    export_zip(bundle, job.with_revision(revision), target)
+
+    restored = codec.load_job(inspect_archive(target), job.key)
+    assert restored.text == expected
+    assert restored.stroke_clocks == job.stroke_clocks
+    assert restored.notes_bytes == job.notes_bytes
+    start, length = codec.u32(restored.native_bytes, 532), codec.u32(restored.native_bytes, 536)
+    assert restored.native_bytes[start:start + 3] == b'\x16\xff\x00'
+    paragraphs = [int.from_bytes(raw[1:], 'little') for _, raw in
+                  codec.records(restored.native_bytes, start, start + length) if raw[0] == 0x16]
+    assert paragraphs == styles
+
+
+@pytest.mark.parametrize('words, expected', [
+    (('\x16\x08\x00Keep.',), 'Keep.'),
+    (('\x16\xff\x00', '\x16\x08\x00Keep.'), '\nKeep.'),
+], ids=['opening-style', 'native-enter-before-opening-style'])
+def test_import_only_counts_paragraphs_after_the_opening_record(words, expected):
+    bundle = inspect_archive(zip_bytes(container_files(words)))
+    job = codec.load_job(bundle, bundle.jobs[0])
+
+    assert job.text == expected
+
+
 def test_position_index_attached_format_delta_is_relocated():
     files = container_files()
     raw = bytearray(files['jobs/example.sgngl'])

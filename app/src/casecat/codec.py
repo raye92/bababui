@@ -90,7 +90,7 @@ class NativeJob:
         return with_byline_symbols(self.revision.elements, self.examination_styles)
 
 
-def load_job(bundle, key):
+def load_job(bundle, key, *, legacy_projection=False):
     if key not in bundle.jobs:
         raise ValueError('The selected job is not present in this archive.')
     native = bundle.read(bundle.member(key + '.sgngl'))
@@ -128,7 +128,7 @@ def load_job(bundle, key):
     original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
     stroke_clocks = []
     end_cover = cover_end(native)
-    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover))
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=legacy_projection)
     from .field_table import field_texts
     has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
     try:
@@ -179,21 +179,11 @@ def load_job(bundle, key):
                 content.append(renderer.literal(raw.decode('cp1252')))
             except UnicodeDecodeError as exc:
                 raise ValueError(f'Unresolved native character encoding at byte {offset}.') from exc
-        elif op == 1:
-            content.append(renderer.literal(' '))
-            formatting.append(raw.hex())
-        elif op == 2:
-            content.append(renderer.conflict())
-            formatting.append(raw.hex())
-        elif op == 0x16:
-            style = int.from_bytes(raw[1:], 'little')
-            content.append(renderer.paragraph(style))
+        elif op in (1, 2, 9, 0x16) or (renderer.cover_tables and (is_cell(raw) or op == 10)):
+            content.append(render_record(renderer, raw, {}))
             formatting.append(raw.hex())
         elif op == 0x15 and raw[1] == 8:
             audio.append(raw.hex())
-        elif renderer.cover_tables and (is_cell(raw) or op in (9, 10)):
-            content.append(render_record(renderer, raw, {}))
-            formatting.append(raw.hex())
         elif op == 0x15 and raw[1] == 7:
             label = raw[10:].rstrip(b'\0').decode('cp1252')
             if label in definitions:

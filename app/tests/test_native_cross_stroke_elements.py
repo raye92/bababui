@@ -88,6 +88,32 @@ def test_accept_all_export_keeps_a_linked_field_split_across_strokes(tmp_path):
         'Opening MS. OLD.', '\n', 'MS. OLD approved it.', '\nA different sentence.']
 
 
+@pytest.mark.parametrize(('label', 'blank_lines'), [('Q', 1), ('A', 2)])
+def test_accepted_fields_and_manual_edits_share_one_native_export(tmp_path, label, blank_lines):
+    paragraph = b'\x16\xff\x00'
+    files = field_files(words=(
+        b'Omit.', paragraph + b'Keep.', paragraph + b'  ', b'   X', b'    Next.',
+        paragraph + b'Opening ' + FIELD + b'.', paragraph + b'MS. ', b'OLD approved.',
+        paragraph + b'A separate sentence.', paragraph + b'Left. Right.'))
+
+    def edit(revision):
+        revision = _accept_linked_field_replacement(revision)
+        index = revision.text.index('X')
+        revision = revision.replace(index, index + 1, label)
+        revision = revision.replace(0, len('Omit.'), '\n' * (blank_lines - 1))
+        index = revision.text.index(' Right.')
+        return revision.replace(index, index + 1, '\t')
+
+    restored = _roundtrip(tmp_path, files, edit)
+
+    assert restored.text == ('\n' * blank_lines + f'Keep.\n     {label}    Next.\nOpening MS. OLD.'
+                             '\nMS. OLD approved.\nA different sentence.\nLeft.\tRight.')
+    assert [(e.kind, e.raw) for e in restored.revision.elements] == [
+        ('symbol', '160200' if label == 'Q' else '160300'), ('field', FIELD.hex()), ('field', FIELD.hex())]
+    start = u32(restored.native_bytes, 532)
+    assert restored.native_bytes[start:start + 3] == paragraph
+
+
 @pytest.mark.parametrize('kind', ['field', 'question'])
 def test_export_checks_native_elements_even_when_the_words_match(tmp_path, monkeypatch, kind):
     if kind == 'field':

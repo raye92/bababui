@@ -221,6 +221,37 @@ def test_mixed_case_field_baseline_and_rename_roundtrip(tmp_path):
     assert restored.text == revision.text
 
 
+@pytest.mark.parametrize(('prefix', 'case_control'), [
+    ('', b'\x12\x8e'),
+    ('Earlier. ', b'\x12\x8e'),
+    ('before ', b'\x12\x0e'),
+])
+def test_editing_field_context_preserves_linked_value_and_reviewed_case(tmp_path, prefix, case_control):
+    bundle = archive.inspect_archive(zip_bytes(field_files('john doe')))
+    job = codec.load_job(bundle, 'jobs/example')
+    if case_control == b'\x12\x8e':
+        revision = job.revision.replace(0, len('BY '), prefix)
+        expected = prefix + 'john doe:\n     Q    Question?\n     A    Yes.\n     John doe: More.'
+    else:
+        start = job.text.index('     John doe')
+        revision = job.revision.replace(start, start + 5, prefix)
+        expected = 'BY john doe:\n     Q    Question?\n     A    Yes.\nbefore John doe: More.'
+    destination = tmp_path / 'field-context.zip'
+
+    archive.export_zip(bundle, job.with_revision(revision), destination)
+
+    exported = archive.inspect_archive(destination)
+    restored = codec.load_job(exported, job.key)
+    assert restored.text == expected
+    assert [e.value for e in restored.revision.elements if e.kind == 'field'] == ['john doe', 'john doe']
+    assert native_stream(restored).count(FIELD) == 2
+    assert case_control + FIELD in native_stream(restored)
+    assert restored.notes_bytes == job.notes_bytes
+    assert restored.stroke_clocks == job.stroke_clocks
+    assert exported.read(restored.audio_member) == bundle.read(job.audio_member)
+    assert exported.read('jobs/example.sgxml') == bundle.read('jobs/example.sgxml')
+
+
 @pytest.mark.parametrize('edit', ['delete_question', 'leading_blank', 'delete_byline'])
 def test_paragraph_boundary_edits_export_without_extra_or_missing_breaks(tmp_path, edit):
     bundle, job = field_job()

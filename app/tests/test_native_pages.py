@@ -349,7 +349,7 @@ def test_hard_space_is_preserved_for_wrapping_without_changing_plain_text():
 def test_conflict_generated_spaces_do_not_create_native_word_breaks():
     from app.tests.test_native_casecat import job_files, zip_bytes
     app, view = paged_editor()
-    files = job_files(words=('A \x02one two\x02three\x03 end.',))
+    files = job_files(words=('A \x11\x09\x00\x00\x00\x00\x02one two\x02three\x03 end.',))
     bundle = inspect_archive(zip_bytes(files))
     job = load_job(bundle, bundle.jobs[0])
     view.set_native_source(bundle, job)

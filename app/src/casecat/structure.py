@@ -5,6 +5,7 @@ Unsupported structures fail before publication. Playback verification remains
 separate from byte preservation and structural validation.
 """
 from bisect import bisect_left, bisect_right
+from copy import copy
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -20,7 +21,7 @@ from app.src.suggestion_filter import LABEL
 from .codec import records, u32, validate_job
 from .layout import read_layouts, read_deltas
 from .elements import CENTERED_STYLE, CENTER_JUSTIFY
-from .rendering import TextRenderer, render_record
+from .rendering import CONFLICT_STARTS, TextRenderer, render_record
 from .caption import caption_display, caption_value, cover_end
 
 
@@ -46,10 +47,10 @@ def rendering_settings(job, bundle):
     return speakers, all_caps
 
 
-def projected_groups(job, bundle):
+def projected_groups(job, bundle, *, legacy_projection=False):
     speakers, all_caps = rendering_settings(job, bundle)
     end_cover = cover_end(job.native_bytes)
-    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover))
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=legacy_projection)
     start, length = u32(job.native_bytes, 532), u32(job.native_bytes, 536)
     groups, group = [], []
     for offset, raw in records(job.native_bytes, start, start + length):
@@ -506,6 +507,41 @@ def _retained_join_gaps(baseline, groups, targets, legacy_joins):
     return retained
 
 
+def _mask_conflict_separators(tokens, target, atoms):
+    """Match a separator by its caret, independently of its generated spaces."""
+    if not any(token.raw == b'\x02' and token.text for token in tokens):
+        return tokens, target
+    original = ''.join(token.text for token in tokens)
+    if original == target:
+        return tokens, target
+    matches = iter(group_matches(original, target))
+    match = next(matches, None)
+    parts, cursor, end = [], 0, 0
+    for index, token in enumerate(tokens):
+        cursor += len(token.text)
+        if token.raw != b'\x02' or not token.text:
+            continue
+        caret = cursor - len(token.text) + token.text.index('^')
+        while match and match[0] + match[2] <= caret:
+            match = next(matches, None)
+        if match is None:
+            break
+        old, new, _ = match
+        if caret < old:
+            continue
+        caret += new - old
+        start = caret
+        if token.text.startswith(' ') and caret > end and target[caret - 1] == ' ':
+            start -= 1
+        marker = chr(0xf0000 + len(atoms))
+        atoms[marker] = token.raw
+        tokens[index] = replace(token, text=marker)
+        parts.extend((target[end:start], marker))
+        end = caret + (2 if target.startswith('^ ', caret) else 1)
+    parts.append(target[end:])
+    return tokens, ''.join(parts)
+
+
 def _rewritten_tokens(job, groups, targets, elements, element_starts):
     # Match native elements by identity, not by the letters displayed inside
     # them. A field value edit must never turn its reference into literal text.
@@ -546,21 +582,60 @@ def _rewritten_tokens(job, groups, targets, elements, element_starts):
                 updated = current_elements.get(token.offset, element)
                 token = replace(token, text=markers[element.source], raw=bytes.fromhex(updated.raw))
             masked.append(token)
+        masked, target = _mask_conflict_separators(masked, target, atoms)
         yield from rewrite_group(masked, target, paragraph_start=cursor == 0, atoms=atoms)
         cursor = stop
 
 
+def _translated_conflict_edits(edits):
+    """Keep paired framing and its first separator together in the native stream."""
+    frame = []
+    for edit in edits:
+        token, _, _ = edit
+        if token.raw in CONFLICT_STARTS:
+            yield from frame
+            frame = [edit]
+        elif not frame:
+            yield edit
+        else:
+            frame.append(edit)
+            if token.raw != b'\x03':
+                continue
+            opener, before, retained_opener = frame[0]
+            separator, leading, retained_separator = frame[1]
+            if sum(t.raw == b'\x02' for t, _, _ in frame) >= 2 and not any(
+                    kept == b'\x02' or any(raw == b'\x02' for _, raw in records(new, 0, len(new)))
+                    for _, new, kept in frame):
+                frame[0] = (opener, before, b'')
+                closing, before_end, _ = frame[-1]
+                frame[-1] = (closing, before_end, b'')
+            elif retained_separator == b'\x02' and leading:
+                # Adjacent opener and first separator begin the linked range.
+                # A paste immediately before that caret remains outside it.
+                frame[0] = (opener, before + leading, retained_opener)
+                frame[1] = (separator, b'', retained_separator)
+            yield from frame
+            frame = []
+    yield from frame
+
+
 def _opening_paragraph_edits(edits, text):
-    """Let an explicit first paragraph replace the source's invisible opening style."""
-    if not text or text.startswith('\n'):
+    """Keep the opening style and the first visible paragraph distinct."""
+    if not text:
         return edits
+    leading_break = text.startswith('\n')
     prefix = []
     opening = None
     for edit in edits:
         token, generated, retained = edit
         prefix.append(edit)
         if generated or (retained and token.text):
-            if opening is not None and (generated or retained).startswith(b'\x16'):
+            if leading_break and opening is None:
+                # CaseCAT Enter at the top adds an invisible default opener
+                # before the first stroke so the next paragraph displays a break.
+                first, first_generated, first_retained = prefix[0]
+                prefix[0] = (first, b'\x16\xff\x00' + first_generated, first_retained)
+            elif not leading_break and opening is not None and (generated or retained).startswith(b'\x16'):
                 # Keep the source position for relocation, including when the
                 # new paragraph follows one or more emptied stroke groups.
                 prefix[opening] = (prefix[opening][0], b'', b'')
@@ -568,6 +643,20 @@ def _opening_paragraph_edits(edits, text):
         if retained.startswith(b'\x16'):
             opening = len(prefix) - 1
     return chain(prefix, edits)
+
+
+def _render_field(renderer, raw, speakers, text, field, position):
+    if field is None or raw.hex() != field.raw:
+        raise ValueError(f'Native field reference does not match the edit at character {position}.')
+    expected = text[field.start:field.end]
+    for control in (b'', b'\x12\x8e', b'\x12\x0e'):
+        candidate = copy(renderer)
+        if control:
+            candidate.control(control)
+        rendered = render_record(candidate, raw, speakers)
+        if rendered == expected:
+            return rendered, candidate, control
+    raise ValueError(f'Native field casing cannot preserve the edit at character {position}.')
 
 
 def _write_revision(job, bundle, legacy_joins):
@@ -587,6 +676,7 @@ def _write_revision(job, bundle, legacy_joins):
     centers = {e.start for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'}
     elements = tuple(e for e in job.export_elements if not (e.kind == 'symbol' and e.name == 'Center Justify'))
     element_starts = [element.start for element in elements]
+    fields_at = {element.start: element for element in elements if element.kind == 'field'}
     layouts = read_layouts(job.native_bytes)
     colloquy_indents = (_colloquy_indents(text, elements, element_starts)
                        if layouts and len(layouts[0].paragraphs) >= 4 else {})
@@ -596,7 +686,7 @@ def _write_revision(job, bundle, legacy_joins):
     centered = 0 in centers
     examination_styles = job.examination_styles
     use_style_geometry = False
-    edits = _rewritten_tokens(job, groups, targets, elements, element_starts)
+    edits = _translated_conflict_edits(_rewritten_tokens(job, groups, targets, elements, element_starts))
     for token, generated, retained in _opening_paragraph_edits(edits, text):
         if renderer.cover_tables and token.offset >= end_cover:
             renderer.cover_tables = False
@@ -629,12 +719,19 @@ def _write_revision(job, bundle, legacy_joins):
                 gap = _word_gap(text, visible)
                 if gap and gap != retained_gaps.get(token.offset):
                     continue
-            if (raw[0] == 0x16 and (generated or token.text)
-                    and int.from_bytes(raw[1:], 'little') not in (8, 255)
-                    and not renderer.has_content and text.startswith('\n', visible)):
-                encoded += b'\x16\xff\x00'
-                renderer.paragraph(255)
-            rendered = render_record(renderer, raw, speakers)
+            conflict_space = (raw == b'\x02' and renderer.conflict_choice == 1
+                              and text.startswith(' ^ ', visible))
+            if conflict_space:
+                # The retained separator needs an independent literal here.
+                renderer.literal(' ')
+            field_case = b''
+            if raw[:2] == b'\x15\x07':
+                rendered, renderer, field_case = _render_field(
+                    renderer, raw, speakers, text, fields_at.get(visible), visible)
+            else:
+                rendered = render_record(renderer, raw, speakers)
+            if conflict_space:
+                rendered = ' ' + rendered
             paragraph = raw[0] == 0x16
             paragraph_start = visible + int(rendered.startswith('\n'))
             if paragraph:
@@ -657,6 +754,9 @@ def _write_revision(job, bundle, legacy_joins):
                     renderer.control(marker)
                     rendered = render_record(renderer, raw, speakers)
             if not text.startswith(rendered, visible):
+                if raw == b'\x02':
+                    raise ValueError(f'The native conflict separator needs its spacing at character {visible}. '
+                                     'Keep the required space or resolve the conflict to an alternative.')
                 raise ValueError(f'Native rendering cannot preserve the edit at character {visible}.')
             visible += len(rendered)
             if raw == b'\x16\xff\x00' and record_start < len(generated) and visible in colloquy_indents:
@@ -665,7 +765,9 @@ def _write_revision(job, bundle, legacy_joins):
                 encoded += b'\x16\x04\x00'
                 indent_end = colloquy_indents[visible]
             elif visible > indent_end or raw not in (b' ', b'\x01'):
-                encoded += raw
+                if conflict_space:
+                    encoded += b' '
+                encoded += field_case + raw
             if paragraph and centered:
                 encoded += CENTER_JUSTIFY
                 centers.remove(paragraph_start)
