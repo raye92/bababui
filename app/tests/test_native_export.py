@@ -10,7 +10,7 @@ from app.src import documents
 from app.src.review_model import build_review
 from app.src.suggestions import resolve_all
 from app.tests.test_native_casecat import job_files, zip_bytes
-from app.tests.test_native_fields import field_files, native_stream
+from app.tests.test_native_fields import FIELD, field_files, native_stream
 from app.tests.test_native_layout import layout_bytes
 from app.tests.test_native_structure import container_files
 
@@ -185,6 +185,48 @@ def test_export_moves_boundary_to_retained_byline_control(tmp_path):
     for name in bundle.members:
         if name != bundle.member(job.key + '.sgngl'):
             assert exported.read(name) == bundle.read(name)
+
+
+def test_export_after_deleting_one_of_two_speaker_turns_on_the_same_stroke(tmp_path):
+    colloquy = b'\x16\x04\x00'
+    words = (b'First. ', b'Back on the record.' + colloquy + b'WITNESS:  Fine.'
+             + colloquy + FIELD + b': ', b'Next question.')
+    files = field_files(words=words)
+    bundle = inspect_archive(zip_bytes(files))
+    job = load_job(bundle, bundle.jobs[0])
+    expected = 'First. Back on the record.\n     MS. OLD: Next question.'
+    incoming = job.baseline.revise(expected)
+    review = build_review(job.baseline, incoming)
+    accepted, _ = resolve_all(job.baseline, incoming, review.ranges, True)
+    target = tmp_path / 'speaker.zip'
+
+    export_zip(bundle, job.with_revision(accepted), target)
+
+    restored = load_job(inspect_archive(target), job.key)
+    assert restored.text == expected
+    assert [span.content for span in restored.baseline.spans] == [
+        'First. ', 'Back on the record.\n     MS. OLD: ', 'Next question.']
+    assert [(e.kind, e.name) for e in restored.baseline.elements] == [
+        ('symbol', 'Colloquy'), ('field', 'EZ SPEAKER 01')]
+    assert colloquy + FIELD in native_stream(restored)
+    assert restored.stroke_clocks == job.stroke_clocks
+    assert restored.notes_bytes == job.notes_bytes
+
+
+@pytest.mark.parametrize('breaks, styles', [('\n', [2]), ('\n\n', [8, 2])],
+                         ids=['single-break', 'intentional-blank-line'])
+def test_export_changes_plain_paragraph_to_question(tmp_path, breaks, styles):
+    bundle = inspect_archive(zip_bytes(container_files(('Before.', breaks + 'Next question?'))))
+    job = load_job(bundle, bundle.jobs[0])
+    expected = 'Before.' + breaks + '     Q    Next question?'
+    target = tmp_path / 'question.zip'
+
+    export_zip(bundle, job.with_revision(job.baseline.revise(expected)), target)
+
+    restored = load_job(inspect_archive(target), job.key)
+    assert restored.text == expected
+    stream = native_stream(restored)
+    assert [raw[1] for _, raw in records(stream, 0, len(stream)) if raw[0] == 0x16] == styles
 
 
 def test_edited_export_updates_only_selected_native_member(tmp_path):

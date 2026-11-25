@@ -142,6 +142,11 @@ def encode_text(text, *, paragraph_start=False, atoms=None):
         raise ValueError('Native text contains an unsupported control character.')
     result = bytearray()
     atoms = atoms or {}
+    if atoms and text:
+        # A paragraph atom owns its break. Expose that boundary to the style
+        # encoder so it can also recognize a heading immediately before it.
+        text = ''.join('\n' + char if atoms.get(char, b'').startswith(b'\x16') else char
+                       for char in text)
     # Prefixes are logical paragraph labels, never generated page/line numbers.
     for index, paragraph in enumerate(text.split('\n')):
         # A physical Enter in CATalyst emits 16 ff 00. Pasted LF emitted
@@ -214,9 +219,10 @@ def rewrite_group(tokens, target, *, paragraph_start=False, atoms=None):
         end = position + len(token.text)
         leading_text = insertions.pop(position, '')
         retained = all(keep[position:end]) and not any(i in insertions for i in range(position + 1, end))
-        if retained and token.raw[:1] == b'\x16' and not token.text.startswith('\n') and leading_text.endswith('\n'):
-            # A retained native paragraph control supplies this boundary itself.
-            # Encoding both the inserted LF and the control adds an empty line.
+        if (retained and leading_text.endswith('\n') and token.raw.startswith(b'\x16')
+                and not token.text.startswith('\n') and token.text not in (atoms or {})):
+            # An unmasked legacy prefix still displays as ordinary spaces.
+            # Its retained control supplies the boundary after an insertion.
             leading_text = leading_text[:-1]
         leading = encode_text(leading_text,
                               paragraph_start=paragraph_start and position == 0, atoms=atoms)
@@ -494,7 +500,13 @@ def _rewritten_tokens(job, groups, targets, elements, element_starts):
         for element in reversed(elements[first:last]):
             if element.end <= stop:
                 key = element.source if element.source is not None else element
-                target = target[:element.start-cursor] + markers[key] + target[element.end-cursor:]
+                marker = markers[key]
+                start = element.start - cursor
+                # Diff the whole native paragraph start as one unit. A shared
+                # newline alone must never match a different speaker turn.
+                if start and target[start - 1] == '\n' and atoms[marker].startswith(b'\x16'):
+                    start -= 1
+                target = target[:start] + marker + target[element.end-cursor:]
         masked = []
         for token in group:
             element = original_elements.get(token.offset)
@@ -505,8 +517,7 @@ def _rewritten_tokens(job, groups, targets, elements, element_starts):
                 element = None
             if element:
                 updated = current_elements.get(token.offset, element)
-                prefix = '\n' if element.kind == 'symbol' and token.text.startswith('\n') else ''
-                token = replace(token, text=prefix + markers[element.source], raw=bytes.fromhex(updated.raw))
+                token = replace(token, text=markers[element.source], raw=bytes.fromhex(updated.raw))
             masked.append(token)
         yield from rewrite_group(masked, target, paragraph_start=cursor == 0, atoms=atoms)
         cursor = stop

@@ -12,11 +12,11 @@ from app.tests.test_native_structure import container_files
 
 FIELD = b'\x15\x07\x12\x00\x00\x00\x01\x01\x01\x01EZ SPEAKER 01\x00'
 ORPHAN = b'\x11\x06\x02\x00\x00\x00'
+FIELD_WORDS = (b'\x16\x05\x00' + ORPHAN + b'BY ' + FIELD + b':\x16\x02\x00Question?',
+               b'\x16\x03\x00Yes.\x16\x04\x00' + FIELD + b': More.')
 
 
-def field_files(value='MS. OLD', *, layout=None):
-    words = (b'\x16\x05\x00' + ORPHAN + b'BY ' + FIELD + b':\x16\x02\x00Question?',
-             b'\x16\x03\x00Yes.\x16\x04\x00' + FIELD + b': More.')
+def field_files(value='MS. OLD', *, layout=None, words=FIELD_WORDS):
     files = container_files(tuple(word.decode('cp1252') for word in words), layout=layout)
     native = bytearray(files['jobs/example.sgngl'])
     offset, size = struct.unpack_from('<II', native, 632)
