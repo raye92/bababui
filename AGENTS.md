@@ -48,7 +48,13 @@ in temporary folders outside `evaluation/data`.
 - Keep process commentary, captions, and results brief and factual.
 - Do not use em dashes. Use commas, periods, or semicolons.
 
-# Editing the transcript prompt
+# Prompt ownership
+
+Coding agents may read the BABABUI transcript prompt in `app/src/bababui_prompt.md`
+and the AI review prompt (`PROMPT` in `app/src/ai_review.py`). Only I may edit
+either prompt.
+
+## Transcript prompt style
 
 - Keep the `# Task` section in `app/src/bababui_prompt.md` concise. Replace or
   simplify existing rules instead of appending overlapping instructions.
