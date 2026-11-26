@@ -13,11 +13,11 @@ line breaks to fit a display width. Keep BY lines flush left.
 
 Begin each Q/A paragraph with five spaces, Q or A, then four spaces. Begin each
 colloquy paragraph with five spaces, its uppercase label and colon, then two spaces.
-A new paragraph within the same speaker turn begins with ten spaces and no
-repeated Q/A or speaker label; use such paragraphs only when the speaker changes
-to a completely different topic. A sentence ending, brief acknowledgment, pause,
-filler removal, false-start removal, or related follow-up question does not create
-a new paragraph. For example, keep "Thank you.  You are acting in the capacity
+Follow THE PARAGRAPH when choosing where to start a new paragraph within a
+speaker's turn. Indent each continuation ten spaces and omit the repeated Q/A
+or speaker label. A sentence ending, brief acknowledgment, pause, filler
+removal, false-start removal, or related follow-up question does not create a
+new paragraph. For example, keep "Thank you.  You are acting in the capacity
 of qualified medical evaluator..." in one paragraph.
 Always start a new labeled turn when the speaker changes. Do not add blank lines
 between turns or paragraphs.
@@ -80,14 +80,21 @@ the stated rule.
 
 ## SPEAKER IDENTIFICATION, Q&A, AND EXAMINATION LABELS
 
-Convert the supplied transcript into a deposition transcript using the examination, Q/A, colloquy, and plain-text layout below. The input uses tags such as `SPEAKER 1` and `SPEAKER 2`. Treat these tags as suggestions. Use conversational context to detect speaker changes even within a single tagged passage. Start a new turn when the speaker changes, reassign speech to the correct speaker, and correct swapped speaker labels.
+Convert the supplied transcript into a deposition transcript using the
+examination, Q/A, colloquy, and plain-text layout below. The input uses tags
+such as `Speaker 1:` and `Speaker 2:`. Treat these tags as suggestions. Use
+conversational context to detect speaker changes even within a single tagged
+passage. Start a new turn when the speaker changes, reassign speech to the
+correct speaker, and correct swapped speaker labels. Start each heading, BY
+line, speaker turn, and procedural note on its own line, with no blank lines
+between them.
 
-Speaker correction example 1
+SPEAKER CORRECTION.1: Merged turns and swapped speaker labels.
 
 Input
-SPEAKER 1: Did you examine the applicant?
-SPEAKER 2: Correct. When did you issue your first report?
-SPEAKER 1: June 12, 2025.
+Speaker 1: Did you examine the applicant?
+Speaker 2: Correct. When did you issue your first report?
+Speaker 1: June 12, 2025.
 
 Expected output
      Q    Did you examine the applicant?
@@ -95,7 +102,7 @@ Expected output
      Q    When did you issue your first report?
      A    June 12, 2025.
 
-Speaker correction example 2
+SPEAKER CORRECTION.2: Unlabeled objection during examination.
 
 Input
 Speaker 1: Did you examine the applicant on June 12, 2025?
@@ -114,6 +121,19 @@ BY SPEAKER 1:
 BY SPEAKER 1:
      Q    Did you subsequently receive additional medical records?
      A    Yes, I did.
+
+SPEAKER CORRECTION.3: Missed speaker distinction.
+
+Input
+Speaker 1: You issued four reports in this matter. Correct. And your most recent report was dated July 7, 2026?
+Speaker 2: That's right.
+
+Expected output
+BY SPEAKER 1:
+     Q    You issued four reports in this matter.
+     A    Correct.
+     Q    And your most recent report was dated July 7, 2026?
+     A    That's right.
 
 Determine who is speaking, whether the exchange is formal examination or colloquy,
 and whether an attorney is beginning a first examination, resuming an interrupted
@@ -308,15 +328,13 @@ He knew (that she was hiding behind the table).
 
 DEPENDENT CLAUSE.2: When a noun clause is a nonessential appositive, use a dash before it or a pair
 of dashes around it.
-There is in this case one overriding fact -- (that she had both motive and opportunity to
-commit this crime).
+There is in this case one overriding fact -- (that she had both motive and opportunity to commit this crime).
 That she...crime renames the word fact.
-We were involved in an important decision -- (what we were going to do about the house)
--- and could not delay any longer.
+
+We were involved in an important decision -- (what we were going to do about the house) -- and could not delay any longer.
 What we...house renames the word decision.
 
-She delayed telling him the obvious -- (that she was leaving) -- and put their financial
-Situation into chaos.
+She delayed telling him the obvious -- (that she was leaving) -- and put their financial situation into chaos.
 That she was leaving renames the word obvious.
 
 DEPENDENT CLAUSE.3: When the sentence has finished and a noun clause is used to rename the
@@ -374,12 +392,9 @@ Friend "from Ohio" already defines him.
 
 DEPENDENT CLAUSE.9: When an adjective clause is significantly removed from the word it modifies,
 use a pair of commas around the clause for purposes of clarity.
-The bank on the corner near my apartment in the city, (which has been robbed three
-times), was just hit again.
-I saw a man near the corner just a few seconds before the accident, (who was running
-into the street).
-The agreement between the two parties at the inception of the partnership, (which did not
-contain a valid signature for each party), was null and void.
+The bank on the corner near my apartment in the city, (which has been robbed three times), was just hit again.
+I saw a man near the corner just a few seconds before the accident, (who was running into the street).
+The agreement between the two parties at the inception of the partnership, (which did not contain a valid signature for each party), was null and void.
 
 DEPENDENT CLAUSE.10: When there is an adjective clause that begins with the word that, whether it
 is next to the word it modifies or removed from it, use no commas around the clause.
@@ -397,10 +412,8 @@ I was living temporarily with my brother (because I had lost my job).
 DEPENDENT CLAUSE.12: When an adverb clause is at the end of the unit it modifies into and the
 content is not directly related to the content of that unit it modifies into, use a separating comma in front
 of the clause.
-They were urged to complete it in a timely manner, (even though no one believed they
-could).
-He continued to show his ineptitude at the job, (as if anyone really believed from the
-beginning that he would be successful).
+They were urged to complete it in a timely manner, (even though no one believed they could).
+He continued to show his ineptitude at the job, (as if anyone really believed from the beginning that he would be successful).
 They were always paid on time, (although I don't think that really was noticed by anyone).
 
 DEPENDENT CLAUSE.13: When an adverb clause is out in front of the unit it modifies into, use a
@@ -480,13 +493,11 @@ He suggested [that there is someone there (who might be able to help)].
 That there is...able to help is a noun clause that is the direct object. Who might be
 able to help is an essential adjective clause that modifies someone in the noun clause
 = no commas around the clause.
-ls there anything you want to know about [where the doctor in this case, (who treated Ms.
-Gomez early on), is currently living]?
+Is there anything you want to know about [where the doctor in this case, (who treated Ms. Gomez early on), is currently living]?
 Where the doctor...currently living is a noun clause that is the object of the
 preposition about. Who treated Ms. Gomez early on is a nonessential adjective
 clause that modifies doctor and is removed from it = commas around the clause.
-[How the electrician for the company in the lawsuit, (who is also being sued individually),
-is being represented] is not my concern.
+[How the electrician for the company in the lawsuit, (who is also being sued individually), is being represented] is not my concern.
 How the electrician...being represented is a noun clause that is the subject of the
 sentence. Who is also being sued individually is an adjective clause that modifies
 electrician and is removed from it = commas around the clause.
@@ -555,8 +566,7 @@ end of the adjective clause it modifies into.
 
 DEPENDENT CLAUSE.23: When an adverb clause is in the middle of an essential adjective clause, use
 no commas for the adjective clause, and surround the adverb clause with commas.
-The team [which led, (after the bank failed) the accounting department] had only five
-members.
+The team [which led, (after the bank failed) the accounting department] had only five members.
 Which led...department is an essential adjective clause that modifies team. After the
 bank failed is an adverb clause that modifies /ed and is in the middle of the adjective
 clause it modifies into.)
@@ -565,26 +575,22 @@ That tried...drug is an essential adjective clause that modifies doctor. Before 
 the first surgery is an adverb clause that modifies tried and is in the middle of the
 adjective clause it modifies into.
 
-I know people [who do not believe, (because there is a recession going on), in the ability
-of the banks to survive].
+I know people [who do not believe, (because there is a recession going on), in the ability of the banks to survive].
 Who do not...banks to survive is an essential adjective clause that modifies people.
 Because there is a recession going on is an adverb clause that modifies do believe
 and is in the middle of the adjective clause it modifies into.
 
 DEPENDENT CLAUSE.24: When an adverb clause is in the middle of a nonessential adjective clause,
 use commas around the adjective clause, and surround the adverb clause with commas.
-Team A, [which led, (after the bank failed), the accounting department], had only five
-members.
+Team A, [which led, (after the bank failed), the accounting department], had only five members.
 Which led...department is a nonessential adjective clause that modifies Team A.
 After the bank failed is an adverb clause that modifies /ed and is 1n the middle of the
 adjective clause it modifies into.
-There was Dr. Bronson, [who tried, (before I had the first surgery), treatment with a new
-drug].
+There was Dr. Bronson, [who tried, (before I had the first surgery), treatment with a new drug].
 Who tried...drug is a nonessential adjective clause that modifies Dr. Bronson. Before
 I had the first surgery is an adverb clause that modifies tried and is in the middle of
 the adjective clause it modifies into.
-I know Johnson and Miller, [who do not believe, (because there is a recession going on),
-in the ability of the banks to Survive].
+I know Johnson and Miller, [who do not believe, (because there is a recession going on), in the ability of the banks to survive].
 (Who do not...banks to survive is an essential adjective clause that modifies Johnson
 and Miller. Because there is a recession going on is an adverb clause that modifies
 do believe and is in the middle of the adjective clause it modifies into.)
@@ -600,8 +606,7 @@ As he talked...came in is an adverb clause that modifies waited and is at the en
 the sentence. Before the test results came in is an adverb clause that modifies talked
 and is at the end of the longer adverb clause.
 
-He left the office early [because he was not going to get the information (since the boss
-had gone on vacation)].
+He left the office early [because he was not going to get the information (since the boss had gone on vacation)].
 Because he was not...on vacation is an adverb clause that modifies /eft and is at the
 end of the sentence. Since the boss had gone on vacation is an adverb clause that
 modifies to get and is at the end of the longer adverb clause.
@@ -617,8 +622,7 @@ She waited in the lobby [as, (before the test results came in), he talked with t
 As...with the doctor is an adverb clause that modifies waited and is at the end of the
 sentence. Before the test results came in is an adverb clause that modifies talked and
 is in the middle of the longer adverb clause.
-He left the office early [because, (since the boss had gone on vacation), he was not
-going to get the information].
+He left the office early [because, (since the boss had gone on vacation), he was not going to get the information].
 Because...get the information is an adverb clause that modifies /eft and is at the end
 of the sentence. Since the boss had gone on vacation is an adverb clause that
 modifies to get and is in the middle of the longer adverb clause.
@@ -635,8 +639,7 @@ As he talked...came in is an adverb clause that modifies waited and is in the mi
 of the sentence. Before the test results came in is an adverb clause that modifies
 talked and is at the end of the longer adverb clause.
 
-He, [because he was not going to get the information (since the boss had gone on
-vacation)], left the office early.
+He, [because he was not going to get the information (since the boss had gone on vacation)], left the office early.
 Because he was not...on vacation is an adverb clause that modifies left and is in the
 middle of the sentence. Since the boss had gone on vacation is an adverb clause that
 modifies to get and is at the end of the longer adverb clause.
@@ -652,8 +655,7 @@ She, [as he talked, (before the test results came in), with the doctor], waited 
 As he talked...doctor is an adverb clause that modifies waited and is in the middle of
 the sentence. Before the test results came in is an adverb clause that modifies talked
 and is in the middle of the longer adverb clause.
-He, [because he, (since the boss had gone on vacation), was not going to get the
-information], left the office early.
+He, [because he, (since the boss had gone on vacation), was not going to get the information], left the office early.
 Because...the information is an adverb clause that modifies left and is in the middle
 of the sentence. Since the boss had gone on vacation is an adverb clause that
 modifies to get and is in the middle of the longer adverb clause.
@@ -690,20 +692,20 @@ What a day.
 
 PERIOD.5: Use a period when the attorney repeats the witness's answer, whether it is a complete
 sentence or a fragment, before going on to the new question.
-How far away were you standing?
-I was standing about 50 feet away.
-You were standing 50 feet away.
+Q How far away were you standing?
+A I was standing about 50 feet away.
+Q You were standing 50 feet away.
 Did you see the car approaching from the west?
-I did not see it before the crash.
-You did not see it before the crash.
+A I did not see it before the crash.
+Q You did not see it before the crash.
 What color was that car?
-When did you meet with her that morning? Q
+
+Q When did you meet with her that morning?
 A We met around 10:00.
 Q Around 10:00.
-A
-Q What was the topic of conversation at that meeting?
-We discussed the report.
-The report.
+What was the topic of conversation at that meeting?
+A We discussed the report.
+Q The report.
 
 Q Which hospital did you go to?
 A Marina General.
@@ -771,9 +773,11 @@ PERIOD.14: Use a period at the end of the fragment answer that stands for a comp
 the sentence goes on.
 Q Where were you standing?
 A At the end of the table. I had just delivered the message.
+
 Q When did he arrive?
-A At11:30. He was just in time for the meeting.
-Q = How much did he earn for that project?
+A At 11:30. He was just in time for the meeting.
+
+Q How much did he earn for that project?
 A $5,000. I think it was paid in cash.
 
 PERIOD.15: When the words after the yes or no simply reflect or "echo" the words of the question, use a
@@ -813,14 +817,14 @@ A Yes. Since it was cheaper.
 PERIOD.18: If the sentence continues after the yes or no and its echoed answer -- e.g., after "Yes, I did"
 or "No, she hasn't" -- put a period after the echoed answer before the addition of another sentence.
 
-Have you attended all board meetings?
-Yes, I have. I have not missed one.
-Q A
+Q Have you attended all board meetings?
+A Yes, I have. I have not missed one.
+
 Q Did she seem interested in your offer?
 A No, she didn't seem interested. She was happy where she was.
-Q A
-Was she a part of the team that did the analysis?
-Yes, she was. Later, however, she resigned from that team.
+
+Q Was she a part of the team that did the analysis?
+A Yes, she was. Later, however, she resigned from that team.
 
 PERIOD.19: Put a period at the end of a fragment answer; let the rest of the answer stand on its own.
 
@@ -870,21 +874,19 @@ A I was alone.
 
 QUESTION MARK.3: Put a question mark at the end of a fragment that is asking a question.
 Q Were you included in that conversation?
-No.
-Why?
-Not my department.
-A
-Q A
+A No.
+Q Why?
+A Not my department.
+
 Q How long did you work at that bank?
 A Several years.
 Q How many?
 A Six or seven.
-Q A
-Q A
-What color was the car?
-Red.
-Model?
-Toyota.
+
+Q What color was the car?
+A Red.
+Q Model?
+A Toyota.
 
 QUESTION MARK.4: Put the question mark where the question is first asked.
 
@@ -1065,11 +1067,9 @@ Did you "statementize" the Harris firm monthly?
 QUOTES.11: When the transcript is filled with words that seem to be English words but are not and/or
 words that are "mispronounced," do not quote any of them.
 
-A They was having a beef, so dude tol' him, "Let's take a walk around the block, and we
-can squabble."
+A They was having a beef, so dude tol' him, "Let's take a walk around the block, and we can squabble."
 Dude was, like, "Nah. I don't roll like dat."
-We was, like, "Nah. He's our homeboy, and we ain't 'bout to let it go down like it ain't no big
-thing but a chicken wing. They ain't nothin but bustas. We pimp slapped him and rolled."
+We was, like, "Nah. He's our homeboy, and we ain't 'bout to let it go down like it ain't no big thing but a chicken wing. They ain't nothin but bustas. We pimp slapped him and rolled."
 
 QUOTES.12: When the adjective in front of the noun is something someone might say in a
 conversation, use quotes to surround it instead of hyphenating it.
@@ -1085,9 +1085,10 @@ He is a, quote, "nerd," end quote, of the first order.
 
 QUOTES.14: Quote a word or phrase when it is being defined or further identified or pointed out.
 
-A Jane was appointed to represent the family In regard to the matter.
+A Jane was appointed to represent the family in regard to the matter.
 MR. X: Objection as to "appointed" and "represent."
-Q BY MS. Y: Is that the only thing she did?
+BY MS. Y:
+Q Is that the only thing she did?
 A She was also designated to communicate with them.
 MR. X: Same objection as to "designated."
 A It is the summation of a period of posturing.
@@ -1158,9 +1159,7 @@ When I said, "You will not be included," her response was "I don't want to be."
 QUOTES.22: Put colons and semicolons outside of the quotation mark with no exceptions in the entire
 language.
 He said, "Don't come near me"; is that correct?
-He said, "I am not aware that Mr. Hanks, the company controller, will be out of town on
-Friday, May 5"; and he added that he was not personally acquainted with that part
-of the operation.
+He said, "I am not aware that Mr. Hanks, the company controller, will be out of town on Friday, May 5"; and he added that he was not personally acquainted with that part of the operation.
 This is a quote from the chapter "How to Invest Wisely": "The reason for investing...."
 
 QUOTES.23: Put the question mark inside the quotation mark if the quoted material is asking a
@@ -1277,12 +1276,9 @@ They searched three locations: the park, the gymnasium, and the classrooms.
 COLON.3: Use a colon after a complete sentence when there is an indication that there is more to come:
 words, phrases, or clauses that further explain, exemplify, or rename what was referred to in the main
 clause.
-We sent three forms to the prospective renters in every case: the rental agreement, the
-credit application, and the reference forms.
-I want to point out two things: that he has a prior record and that he had already been
-fingerprinted.
-We requested these from you: the financial records, the accounting records, and the tax
-records.
+We sent three forms to the prospective renters in every case: the rental agreement, the credit application, and the reference forms.
+I want to point out two things: that he has a prior record and that he had already been fingerprinted.
+We requested these from you: the financial records, the accounting records, and the tax records.
 
 COLON.4: Use a colon only when there is a grammatically complete sentence in front of it.
 Incorrect: The list includes: an X ray, an MRI, and a stress test.
@@ -1298,10 +1294,8 @@ Correct: He sent them to these associates: Harris, Evans, and Sills.
 COLON.5: When there is a list that is separated by commas and the sentence continues after the list, use
 a pair of dashes to surround the list rather than a colon in front of it.
 He sent them to his associates: Harris, Evans, Weeks, and Sills.
-Incorrect: He sent them to his associates: Harris, Evans, Weeks, and Sills, before the
-meeting.
-Correct: He sent them to his associates -- Harris, Evans, Weeks, and Sills -- before the
-meeting on Friday.
+Incorrect: He sent them to his associates: Harris, Evans, Weeks, and Sills, before the meeting.
+Correct: He sent them to his associates -- Harris, Evans, Weeks, and Sills -- before the meeting on Friday.
 Please bring these with you: laptop, cables, and small printer.
 Incorrect: Please bring these with you: laptop, cables, and small printer, to the test.
 Correct: Please bring these with you -- laptop, cables, and small printer -- to the test.
@@ -1332,8 +1326,7 @@ COLON.10: Use a colon to replace the comma before quoted material when the mater
 very lengthy or very formal.
 The judge stated: "I have no choice but to declare a mistrial in this case."
 I will read this into the record as follows:
-"The patient was on a respirator at the time of the
-incident that we are discussing here and was...."
+"The patient was on a respirator at the time of the incident that we are discussing here and was...."
 where this is the beginning of a lengthy quote
 
 ## THE DASH
@@ -1352,63 +1345,64 @@ I -- I -- I was on -- was on the -- on the way to work.
 
 DASH.3: When an interruption occurs and the speaker does not stop talking, use a dash for the
 interruption and a second dash in front of the continuation of the original thought.
-How far away were you from --
-Ten feet.
--- the door?
-Was there a time when you decided to --
-Yes.
--- leave the organization?
-How long had you been with them when --
-About five years.
--- this incident occurred?
+Q How far away were you from --
+A Ten feet.
+Q -- the door?
+
+Q Was there a time when you decided to --
+A Yes.
+Q -- leave the organization?
+
+Q How long had you been with them when --
+A About five years.
+Q -- this incident occurred?
 
 DASH.4: When another sentence or sentences occur in the middle of a thought and a person then picks
 up the original thought, paragraph the continuation of the thought and use a dash in front of it to
 indicate it is a continuing thought.
 Q What time did you arrive at --
-Do you mean on June 137?
-Yes. That morning.
+A Do you mean on June 13?
+Q Yes. That morning.
 -- the committee meeting?
-Around 10:00.
-A
-Q A
+A Around 10:00.
+
 Q Were you there at the time that Jaime --
 A Are you referring to the meeting in Mr. Baker's office?
 Q The meeting in the conference room.
-A
-Q A
-Oh, the one later in the day?
-Yes, the one later in the day.
+A Oh, the one later in the day?
+Q Yes, the one later in the day.
 -- Garcia submitted his resignation?
-No. I was out on a call.
+A No. I was out on a call.
 
 DASH.5: Even if a few words repeat, if the sentence still represents one thought, use a dash to show the
 continuation. If the sentence completely starts over, start a new sentence, and do not use a dash.
 
-Did the company have a lot of --
-Yes, it did.
--- of Incompetent employees?
-Q A
-Q Q Did the company have a lot of --
+Q Did the company have a lot of --
+A Yes, it did.
+Q -- of incompetent employees?
+
+Q Did the company have a lot of --
 A Yes, it did.
 Q Did the company have a lot of incompetent employees?
-Q A
-Q Q A
-Was he driving a blue --
-Was he driving a blue --
-No.
+
+Q Was he driving a blue --
+A No.
+Q -- Honda?
+
+Q Was he driving a blue --
+A No.
 Q Was it a blue Honda?
 
 DASH.6: When the sentence begins with a word or words that represent the topic of the conversation
 and is then broken off, use a dash.
 Q Your husband -- was he involved?
 Q Exhibit 5 -- is this your signature at the bottom of this page?
-Q = The drugs he was taking -- were they all by prescription?
+Q The drugs he was taking -- were they all by prescription?
 
 DASH.7: Put a dash before and a period after words like correction or no or strike that when they are
 used after an interruption of the sentence.
-Was there anyone else standing -- no. Was he sitting next to you?
-Did you leave on a Sunday -- correction. Did you leave Monday for Tulsa?
+Was there anyone else standing -- no.  Was he sitting next to you?
+Did you leave on a Sunday -- correction.  Did you leave Monday for Tulsa?
 Had you attended the seminar before -- strike that.
 
 DASH.8: When a person trails off and does not finish his sentence, use a dash or ellipses.
@@ -1420,22 +1414,23 @@ an ellipsis after.
 
 I had tried it before to no avail but --
 I had tried it before to no avail but...
+
 They intended to have a talk with him but --
 They intended to have a talk with him but...
 
 DASH.10: When the word so is used before the trailing off, put a semicolon or a period before so and a
 dash or an ellipsis after.
 There were no more options for us; so --
-There were no more options for us. So --
-There were no more options for us; So...
-There were no more options for us. So...
+There were no more options for us.  So --
+
+There were no more options for us; so...
+There were no more options for us.  So...
 
 DASH.11: When a complete thought is dropped inside another sentence, surround the complete
 sentence that is dropped in with a pair of dashes.
 I had to see him then in order to -- he had been away -- give him the payment.
-She sent me the number -- it had been more than two weeks -- for her cell phone after I
-bugged her.
-Judy was the person -- that was her name -- whose truck was In the ditch.
+She sent me the number -- it had been more than two weeks -- for her cell phone after I bugged her.
+Judy was the person -- that was her name -- whose truck was in the ditch.
 
 DASH.12: When the sentence within the sentence is a statement, do not use any terminal punctuation
 before the second dash.
@@ -1466,8 +1461,10 @@ DASH.16: When one word, often a pronoun, refers back to each of several words in
 dash before this word, which we call a summary word.
 I spoke to Tom, Ed, and Bill -- each of whom had a different opinion.
 Each refers to Tom, Ed, and Bill.
+
 Tape, staples, and pins -- we used these to hold it together.
 These refers to tape, staples, and pins.
+
 Anderson, Brown, and Everett -- we looked to them to lead us.
 Them refers to Anderson, Brown, and Everett.
 
@@ -1481,8 +1478,7 @@ DASH.18: When an appositive is used to rename a word that it is very far removed
 before the appositive or a pair of dashes around the appositive.
 We saw Roger from time to time in the park -- John and I -- with his kids.
 The doctor did the surgery to save her right leg -- Dr. Hanson -- from amputation.
-They did not function well at all during that time -- the two computers -- for that
-application.
+They did not function well at all during that time -- the two computers -- for that application.
 
 DASH.19: When an appositive is a noun clause and it is either next to or removed from the word it
 renames, use a dash before or a pair of dashes around the appositive clause.
@@ -1490,12 +1486,10 @@ renames, use a dash before or a pair of dashes around the appositive clause.
 This is the reason he gave -- that he did not have a job at the time.
 That's what he is talking about -- that the employees there had no rights.
 She passed out when I said it -- that she would have to go straight to the hospital.
-That is what he said to me -- that he was not interested -- when I asked him to contribute
-something to the project.
-Was that her reason for leaving the job -- that she wanted to have a family -- and all of
-the benefits that this job had for her?
-This was really important -- what the timing was for the release of the product -- to me
-and everyone else.
+
+That is what he said to me -- that he was not interested -- when I asked him to contribute something to the project.
+Was that her reason for leaving the job -- that she wanted to have a family -- and all of the benefits that this job had for her?
+This was really important -- what the timing was for the release of the product -- to me and everyone else.
 
 DASH.20: When an appositive renames the subject of the sentence and comes after the sentence has
 finished (even when the sentence is short), use a dash before the appositive.
@@ -1557,8 +1551,7 @@ independent clauses) to a semicolon when there are other marks of punctuation in
 to "hide" or "obscure" the comma before the conjunction.
 
 I went with my brother, sister, and parents; and my husband, Bill, took the others.
-The three of them -- John, Takashi, and Mario -- worked; but Andrea, my sister, had a
-plane to catch.
+The three of them -- John, Takashi, and Mario -- worked; but Andrea, my sister, had a plane to catch.
 It was Monday, June 10, that he was fired; and on Tuesday, June 11, he left the country.
 
 SEMICOLON.10: In a series where there are commas separating the series and where one member of
@@ -1569,10 +1562,8 @@ He lived in Rome, Georgia; Paris, Tennessee; and Palestine, Texas.
 They were a Hilton; an Embassy Suites, which was the best; and a Marriott.
 
 SEMICOLON.11: Separate each member of the series with the same type of punctuation.
-Incorrect: He sent the correspondence to Miller, Hubbell, Henderson, who is the senior
-administrator; Ruiz, Cheng, and Hartman.
-Correct: He sent the correspondence to Miller; Hubbell; Henderson, who is the senior
-administrator; Ruiz; Cheng; and Hartman.
+Incorrect: He sent the correspondence to Miller, Hubbell, Henderson, who is the senior administrator; Ruiz, Cheng, and Hartman.
+Correct: He sent the correspondence to Miller; Hubbell; Henderson, who is the senior administrator; Ruiz; Cheng; and Hartman.
 
 ## THE COMMA THAT SEPARATES
 
@@ -1610,8 +1601,7 @@ Mr. Ramos offered and the whole family agreed to negotiate the settlement.
 To negotiate is the direct object for the verb offered and agreed.
 He said and she agreed that this had to be done.
 That this...done is a noun clause direct object for the verbs said and agreed.
-The company needs to know and the State needs to know what services were provided
-to these clients.
+The company needs to know and the State needs to know what services were provided to these clients.
 What services...these clients is the object of both infinitives to know.
 
 SEPARATING COMMA.6: Use a comma for the missing conjunction in compound dependent
@@ -1754,7 +1744,6 @@ before the rest of the sentence.
 Did you say you heard her scream, "Help me; help me," as she began to fall?
 She asked, "Where am I Supposed to be?" several times that day.
 He was often heard saying, "Its not my fault," the minute something went wrong.
-a --
 
 SEPARATING COMMA.26: Use a comma to separate a nonessential appositive from the word it
 renames.
@@ -2966,14 +2955,14 @@ We always commemorate the tragedy of 9/11/01.
 CAPITALIZATION.1: Capitalize the first word of a sentence and the first word of any fragment that
 stands for a complete thought.
 
-How many were there?
-At least 15. I didn't see them all.
-Right next to the platform.
-Anything else that you remember?
-Q A
+Q How many were there?
+A At least 15. I didn't see them all.
+
 Q Okay. Fine. Where were you standing?
-A
-Q A Yes, sir. She was wearing bright red.
+A Right next to the platform.
+
+Q Anything else that you remember?
+A Yes, sir. She was wearing bright red.
 
 CAPITALIZATION.2: Capitalize the first word after a colon only if it is a grammatically complete
 sentence.
@@ -3767,12 +3756,9 @@ It was Bonnie White that was in charge, a CPA, of Keeping the statistics.
 
 APPOSITIVE.4: When a noun appositive is very far removed from the word it renames, use a dash in
 front of it or a pair of dashes around it if it is in the middle of the sentence.
-We tried to join the party later in the evening after the conference ended -- Mary and I -- In
-order to meet and get to know her sister's fiance.
-The bank manager did not get involved in the transaction In question in this suit until June
-- George Gerson -- and was not very helpful when he did.
-The president of the company where my mother worked for 25 years before retiring two
-years ago -- Ms. Wright -- led the discussion.
+We tried to join the party later in the evening after the conference ended -- Mary and I -- in order to meet and get to know her sister's fiancé.
+The bank manager did not get involved in the transaction in question in this suit until June -- George Gerson -- and was not very helpful when he did.
+The president of the company where my mother worked for 25 years before retiring two years ago -- Ms. Wright -- led the discussion.
 
 APPOSITIVE.5: When a noun appositive to the subject of the sentence comes after the sentence has
 finished, use a dash before the appositive.
@@ -3803,14 +3789,9 @@ That reason -- how she was able to fool them for so long -- is necessary to know
 
 APPOSITIVE.9: When a noun clause appositive is removed from the word it renames, use a pair of
 dashes around it.
-The thing we are talking about here -- when exactly you left the house that morning to go
-to work -- is not clear to me.
-I want to ask a few questions about a discrepancy that I perceive in the answers you
-have given -- how far away you were at the exact moment of the collision -- and to
-try to see whether we can clear that up.
-she had worked for us for a number of weeks before any issues or problems came up -
-that she would arrive late, that she would make personal phone calls -- such that
-they interfered with her work.
+The thing we are talking about here -- when exactly you left the house that morning to go to work -- is not clear to me.
+I want to ask a few questions about a discrepancy that I perceive in the answers you have given -- how far away you were at the exact moment of the collision -- and to try to see whether we can clear that up.
+She had worked for us for a number of weeks before any issues or problems came up -- that she would arrive late, that she would make personal phone calls -- such that they interfered with her work.
 
 APPOSITIVE.10: When a noun clause appositive renames the subject and comes after the sentence has
 finished, use dash before it.
@@ -3885,25 +3866,51 @@ A We were just...
 ## THE PARAGRAPH
 
 PARAGRAPH.1: Paragraph when the subject matter of the material changes.
-A Since it was the middle of the winter, it was very dark and cold; furthermore, it was
-late at night. I did not remain there for long because of the weather.
+Start each continuation on a new line without repeating the label. Use the
+spacing defined in Plain-text layout.
 
+Input (first witness answer)
+Speaker 2: Since it was the middle of the winter, it was very dark and cold; furthermore, it was late at night. I did not remain there for long because of the weather. She had been there for quite some time. I don't know how long.
+
+Expected output
+A Since it was the middle of the winter, it was very dark and cold; furthermore, it was late at night. I did not remain there for long because of the weather.
 She had been there for quite some time. I don't know how long.
-A We were traveling eastbound at the time of the collision. Since it was early
-morning, we were looking directly into the sun.
 
+Input (second witness answer)
+Speaker 2: We were traveling eastbound at the time of the collision. Since it was early morning, we were looking directly into the sun. My brother was driving at the time.
+
+Expected output
+A We were traveling eastbound at the time of the collision. Since it was early morning, we were looking directly into the sun.
 My brother was driving at the time.
 
 PARAGRAPH.2: Paragraph when the person speaking changes.
+A change of participant starts a new labeled turn. When a witness recounts a
+conversation, start a new paragraph when the reported speaker changes.
+
+Input (witness recounting a conversation)
+Speaker 2: She said, "I have never seen him before." I said that I did not believe her. She said, "I swear to you that I do not know him." I said, "Okay. Explain the picture that shows the two of you."
+
+Expected output
 A She said, "I have never seen him before."
 I said that I did not believe her.
-she said, "I swear to you that I do not know him."
+She said, "I swear to you that I do not know him."
 I said, "Okay. Explain the picture that shows the two of you."
 
 PARAGRAPH.3: Paragraph when the person being addressed changes.
-THE COURT: I will sustain your objection.
+Keep the new paragraph addressed to the next person within the same speaker's turn.
+
+Input (court addressing counsel, then the witness, then counsel)
+Speaker 1: I will sustain your objection. Please do not answer the question. Please rephrase your question.
+
+Expected output
+SPEAKER 1: I will sustain your objection.
 Please do not answer the question.
 Please rephrase your question.
+
+Input (witness answering counsel, then addressing the reporter)
+Speaker 2: I was with several people that can verify that I -- Would you read that question back to me, please.
+
+Expected output
 A I was with several people that can verify that I --
 Would you read that question back to me, please.
 
@@ -3941,8 +3948,7 @@ PARENTHETICAL.5: Surround numbers and letters to denote items in a list with pun
 commas.
 They are, one, overpriced and, two, shabbily made ana, three, inferior to others.
 It was, first, too expensive and, second, too much work and, last, too boring.
-I left, one, because they would not raise my pay and, two, because I felt I was carrying
-the whole load and, three, because no one was helping.
+I left, one, because they would not raise my pay and, two, because I felt I was carrying the whole load and, three, because no one was helping.
 
 PARENTHETICAL.6: When the parenthetical is followed by a fragment, use commas around the
 parenthetical.
@@ -3966,12 +3972,9 @@ PARENTHETICAL.9: When the parenthetical and the appositive are at the end of the
 appositive renames something at the beginning of the sentence, put a dash in front of the parenthetical
 and a comma after it.
 
-I had a major headache when she called me into her office and was really having trouble
-concentrating -- that is, a migraine.
-He has been accused of a crime that is all too common in our society today -- namely,
-grand theft auto.
-That is exactly what we had discussed and settled on -- that is, that he would pay off the
-loan in full by March 1.
+I had a major headache when she called me into her office and was really having trouble concentrating -- that is, a migraine.
+He has been accused of a crime that is all too common in our society today -- namely, grand theft auto.
+That is exactly what we had discussed and settled on -- that is, that he would pay off the loan in full by March 1.
 
 PARENTHETICAL.10: When the parenthetical is in the middle of the sentence, put a dash before the
 parenthetical and a comma after it, and put a dash after the appositive.
@@ -4033,30 +4036,23 @@ They were an Embassy Suites, which was the best; a Hilton; and a Marriott.
 
 SERIES.7: Separate each item of the series with the same type of punctuation.
 
-Incorrect: He sent the correspondence to Miller, Hubbell, Henderson, who is the senior
-administrator; Ruiz, Cheng, and Hartman.
-Correct: He sent the correspondence to Miller; Hubbell; Henderson, who is the senior
-administrator; Ruiz; Cheng; and Hartman.
+Incorrect: He sent the correspondence to Miller, Hubbell, Henderson, who is the senior administrator; Ruiz, Cheng, and Hartman.
+Correct: He sent the correspondence to Miller; Hubbell; Henderson, who is the senior administrator; Ruiz; Cheng; and Hartman.
 
 SERIES.8: When numbers/letters enumerate the items of a series, make the number a word rather than
 a figure, and write out the word number when said. Capitalize the letters.
 He needs, one, the tax records and, two, the employment records.
 There were, A, cars: B, buses; and, C, trucks.
-I donated, number one, $400 to the church; number two, $300 to a veterans
-organization; and, number three, 5200 to local jaw enforcement.
+I donated, number one, $400 to the church; number two, $300 to a veterans' organization; and, number three, $200 to local law enforcement.
 
 SERIES.9: When there is a conjunction between each item of the series, put commas around the
 parenthetical numbers/letters used to enumerate and no punctuation between the items.
-I had the responsibility for the personnel and the maintenance and the storage ana the
-cleanup.
-I had the responsibility for, one, the personnel and, two, the maintenance and, three, the
-storage and, four, the cleanup.
+I had the responsibility for the personnel and the maintenance and the storage and the cleanup.
+I had the responsibility for, one, the personnel and, two, the maintenance and, three, the storage and, four, the cleanup.
 We were sent a bill and a reminder and a threat.
 We were sent, first, a bill and, second, a reminder and, third, a threat.
-She knows that he was there and that he did not talk to anyone and that he then left to
-go home.
-She Knows, A, that he was there and, B, that he did not talk to anyone and, C, that he
-then left to go home.
+She knows that he was there and that he did not talk to anyone and that he then left to go home.
+She knows, A, that he was there and, B, that he did not talk to anyone and, C, that he then left to go home.
 
 SERIES.10: When there are no conjunctions between any items of the series, put commas around the
 parenthetical numbers/letters, and change the commas between the items 1n the series to semicolons.
@@ -4066,10 +4062,8 @@ The three nominees were, one, Hodges; two, Miller; three, Nagano.
 I was taking the heart medicine, the stuff to sleep, the Viagra.
 I was taking, first, the heart medicine; second, the stuff to sleep; last, the Viagra.
 
-He always said he would outlive her, he would have lots of money, he would leave it all to
-charity.
-He always said, A, he would outlive her; B, he would have lots of money; C, he would
-leave it all to charity.
+He always said he would outlive her, he would have lots of money, he would leave it all to charity.
+He always said, A, he would outlive her; B, he would have lots of money; C, he would leave it all to charity.
 
 SERIES.11: When the only conjunction is before the last item of the series, separate the items in the
 series with semicolons, and put commas after each parenthetical number.
@@ -4116,18 +4110,16 @@ The check bounced: isn't that correct, Ms. Williams?
 TAG CLAUSE.6: When the tag clause is in the middle of the sentence and contains any form of the
 words right, true, or correct, it takes a pair of dashes around it, a question mark after it inside the
 dashes, and a question mark at the end of the sentence.
-They were sent via Federal Express on Friday -- right? -- and were delivered the very
-next day?
-The first recording was purchased by your company -- is that correct? -- immediately and
-then was released to the public?
-She had worked in the IT department until -- is that right? -- she went on maternity leave
-In April?
+They were sent via Federal Express on Friday -- right? -- and were delivered the very next day?
+The first recording was purchased by your company -- is that correct? -- immediately and then was released to the public?
+She had worked in the IT department until -- is that right? -- she went on maternity leave in April?
 
 TAG CLAUSE.7: When the tag clause contains any form of the words right, true, or correct and is in the
 middle of the sentence AND clarity of reading and bulkiness is a consideration, use commas around the
 tag clause and a question mark at the end of the sentence.
-Q He called you - right? -- on Friday?
-He called you, right, on Friday? Q
+Q He called you -- right? -- on Friday?
+Q He called you, right, on Friday?
+
 Q You were -- is that correct? -- at the meeting?
 Q You were, is that correct, at the meeting?
 
@@ -4160,23 +4152,13 @@ Correct: Yet the insurance company had not fulfilled its obligations.
 
 NO PUNCTUATION.3: Do not put a single separating comma between the subject and the verb.
 
-Incorrect: That man that was hired to defend her against the charges that were brought as a result
-of the accident that occurred near her home on New Year's Eve, turned out to
-be incompetent.
-Correct: That man that was hired to defend her against the charges that were brought as a result
-of the accident that occurred near her home on New Year's Eve turned out to
-be incompetent.
+Incorrect: That man that was hired to defend her against the charges that were brought as a result of the accident that occurred near her home on New Year's Eve, turned out to be incompetent.
+Correct: That man that was hired to defend her against the charges that were brought as a result of the accident that occurred near her home on New Year's Eve turned out to be incompetent.
 
-Incorrect: What you will need to finish this project that was started by the company late last year in
-response to an issue with costs, remains unknown.
-Correct: What you will need to finish this project that was started by the company late last year in
-response to an issue with costs remains unknown.
-Incorrect: Whether we met on Monday, June 5, or Thursday of that week with Pearson, the CEO,
-about the issues with the bank and the accounts that are out of balance, Is not
-something I remember.
-Correct: Whether we met on Monday, June 5, or Thursday of that week with Pearson, the CEO,
-about the issues with the bank and the accounts that are out of balance is not
-something I remember.
+Incorrect: What you will need to finish this project that was started by the company late last year in response to an issue with costs, remains unknown.
+Correct: What you will need to finish this project that was started by the company late last year in response to an issue with costs remains unknown.
+Incorrect: Whether we met on Monday, June 5, or Thursday of that week with Pearson, the CEO, about the issues with the bank and the accounts that are out of balance, is not something I remember.
+Correct: Whether we met on Monday, June 5, or Thursday of that week with Pearson, the CEO, about the issues with the bank and the accounts that are out of balance is not something I remember.
 
 NO PUNCTUATION.4: Do not put a single separating comma between an adjective and the word it
 modifies.
@@ -4253,19 +4235,13 @@ Correct: You will find it across the street and down the block.
 Incorrect: It was always parked in the garage, or near the front door.
 Correct: It was always parked in the garage or near the front door.
 Joining dependent clauses = no comma
-Incorrect: If Mr. Handel had been there, and if he had been aware of the situation, he would
-have spoken to her regarding her behavior.
-Correct: If Mr. Handel had been there and if he had been aware of the situation, he would have
-spoken to her regarding her behavior.
+Incorrect: If Mr. Handel had been there, and if he had been aware of the situation, he would have spoken to her regarding her behavior.
+Correct: If Mr. Handel had been there and if he had been aware of the situation, he would have spoken to her regarding her behavior.
 
-Incorrect: I was In agreement because they hadn't done the due diligence, and because they did
-not have all the details.
-Correct: I was in agreement because they hadn't done the due diligence and because they did
-not have all the details.
-Incorrect: The company had to be sold after the major account was lost, and after the president
-absconded with the funds.
-Correct: The company had to be sold after the major account was lost and after the president
-absconded with the funds.
+Incorrect: I was In agreement because they hadn't done the due diligence, and because they did not have all the details.
+Correct: I was in agreement because they hadn't done the due diligence and because they did not have all the details.
+Incorrect: The company had to be sold after the major account was lost, and after the president absconded with the funds.
+Correct: The company had to be sold after the major account was lost and after the president absconded with the funds.
 
 ## WORDS THAT NEED A SPECIAL LOOK
 
@@ -4465,8 +4441,7 @@ We mailed, (So we would get credit before the next billing), the payment early.
 
 THE WORD SO.4: When So is a conjunctive adverb and means "therefore," use a period or semicolon
 in front of it and no comma after it because it is one syllable.
-John, Scott, and Wayne arrived on Friday, September 5. So Marion, Carol, and Cliff had
-to handle the orientation as I was out of town.
+John, Scott, and Wayne arrived on Friday, September 5. So Marion, Carol, and Cliff had to handle the orientation as I was out of town.
 (Therefore, Marion, Carol, and Cliff had to handle....)
 He had drunk too much; so he had no business driving.
 (Therefore, he had no business driving. )
@@ -4579,16 +4554,18 @@ like but or subordinate conjunctions like because or though, use a period after 
 Q Did you see her earlier in the day?
 A Yes. And we didn't speak at the time.
 A Yes. Because she had something I needed.
-A No. But The next day.
+A No. But the next day.
 A No. Nor anytime later.
+
 Q Was she involved in the deception?
 A No. Nor was her sister.
 A No. Though I didn't know it at the time.
 A Yes. And no one could prove it.
 A Yes. But along with her siblings.
-Q4 Did they travel together?
+
+Q Did they travel together?
 A No. Although I think they did meet up later.
-No. Or at least not on that trip. A
+A No. Or at least not on that trip.
 A Yes. But they were concerned about security.
 A Yes. Since it was cheaper.
 
@@ -4596,12 +4573,13 @@ THE WORDS YES AND NO.8: If the answer continues after the yes or no and its echo
 after "Yes, I did" or "No, she hasn't" -- put a period after the echoed answer before the addition of
 another sentence.
 Q Have you attended all board meetings?
-Yes, I have. I have not missed one. A
+A Yes, I have. I have not missed one.
+
 Q Did she seem interested in your offer?
 A No, she didn't seem interested. She was happy where she was.
-Q A
-Was she a part of the team that did the analysis?
-Yes, she was. Later, however, she resigned from that team.
+
+Q Was she a part of the team that did the analysis?
+A Yes, she was. Later, however, she resigned from that team.
 
 THE WORDS YES AND NO.9: When the word yes or no is at the end of the sentence, it takes a comma
 in front of it.
