@@ -82,8 +82,8 @@ the stated rule.
 
 Convert the supplied transcript into a deposition transcript using the
 examination, Q/A, colloquy, and plain-text layout below. The input uses tags
-such as `Speaker 1:` and `Speaker 2:`. Treat these tags as suggestions. Use
-conversational context to detect speaker changes even within a single tagged
+such as `Speaker 1:` and `Speaker 2:`, which were the detected speaker distinctions. Use
+conversational context to revise speaker changes even within a single tagged
 passage. Start a new turn when the speaker changes, reassign speech to the
 correct speaker, and correct swapped speaker labels. Start each heading, BY
 line, speaker turn, and procedural note on its own line, with no blank lines
@@ -211,25 +211,35 @@ discussions. Questions and answers occurring during colloquy must retain speaker
 rather than Q&A labels. The presence of a question or answer does not automatically make the
 exchange formal examination; determine conversational context before assigning labels.
 
-Input (transcript A)
-Speaker 1: Counsel, can we stipulate to relieve the court reporter of her duties?
-Speaker 2: Yes, so stipulated.
+Input
+Speaker 1: Did you see the accident?
+Speaker 2: Yes.
+Speaker 1: Where were you standing?
+Speaker 2: At the corner.
+Speaker 3: Counsel, before you go on, can we agree that the witness was on foot at the time?
+Speaker 1: Yes, we can agree to that.
+Speaker 2: That's right. I was walking to work.
+Speaker 3: The witness was on foot at the time.
+Speaker 1: So stipulated.
+Speaker 3: Thank you. Go ahead, Counsel.
+Speaker 1: Which direction were you facing?
+Speaker 2: North.
 
 Expected output
-     SPEAKER 1:  Counsel, can we stipulate to relieve the court reporter of her duties?
-     SPEAKER 2:  Yes, so stipulated.
-
-Input (transcript B)
-Speaker 1: Madam Reporter, could you mark this as Exhibit 2?
-Speaker 2: Certainly.
-Speaker 3: May I take a break?
-Speaker 1: Yes, Doctor.
-
-Expected output
-     SPEAKER 1:  Madam Reporter, could you mark this as Exhibit 2?
-     SPEAKER 2:  Certainly.
-     SPEAKER 3:  May I take a break?
-     SPEAKER 1:  Yes, Doctor.
+BY SPEAKER 1:
+     Q    Did you see the accident?
+     A    Yes.
+     Q    Where were you standing?
+     A    At the corner.
+     SPEAKER 3:  Counsel, before you go on, can we agree that the witness was on foot at the time?
+     SPEAKER 1:  Yes, we can agree to that.
+     SPEAKER 2:  That's right.  I was walking to work.
+     SPEAKER 3:  The witness was on foot at the time.
+     SPEAKER 1:  So stipulated.
+     SPEAKER 3:  Thank you.  Go ahead, Counsel.
+BY SPEAKER 1:
+     Q    Which direction were you facing?
+     A    North.
 
 SPEAKER FORMAT.4: Subsequent examinations and further examination. Use EXAMINATION for each
 attorney's first formal examination of a witness. When an earlier examiner returns after
@@ -303,6 +313,40 @@ Expected output
      SPEAKER 2:  We are back on the record.
      SPEAKER 1:  Please mark this document as Exhibit 1.
                (Exhibit 1 was marked for identification.)
+
+SPEAKER FORMAT.6: Another speaker interjects during examination. Keep Q and A labels for every
+exchange between the examining attorney and the witness, including brief courtesies such as
+"Take your time" and "Thank you." When another speaker, such as opposing counsel, interjects,
+format that turn and the witness's reply as colloquy with SPEAKER N: labels, even when the
+witness's reply answers the pending question. When the examining attorney asks the next formal
+question, insert that attorney's BY SPEAKER N: line and return to Q&A formatting. Do not add a
+new EXAMINATION heading.
+
+Input
+Speaker 1: Did you sign the contract?
+Speaker 2: Yes.
+Speaker 1: When did you sign it?
+Speaker 2: I'd have to check the document.
+Speaker 1: Take your time.
+Speaker 2: Thank you.
+Speaker 3: It's on the last page.
+Speaker 2: Okay, I see it. March 3, 2024.
+Speaker 1: Did anyone else sign it?
+Speaker 2: No.
+
+Expected output
+BY SPEAKER 1:
+     Q    Did you sign the contract?
+     A    Yes.
+     Q    When did you sign it?
+     A    I'd have to check the document.
+     Q    Take your time.
+     A    Thank you.
+     SPEAKER 3:  It's on the last page.
+     SPEAKER 2:  Okay, I see it.  March 3, 2024.
+BY SPEAKER 1:
+     Q    Did anyone else sign it?
+     A    No.
 
 ## THE ESSENTIAL/NONESSENTIAL ISSUE
 
