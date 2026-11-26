@@ -212,6 +212,7 @@ class DocumentView(QWidget):
     def set_smart_keys(self, enabled):
         if self.smart_keys != enabled:
             self.smart_keys = enabled
+            self.preview_editor.set_block_cursor(enabled)
             self.changed.emit()
 
     def replay_current_edit(self):

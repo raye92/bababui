@@ -3,10 +3,10 @@ from threading import Event
 from time import monotonic
 
 import pytest
-from PySide6.QtCore import QPointF, Qt, QUrl
+from PySide6.QtCore import QPointF, QRect, Qt, QUrl
 from PySide6.QtGui import QTextCursor, QTextFormat
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QApplication, QLabel
 
 from app.tests.test_inline_integration import audio_review
 from app.tests.test_native_editor import native_window, source_zip
@@ -336,6 +336,48 @@ def test_typing_and_smart_keys_are_scoped_to_transcript_tabs(native_window, tmp_
     QTest.keyClick(editor, Qt.Key_Slash)
     clone = native_window.duplicate_tab()
     assert view.smart_keys and not clone.smart_keys
+
+
+def test_preview_smart_keys_blink_over_the_current_character(native_window, tmp_path, request):
+    flash_time = QApplication.cursorFlashTime()
+    request.addfinalizer(lambda: QApplication.setCursorFlashTime(flash_time))
+    QApplication.setCursorFlashTime(250)
+    native_window.import_zip(0, source_zip(tmp_path, audio=False))
+    view = native_window.current
+    view.editor.setPlainText('Well-known draft.')
+    view.receive('Well-known wording.', [])
+    native_window.keyboard_mode_btn.click()
+    preview_action(native_window).trigger()
+    editor = visible_preview(view)
+    native_window.activateWindow()
+    editor.setFocus()
+    cursor = editor.textCursor()
+    cursor.setPosition(4)
+    editor.setTextCursor(cursor)
+
+    def cell_color(position):
+        probe = QTextCursor(editor.document())
+        probe.setPosition(position)
+        left = editor.cursorRect(probe)
+        probe.movePosition(QTextCursor.NextCharacter)
+        x = (left.x() + editor.cursorRect(probe).x()) // 2
+        return editor.viewport().grab(QRect(x, left.y() + 2, 1, 1)).toImage().pixelColor(0, 0)
+
+    background = cell_color(5)
+    # The preview paints its own hyphens over the transcript text.
+    wait_until(lambda: cell_color(4) != background)
+    wait_until(lambda: cell_color(4) == background)
+    QTest.keyClick(editor, Qt.Key_Right)
+    assert editor.textCursor().position() == 5 and not editor.textCursor().hasSelection()
+    wait_until(lambda: cell_color(5) != background)
+    assert cell_color(4) == background
+
+    QTest.keyClick(editor, Qt.Key_Slash, Qt.ControlModifier | Qt.ShiftModifier)
+    assert view.document.incoming == 'Well-/known wording.'
+    QTest.keyClick(editor, Qt.Key_Slash)
+    assert cell_color(6) == background
+    QTest.keyClicks(editor, 'X')
+    assert view.document.incoming == 'Well-/Xknown wording.'
 
 
 def test_brackets_play_from_the_preview_caret_and_stop(native_window, audio_review):

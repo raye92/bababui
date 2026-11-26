@@ -1,9 +1,9 @@
 """Render the accepted transcript while its suggestions are pending."""
 import re
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QTextCursor
-from PySide6.QtWidgets import QTextEdit
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QRunnable, QSignalBlocker, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QTextCursor, QTextLine
+from PySide6.QtWidgets import QApplication, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
 from app.src.casecat.presentation import prepare_editor_presentation
@@ -40,7 +40,14 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
     native_edit_requested = Signal(object, int, int, str, int)
 
     def __init__(self, font):
+        self._block_cursor = False
         super().__init__(font)
+        self._block_cursor_visible = False
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.timeout.connect(self._blink_cursor)
+        self.cursorPositionChanged.connect(self._restart_cursor_blink)
+        self.selectionChanged.connect(self._restart_cursor_blink)
+        QApplication.styleHints().cursorFlashTimeChanged.connect(self._restart_cursor_blink)
         self.setReadOnly(True)
         self._text = ''
         self._edits, self._highlights = (), []
@@ -49,6 +56,53 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         self.caret_affinity = None
         self.affinity_position = -1
         self._block_styles = []
+
+    def set_block_cursor(self, enabled):
+        self._block_cursor = enabled
+        self._restart_cursor_blink()
+
+    def event(self, event):
+        handled = super().event(event)
+        if self._block_cursor and event.type() in (QEvent.FocusIn, QEvent.FocusOut, QEvent.ReadOnlyChange):
+            self._restart_cursor_blink()
+        return handled
+
+    def _restart_cursor_blink(self):
+        cursor = self.textCursor()
+        active = (self._block_cursor and self.hasFocus() and not self.isReadOnly()
+                  and not cursor.isNull() and not cursor.hasSelection())
+        if not (active or self._block_cursor_visible or self._cursor_timer.isActive()):
+            return
+        self.setCursorWidth(0 if active else -1)
+        self._block_cursor_visible = active
+        self._cursor_timer.stop()
+        period = QApplication.cursorFlashTime()
+        if active and period > 0:
+            self._cursor_timer.start(max(1, period // 2))
+        self.viewport().update()
+
+    def _block_cursor_rect(self):
+        cursor = self.textCursor()
+        rect = QRectF(self.cursorRect(cursor))
+        offset = cursor.positionInBlock()
+        block = cursor.block()
+        line = block.layout().lineForTextPosition(offset)
+        advance = 0
+        if line.isValid() and not cursor.atBlockEnd():
+            advance = line.cursorToX(offset, QTextLine.Trailing)[0] - line.cursorToX(offset)[0]
+        if not advance:
+            # Tabs and paragraph ends get one blank cell in the writing direction.
+            font = cursor.charFormat().font().resolve(self.document().defaultFont())
+            advance = QFontMetricsF(font).horizontalAdvance(' ')
+            if block.textDirection() == Qt.RightToLeft:
+                advance = -advance
+        rect.translate(min(0, advance), 0)
+        rect.setWidth(abs(advance))
+        return rect
+
+    def _blink_cursor(self):
+        self._block_cursor_visible = not self._block_cursor_visible
+        self.viewport().update(self._block_cursor_rect().toAlignedRect())
 
     def load_preview(self, bundle, job, prepared, model, selected):
         self.set_native_source(bundle, job)
@@ -262,6 +316,12 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        if self._block_cursor_visible:
+            # Invert the finished page so review colors and hand-drawn hyphens
+            # remain legible inside the blinking character cell.
+            with QPainter(self.viewport()) as painter:
+                painter.setCompositionMode(QPainter.CompositionMode_Difference)
+                painter.fillRect(self._block_cursor_rect(), Qt.white)
         if self._focused:
             rects = [self._highlight_rect(c) for c in self._focused] if self._separate_focus else (self._focus_rect(),)
             draw_focus_outlines(QPainter(self.viewport()), self, rects)
