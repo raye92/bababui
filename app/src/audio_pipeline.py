@@ -356,7 +356,7 @@ class AudioPipeline:
         for attempt in range(2):
             try:
                 raw = sdk.interactions.with_raw_response.create(model=AUDIO_MODEL,
-                    input=[{'type': 'audio', 'uri': uri, 'mime_type': 'audio/wav'}], store=False,
+                    input=[{'type': 'audio', 'uri': uri, 'mime_type': 'audio/wav'}], store=True,
                     generation_config={'max_output_tokens': 16384, 'transcription_config': config},
                     automatic_continuation=False, timeout=1800)
                 break

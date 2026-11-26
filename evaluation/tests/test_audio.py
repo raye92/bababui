@@ -192,7 +192,7 @@ def test_gemini_contract_and_cleanup(tmp_path, status, text, success):
             with pytest.raises(ValueError):
                 client.transcribe(tmp_path / "x.wav", model, lambda _: None, lambda _: None)
         assert events == ["files/upload"]
-        assert payloads[0]["model"] == model and payloads[0]["store"] is False
+        assert payloads[0]["model"] == model and payloads[0]["store"] is True
         if model == AUDIO_MODELS[0]:
             assert payloads[0]["generation_config"] == {"transcription_config": {"mode": {"type": "verbatim", "diarization_mode": "speaker"}}}
         else:

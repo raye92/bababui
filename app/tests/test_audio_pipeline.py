@@ -191,6 +191,7 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
             assert words[0]['start'] == 0 and words[1]['text'] == 'there.'
     assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
     assert len(requests) == 1
+    assert requests[0]['store'] is True
     assert requests[0]['generation_config']['transcription_config']['mode'] == {
         'type': 'verbatim', 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}
 

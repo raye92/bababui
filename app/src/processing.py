@@ -48,7 +48,7 @@ class ProcessingClient:
                 self.sdk = genai.Client(api_key=self.config['gemini_api_key'],
                     http_options={'timeout': 1800000, 'retry_options': {'attempts': 1}})
             response = self.sdk.interactions.create(model=self.model, input=text,
-                system_instruction=prompt, store=False, automatic_continuation=False,
+                system_instruction=prompt, store=True, automatic_continuation=False,
                 generation_config={'max_output_tokens': 65536}, timeout=1800)
             if getattr(response.status, 'value', response.status) != 'completed':
                 raise ValueError('Formatting did not complete. Retry or select another model.')

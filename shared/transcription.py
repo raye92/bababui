@@ -86,7 +86,7 @@ class GeminiTranscriber:
             if str(getattr(uploaded.state, "value", uploaded.state)).upper() not in ("ACTIVE", "NONE"):
                 raise ValueError("Audio upload processing failed.")
             audio = {"type": "audio", "uri": uploaded.uri, "mime_type": "audio/wav"}
-            kwargs = {"model": model, "input": [audio], "store": False}
+            kwargs = {"model": model, "input": [audio], "store": True}
             if model == DEFAULT_AUDIO_MODEL:
                 kwargs["generation_config"] = {"transcription_config": {
                     "mode": {"type": "verbatim", "diarization_mode": "speaker"}}}

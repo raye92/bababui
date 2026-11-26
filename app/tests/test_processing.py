@@ -49,4 +49,4 @@ def test_gemini_real_sdk_formatting_contract():
         assert client.complete('Speaker 1: Hello', 'Format only') == 'Formatted'
     assert requests[0]['input'] == 'Speaker 1: Hello'
     assert requests[0]['system_instruction'] == 'Format only'
-    assert requests[0]['store'] is False
+    assert requests[0]['store'] is True
