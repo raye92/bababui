@@ -2985,13 +2985,10 @@ Q Are you familiar with 8-F?
 A Do you mean -F or -G?
 Q I'm sorry. I do mean -G.
 
-HYPHEN.50: When dates are said in figures, use hyphens or slash marks between the units in the date.
+HYPHEN.50: When dates are said in figures, use slash marks between the units in the date.
 
-I was born 4-17-89.
 I was born 4/1 7/89.
-It occurred late in the day on 5-29.
 It occurred late in the day on 9/29.
-We always commemorate the tragedy of 9-11-01.
 We always commemorate the tragedy of 9/11/01.
 
 ## CAPITALIZATION
