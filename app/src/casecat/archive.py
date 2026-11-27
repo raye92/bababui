@@ -232,9 +232,16 @@ def export_zip(bundle, job, target, *, overwrite=False, ai_copy=False, alignment
                 raise
             from .retiming import AudioExportError
             raise AudioExportError(f'Could not reimport the corrected CaseCAT records: {exc}') from exc
-        if (restored.text != job.text or restored.notes_bytes != notes
-                or restored.audio_member != names.get(job.audio_member, job.audio_member)):
-            raise ValueError('Export validation found changed text, steno, or audio association.')
+        if restored.text != job.text:
+            offset = next((i for i, (a, b) in enumerate(zip(job.text, restored.text)) if a != b),
+                          min(len(job.text), len(restored.text)))
+            line = job.text.count('\n', 0, offset) + 1
+            column = offset - job.text.rfind('\n', 0, offset)
+            raise ValueError(f'Export validation found changed transcript text at line {line}, column {column}.')
+        if restored.notes_bytes != notes:
+            raise ValueError('Export validation found changed steno notes.')
+        if restored.audio_member != names.get(job.audio_member, job.audio_member):
+            raise ValueError('Export validation found a changed WAV association.')
         from .elements import validate_exported_elements
         validate_exported_elements(job.export_elements, restored.revision.elements)
         if not job.examination_styles.items() <= dict(restored.paragraph_styles).items():

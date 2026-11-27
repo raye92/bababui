@@ -84,10 +84,12 @@ Settings can prefill the file number from a filename such as
 `261110thaler 1757905.pdf`. This setting is off by default.
 
 Applying a notice fills the native cover and keeps manual examination page
-numbers and exhibit entries. Testimony begins on page 5, line 11. The working
-project and session recovery retain the notice. Confirmed names help the audio model recognize
-the participants, firms, witness and caption parties. The speaker-labeled raw
-export and formatting use the reconciled spellings.
+numbers and exhibit entries. The editor shows the cover's native tab stops and
+half-lines. In the standard five-page cover, testimony begins on page 5, line 11.
+The working project and session recovery retain the notice. Confirmed names help
+the audio model recognize participants, firms, the witness, and caption parties.
+Formatting also preserves a notice spelling when the same name appears in the
+corresponding passage of the original testimony.
 
 Each tab remembers its processing model: Gemini 4 Argon (default), Gemini 3.8
 Flash, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model

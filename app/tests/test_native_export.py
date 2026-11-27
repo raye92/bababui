@@ -15,6 +15,32 @@ from app.tests.test_native_layout import layout_bytes
 from app.tests.test_native_structure import container_files
 
 
+@pytest.mark.parametrize(('damage', 'message'), [
+    ('text', r'transcript text at line 2, column 6'),
+    ('steno', 'steno notes'),
+    ('audio', 'WAV association'),
+])
+def test_failed_reimport_identifies_the_difference_and_preserves_destination(tmp_path, monkeypatch, damage, message):
+    from app.src.casecat import codec
+    bundle = inspect_archive(zip_bytes(job_files(('First\n', 'Second'))))
+    job = load_job(bundle, bundle.jobs[0])
+
+    def damaged_reimport(archive, key):
+        restored = load_job(archive, key)
+        if damage == 'text':
+            return restored.with_revision(restored.revision.replace(len(job.text) - 1, len(job.text), ''))
+        if damage == 'steno':
+            return replace(restored, notes_bytes=restored.notes_bytes[:-1])
+        return replace(restored, audio_member=None)
+
+    monkeypatch.setattr(codec, 'load_job', damaged_reimport)
+    target = tmp_path / 'reviewed.zip'
+    target.write_bytes(b'previous export')
+    with pytest.raises(ValueError, match=message):
+        export_zip(bundle, job, target, overwrite=True, ai_copy=True)
+    assert target.read_bytes() == b'previous export'
+
+
 @pytest.mark.parametrize('source, replacement', [
     (('blue\x0e \x0b', '\x04berry\x0e \x0b', 'paste.'), 'Maple syrup'),
     (('blue\x0e \x0b', '\x04berry\x0e \x0b', 'paste.'), 'Maple paste'),

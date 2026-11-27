@@ -18,11 +18,11 @@ import xml.etree.ElementTree as ET
 
 from app.src.suggestion_filter import LABEL
 
-from .codec import records, u32, validate_job
+from .codec import TEXT_PROJECTION_VERSION, records, u32, validate_job
 from .layout import read_layouts, read_deltas
 from .elements import CENTERED_STYLE, CENTER_JUSTIFY
 from .rendering import CONFLICT_STARTS, TextRenderer, render_record
-from .caption import caption_display, caption_value, cover_end
+from .caption import caption_display, caption_value, cover_bounds
 
 
 @dataclass(frozen=True)
@@ -47,10 +47,10 @@ def rendering_settings(job, bundle):
     return speakers, all_caps
 
 
-def projected_groups(job, bundle, *, legacy_projection=False):
+def projected_groups(job, bundle, *, projection_version=TEXT_PROJECTION_VERSION):
     speakers, all_caps = rendering_settings(job, bundle)
-    end_cover = cover_end(job.native_bytes)
-    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=legacy_projection)
+    end_cover, _ = cover_bounds(job.native_bytes, legacy=projection_version < 3)
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=projection_version == 1)
     start, length = u32(job.native_bytes, 532), u32(job.native_bytes, 536)
     groups, group = [], []
     for offset, raw in records(job.native_bytes, start, start + length):
@@ -669,8 +669,7 @@ def _write_revision(job, bundle, legacy_joins):
     from .fields import field_values
     values = field_values(job.revision)
     baseline_values = field_values(job.baseline)
-    end_cover = cover_end(job.native_bytes)
-    wrapped = bool(end_cover)
+    end_cover, wrapped = cover_bounds(job.native_bytes)
     speakers.update({name: caption_display(caption_value(name, value)) if wrapped else value for name, value in values.items()
                      if value != baseline_values.get(name)})
     centers = {e.start for e in job.revision.elements if e.kind == 'symbol' and e.name == 'Center Justify'}
@@ -681,7 +680,7 @@ def _write_revision(job, bundle, legacy_joins):
     colloquy_indents = (_colloquy_indents(text, elements, element_starts)
                        if layouts and len(layouts[0].paragraphs) >= 4 else {})
     indent_end = 0
-    renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=wrapped), 0
+    renderer, visible = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover)), 0
     retained_gaps = _retained_join_gaps(job.baseline, groups, targets, legacy_joins)
     centered = 0 in centers
     examination_styles = job.examination_styles

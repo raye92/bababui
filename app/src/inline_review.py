@@ -9,7 +9,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeySequence, QPainter,
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit
 
 from app.src.casecat.anchors import utf16_index
-from app.src.native_editor import NativeTranscriptEditor, PageLine
+from app.src.native_editor import NativeTranscriptEditor, PageLine, _tab_positions
 from app.src.review_colors import ADDITION_BACKGROUND, CHECK_BACKGROUND, CHECK_FOREGROUND
 from app.src.suggestions import distance_to_ranges, preview_ranges, preview_start
 
@@ -49,6 +49,7 @@ class ReviewRow:
     # native text range, after all text in the caption's left cell.
     caption_cell: tuple[int, int, int, int] | None = None
     background_rect: QRectF | None = None
+    tab_ends: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -80,8 +81,9 @@ def _row_groups(model, old_rows, new_rows):
             a, b = max(start, row.source_start), min(end, row.source_end)
             if a >= b and not (row.source_start == row.source_end and start <= row.source_start <= end):
                 continue
-            incoming.append(replace(row, source_start=a, source_end=b,
-                                    text=row.text[a-row.source_start:b-row.source_start],
+            first, last = a - row.source_start, b - row.source_start
+            incoming.append(replace(row, source_start=a, source_end=b, text=row.text[first:last],
+                                    tab_ends=row.tab_ends[row.text.count('\t', 0, first):row.text.count('\t', 0, last)],
                                     x=original[0].x if original and not incoming else row.x))
         yield original, incoming, section
 
@@ -124,10 +126,17 @@ def _native_rows(editor, side):
                     font = editor.font()
                 text = raw[line.textStart()*2:(line.textStart()+line.textLength())*2].decode('utf-16-le')
                 x = bounds.left() + line.cursorToX(line.textStart())[0]
+                tab_ends = []
+                if '\t' in text:
+                    tab_end = line.textStart()
+                    for piece in text.split('\t')[:-1]:
+                        tab_end += _qt(piece) + 1
+                        tab_ends.append(bounds.left() + line.cursorToX(tab_end)[0])
                 rows.append(ReviewRow(side, positions[start], positions[end], text,
                                       page, number, page, number, y,
                                       x, pitch,
-                                      line.y() - index*pitch, font, glyph_height=line.height()))
+                                      line.y() - index*pitch, font, glyph_height=line.height(),
+                                      tab_ends=tuple(tab_ends)))
         block = block.next()
     return rows
 
@@ -165,6 +174,7 @@ class InlineReviewEditor(QTextEdit):
         super().__init__(parent)
         self.model = None
         self.rows, self.pages = [], []
+        self._notice_gutters = {}
         self.boundary_marks = []
         self.source_editors = None
         self._external_sources = False
@@ -262,7 +272,7 @@ class InlineReviewEditor(QTextEdit):
                 projected = ReviewRow('incoming', row.source_start, row.source_end, row.text,
                                       page, 0, row.page, row.number, y, row.x, row.pitch,
                                       row.leading, row.font, section_index, edits,
-                                      glyph_height=row.glyph_height)
+                                      glyph_height=row.glyph_height, tab_ends=row.tab_ends)
                 self.rows.append(projected)
                 y += row.pitch
             if not new_group:
@@ -321,6 +331,14 @@ class InlineReviewEditor(QTextEdit):
             top += height
         _combine_caption_cells(self.rows, original)
         self._render_document(unmatched_speakers)
+        self._notice_gutters = {}
+        if getattr(original._paragraph_styles, 'cover_length', 0):
+            rows_by_page = {page.number: [] for page in self.pages}
+            for row in self.rows:
+                rows_by_page[row.page].append(row)
+            for page in self.pages:
+                self._notice_gutters[page.number] = self._notice_line_positions(
+                    page, rows_by_page[page.number], native_geometry)
         self.boundary_marks = []
         for index, edit in enumerate(model.edits):
             preview = self._highlight_ranges[index]
@@ -338,6 +356,27 @@ class InlineReviewEditor(QTextEdit):
         side, position = anchor
         self.set_source_position(side, min(position, len(getattr(model, side).text)))
         self._refresh_selections()
+
+    def _notice_line_positions(self, page, rows, native_geometry):
+        """Keep a single gutter grid as comparison rows expand or compact the page."""
+        original = sorted((native_geometry[r.source_start, r.source_end][0], r.y)
+                          for r in rows if r.number)
+        source_top = (page.number - 1) * self._page_height
+        offset = page.top - source_top
+        anchors = iter(original)
+        anchor = next(anchors, None)
+        last = max((r.y + r.pitch for r in rows), default=page.top + self._top)
+        positions = []
+        for n in range(self.source_editors[0].lines_per_page):
+            native_y = source_top + self._top + n * self._line_height
+            while anchor and anchor[0] <= native_y + 1:
+                offset = anchor[1] - anchor[0]
+                anchor = next(anchors, None)
+            y = native_y + offset
+            if not anchor and original and native_y > original[-1][0] + 1:
+                y = max(y, last, positions[-1] + self._line_height if positions else y)
+            positions.append(y)
+        return positions
 
     def _render_document(self, unmatched_speakers):
         document = self.document()
@@ -363,6 +402,7 @@ class InlineReviewEditor(QTextEdit):
                 cursor.setPosition(position)
                 block = QTextBlockFormat()
                 block.setLeftMargin(row.x)
+                block.setTabPositions(_tab_positions(end - row.x for end in row.tab_ends))
                 # Every display block contains one physical row. Put spacing
                 # in margins so switching between native and compact pitch
                 # cannot move the glyph relative to its painted line number.
@@ -727,6 +767,8 @@ class InlineReviewEditor(QTextEdit):
         painter.setFont(source.font())
         painter.setPen(QColor('#8a8f98'))
         for row in self.rows:
+            if row.number and row.page in self._notice_gutters:
+                continue
             if scroll-self._line_height <= row.y <= scroll+self.viewport().height():
                 label = str(row.number) if row.number else '+' if row.kind == 'incoming' else '−'
                 painter.drawText(source.line_number_rect(row.y), Qt.AlignRight | Qt.AlignVCenter, label)
@@ -736,12 +778,15 @@ class InlineReviewEditor(QTextEdit):
             painter.setPen(self.palette().color(QPalette.Mid))
             painter.drawRect(QRectF(1, page.top+1, self._page_width-2, page.height-2))
             painter.setPen(QColor('#8a8f98'))
-            page_rows = [row for row in self.rows if row.page == page.number]
-            numbered = [row for row in page_rows if row.number]
-            count = numbered[-1].number if numbered else 0
-            last_y = max((row.y+row.pitch for row in page_rows), default=page.top+self._top)
-            for number in range(count+1, source.lines_per_page+1):
-                y = last_y+(number-count-1)*self._line_height
+            if page.number in self._notice_gutters:
+                gutter = enumerate(self._notice_gutters[page.number], 1)
+            else:
+                page_rows = [row for row in self.rows if row.page == page.number]
+                count = next((row.number for row in reversed(page_rows) if row.number), 0)
+                last_y = max((row.y + row.pitch for row in page_rows), default=page.top + self._top)
+                gutter = ((n, last_y + (n - count - 1) * self._line_height)
+                          for n in range(count + 1, source.lines_per_page + 1))
+            for number, y in gutter:
                 painter.drawText(source.line_number_rect(y), Qt.AlignRight | Qt.AlignVCenter, str(number))
             footer = source.page_number_rect(page.number-1)
             footer.translate(0, page.top-(page.number-1)*self._page_height+page.height-self._page_height)

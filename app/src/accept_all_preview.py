@@ -107,9 +107,13 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
     def load_preview(self, bundle, job, prepared, model, selected):
         self.set_native_source(bundle, job)
         self.setPlainText(job.text, prepared=prepared)
-        self._block_styles = [(self._paragraph_styles.get(m.start()), m.start() in self._page_breaks)
+        self._block_styles = [self._block_style(m.start())
                               for m in re.finditer('^', job.text, re.MULTILINE)]
         self.update_review(model, selected)
+
+    def _block_style(self, position):
+        return (self._paragraph_styles.get(position), position in self._page_breaks,
+                getattr(self._paragraph_styles, 'grid_margins', {}).get(position))
 
     def invalidate_paragraphs(self, before, start, end, replacement, after):
         first = before.count('\n', 0, start)
@@ -126,6 +130,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         from shared.transcript_formatting import TranscriptFormatter
         text = revision.text
         if any(not c.isalnum() for c in replacement + text[start:end]):
+            return True
+        if start < getattr(self._paragraph_styles, 'cover_length', 0):
             return True
         block = self.document().findBlock(qt_position)
         first = text.rfind('\n', 0, start) + 1
@@ -198,7 +204,7 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
         with QSignalBlocker(self), QSignalBlocker(document):
             cursor.beginEditBlock()
             for index, line in enumerate(display.split('\n')):
-                role = self._paragraph_styles.get(logical), logical in self._page_breaks
+                role = self._block_style(logical)
                 if index >= len(self._block_styles) or role != self._block_styles[index]:
                     changed.append((logical, qt_offset))
                     block = document.findBlock(qt_offset)
@@ -216,7 +222,8 @@ class AcceptAllPreviewEditor(NativeTranscriptEditor):
                 logical += len(line) + 1
                 qt_offset += (len(line) if line.isascii() else len(line.encode('utf-16-le')) // 2) + 1
             self._apply_paragraph_styles(changed)
-            if changed and changed[0][0] == 0:
+            self._apply_space_controls()
+            if changed and changed[0][0] <= getattr(self._paragraph_styles, 'cover_length', 0):
                 self._align_page_top()
             cursor.endEditBlock()
         self._block_styles = roles

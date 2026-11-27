@@ -10,6 +10,7 @@ import zlib
 
 from . import archive, codec
 from .anchors import Revision
+from .caption import cover_bounds
 from app.src.speech_alignment import SpeechAlignment
 from app.src.notice_model import NoticeDetails
 
@@ -179,7 +180,7 @@ class NativeState:
                 'source_name': self.bundle.name, 'source_path': self.bundle.source_path,
                 'original': self.original.to_dict(), 'incoming': self.incoming.to_dict(),
                 'review': self.review, 'alignment': vars(self.alignment).copy() if self.alignment else None,
-                'text_projection_version': 2}
+                'text_projection_version': codec.TEXT_PROJECTION_VERSION}
 
     @classmethod
     def restore(cls, bundle, record, notice=None):
@@ -197,14 +198,24 @@ class NativeState:
             state = cls.load(bundle, record['job'])
             state.notice = notice
             version = record.get('text_projection_version', 1)
-            if type(version) is not int or version not in (1, 2):
+            if type(version) is not int or not 1 <= version <= codec.TEXT_PROJECTION_VERSION:
                 raise ValueError('Unsupported native text projection version.')
-            # Saved ranges use the editor text the reviewer originally saw.
-            saved_job = codec.load_job(bundle, record['job'], legacy_projection=True) if version == 1 else state.job
-            if notice and not 0 <= notice.body_start <= len(saved_job.text):
-                raise ValueError('Invalid saved start of testimony.')
             state.original = Revision.from_dict(record['original'])
             state.incoming = Revision.from_dict(record['incoming'])
+            # Saved ranges use the editor text the reviewer originally saw.
+            saved_job = state.job
+            if version == 1:
+                saved_job = codec.load_job(bundle, record['job'], projection_version=version)
+            elif version == 2:
+                bounds = cover_bounds(saved_job.native_bytes)
+                # Projects that already displayed the table recorded its wrapped
+                # party fields, including when the final blank had been edited.
+                known_table = bounds[1] and any(e.wrap_caption for rev in (state.original, state.incoming)
+                                                for e in rev.elements if e.source is not None)
+                if not known_table and bounds != cover_bounds(saved_job.native_bytes, legacy=True):
+                    saved_job = codec.load_job(bundle, record['job'], projection_version=version)
+            if notice and not 0 <= notice.body_start <= len(saved_job.text):
+                raise ValueError('Invalid saved start of testimony.')
             state.review = record.get('review')
             state.alignment = SpeechAlignment.restore(record.get('alignment'), len(state.job.stroke_clocks))
             if state.review is not None:
@@ -227,21 +238,22 @@ class NativeState:
             if state.review and 'pending_decisions' in state.review:
                 from app.src.review_editing import restore_decisions
                 restore_decisions(state.original, state.incoming, state.review['pending_decisions'])
-            if version == 1 and saved_job.baseline != state.job.baseline:
-                from .project_tabs import source_tabs, restore_tabs, restore_notice_start, restore_tab_review
-                groups = source_tabs(saved_job, bundle)
-                if groups:
-                    original, original_map = restore_tabs(saved_job, state.original, groups)
+            if saved_job.baseline != state.job.baseline:
+                from .project_tabs import projection_changes, restore_controls, restore_control_review
+                groups, formats = projection_changes(saved_job, state.job, bundle, version)
+                if groups or formats:
+                    original, original_map = restore_controls(saved_job, state.original, groups, formats)
                     incoming, incoming_map = ((original, original_map) if state.original == state.incoming
-                                             else restore_tabs(saved_job, state.incoming, groups))
+                                             else restore_controls(saved_job, state.incoming, groups, formats))
                     if state.original == saved_job.baseline and original.text == state.job.text:
                         original = state.job.baseline
                     if state.incoming == saved_job.baseline and incoming.text == state.job.text:
                         incoming = state.job.baseline
-                    state.review = restore_tab_review(state.review, original, incoming, original_map, incoming_map)
+                    state.review = restore_control_review(state.review, original, incoming, original_map, incoming_map)
                     state.original, state.incoming = original, incoming
                     if notice:
-                        body_start = restore_notice_start(saved_job, groups, notice.body_start)
+                        _, baseline_map = restore_controls(saved_job, saved_job.baseline, groups, formats)
+                        body_start = baseline_map(notice.body_start, before=True)
                         if body_start != notice.body_start:
                             state.notice = replace(notice, body_start=body_start)
                     if state.review and 'pending_decisions' in state.review:
@@ -269,7 +281,8 @@ def project_bytes(state, document):
 
 def without_legacy_text(document, native):
     """Check redundant document text against the saved revision projection."""
-    if (not native or native.get('text_projection_version', 1) != 1 or not isinstance(document, dict)
+    if (not native or not isinstance(document, dict)
+            or native.get('text_projection_version', 1) >= codec.TEXT_PROJECTION_VERSION
             or not {'original', 'incoming'}.intersection(document)):
         return document
     document = dict(document)

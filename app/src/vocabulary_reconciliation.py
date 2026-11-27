@@ -1,4 +1,4 @@
-"""Apply spellings heard in a vocabulary window to the corresponding speaker's words."""
+"""Reconcile confirmed notice spellings with recorded and formatted testimony."""
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -9,6 +9,7 @@ import unicodedata
 _LEXEME = re.compile(r"[^\W_]+(?:['’.\-‐‑][^\W_]+)*|&")
 _FIRM_WORDS = {'and', 'associates', 'attorneys', 'company', 'corporation', 'counsel', 'firm',
                'group', 'law', 'lawyers', 'legal', 'limited', 'offices', 'partners', 'professional'}
+_TITLES = {'mr', 'mrs', 'ms', 'miss', 'dr', 'doctor', 'prof', 'professor'}
 
 
 def normalized_vocabulary(terms):
@@ -120,6 +121,69 @@ def _similar(old, new):
                 offset += len(part)
         return True
     return ratio >= .65 or (min(len(a), len(b)) >= 4 and a[0] == b[0] and a[-1] == b[-1] and ratio >= .5)
+
+
+def _testimony_lexemes(text):
+    from app.src.suggestion_filter import LABEL, QA_PREFIX
+
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        marker = LABEL.match(line) or QA_PREFIX.match(line)
+        label, colon, _ = line.partition(':')
+        custom_label = colon and (label.isupper() or label.lstrip().upper().startswith('BY '))
+        start = len(label) + 1 if custom_label else 0
+        if marker:
+            start = marker.end()
+        for a, b, word in _lexemes(line[start:]):
+            yield offset + start + a, offset + start + b, word
+        offset += len(line)
+
+
+def _name_context(text, tokens, keys, i, adjacent):
+    start, end, spelling = tokens[i]
+    if i:
+        gap = text[tokens[i - 1][1]:start]
+        if keys[i - 1] in _TITLES and gap.strip() in ('', '.'):
+            return True
+        if (keys[i - 1], keys[i]) in adjacent and gap.isspace():
+            return True
+        if not spelling.isupper() and not re.search(r'[.!?:\r\n]', gap):
+            return True  # Distinctive capitalization inside a sentence.
+    return (i + 1 < len(tokens) and (keys[i], keys[i + 1]) in adjacent
+            and text[end:tokens[i + 1][0]].isspace())
+
+
+def preserve_notice_spellings(original, formatted, vocabulary):
+    """Keep a notice spelling when the same spoken name occurs in the original testimony."""
+    confirmed, adjacent = set(), set()
+    for term in vocabulary:
+        keys = [_key(word) for _, _, word in _lexemes(term)]
+        confirmed.update(key for key in keys if len(key) > 1 and key not in _FIRM_WORDS)
+        adjacent.update(zip(keys, keys[1:]))
+    if not confirmed or original == formatted:
+        return formatted
+    source = list(_testimony_lexemes(original))
+    proposal = list(_testimony_lexemes(formatted))
+    old = [_key(word) for _, _, word in source]
+    new = [_key(word) for _, _, word in proposal]
+    # A different name already used in the notice or testimony stays available for review.
+    other_names = confirmed | {key for key, (_, _, word) in zip(old, source) if word[0].isupper()}
+    starts, ends, matches = _alignment(new, old)
+    edits = []
+    for i, (_, _, spelling) in enumerate(source):
+        j = starts.get(i)
+        if j is None or ends.get(i) != j + 1 or old[i] not in confirmed or not spelling[0].isupper():
+            continue
+        a, b, candidate = proposal[j]
+        if not candidate[0].isupper() or new[j] in other_names or not _similar([old[i]], [new[j]]):
+            continue
+        # Require surviving words next to this occurrence, even across a split or joined turn.
+        anchors = sum(i + step in matches and starts[i + step] == j + step for step in (-2, -1, 1, 2))
+        if anchors >= 2 and _name_context(original, source, old, i, adjacent):
+            edits.append((a, b, spelling))
+    for a, b, spelling in reversed(edits):
+        formatted = formatted[:a] + spelling + formatted[b:]
+    return formatted
 
 
 def _spellings(old, new, forms):

@@ -76,6 +76,11 @@ class ParagraphStyle:
     raw: bytes
     prefix_length: int = 0  # Generated logical label width, never literal indentation.
 
+    @property
+    def tab_stops(self):
+        """Ten absolute ruler positions, in twips from the left paper edge."""
+        return tuple(stop for stop in struct.unpack_from('<10H', self.raw, 250) if stop)
+
 
 @dataclass(frozen=True)
 class Layout:

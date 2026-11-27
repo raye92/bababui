@@ -1,17 +1,24 @@
 """Qt edit transactions and exact revision restoration for native tabs."""
 from dataclasses import dataclass
+from functools import lru_cache
 import math
+import re
 from difflib import SequenceMatcher
 
 from PySide6.QtGui import (QKeySequence, QTextCursor,
                           QColor, QPalette, QContextMenuEvent, QFont, QFontMetricsF,
-                          QTextBlockFormat, QTextFormat, QTextOption, QPainter,
+                          QTextBlockFormat, QTextCharFormat, QTextDocument, QTextFormat, QTextOption, QPainter,
                           QTextTableFormat, QTextLength)
 from PySide6.QtCore import Signal, Qt, QSignalBlocker, QMimeData, QTimer, QSizeF, QRectF, QPointF
 from PySide6.QtWidgets import QApplication, QMenu, QTextEdit, QDialog, QMessageBox
 
 from app.src.casecat.layout import read_layouts, ParagraphStyle
 from shared.transcript_formatting import TranscriptFormatter
+
+
+# Qt renders both a native hard-space control and a literal CP1252 NBSP
+# with U+00A0. Only the control represents an ordinary space in editable text.
+_HARD_SPACE_CONTROL = QTextFormat.UserProperty + 1
 
 
 def _paper_font(family, pixels):
@@ -24,6 +31,31 @@ def _paper_font(family, pixels):
         font.setHintingPreference(QFont.PreferNoHinting)
         font.setLetterSpacing(QFont.AbsoluteSpacing, pixels / 256)
     return font
+
+
+def _tab_positions(positions):
+    tabs = []
+    for position in positions:
+        if position > 0:
+            tab = QTextOption.Tab()
+            tab.position = position
+            tabs.append(tab)
+    return tabs
+
+
+@lru_cache(maxsize=16)
+def _half_line_leading(font, height):
+    """Measure how far Qt lowers the glyph when a half-line becomes a full line."""
+    sample = QTextDocument('x\nx')
+    sample.setDefaultFont(font)
+    cursor = QTextCursor(sample)
+    for pitch in (height, height / 2):
+        fmt = cursor.blockFormat()
+        fmt.setLineHeight(pitch, QTextBlockFormat.FixedHeight.value)
+        cursor.setBlockFormat(fmt)
+        cursor.movePosition(QTextCursor.NextBlock)
+    sample.documentLayout().documentSize()
+    return sample.firstBlock().layout().lineAt(0).y() - sample.lastBlock().layout().lineAt(0).y()
 
 
 class _NativeTransactions:
@@ -192,6 +224,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                         self.apply_native_revision(revision._replace(start, end, text), start+len(text), edit_range=(start, end))
                         return
             self._snap_native_cursor()
+        if self._insert_literal_nbsp(event.text()):
+            return
         super().keyPressEvent(event)
         if event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End):
             self._snap_native_cursor()
@@ -232,14 +266,15 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
 
     def createMimeDataFromSelection(self):
+        from app.src.casecat.anchors import utf16_index
         data = QMimeData()
-        data.setText(self.textCursor().selectedText().replace('\u2029', '\n').replace('\u00a0', ' ').replace('\u2011', '-'))
+        text = self.toPlainText()
+        start = utf16_index(text, self.textCursor().selectionStart())
+        end = utf16_index(text, self.textCursor().selectionEnd())
+        data.setText(text[start:end])
         if self._native_source:
-            from app.src.casecat.anchors import utf16_index
             from app.src.casecat.clipboard import MIME_TYPE, selection_data
             revision = self._native_source[1].revision
-            start = utf16_index(revision.text, self.textCursor().selectionStart())
-            end = utf16_index(revision.text, self.textCursor().selectionEnd())
             if any(start <= e.start and e.end <= end for e in revision.elements):
                 data.setData(MIME_TYPE, selection_data(revision, start, end))
         return data
@@ -258,6 +293,8 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     text = data.text().replace('\r\n', '\n').replace('\r', '\n')
                     self.apply_native_revision(revision._replace(start, end, text), start+len(text), edit_range=(start, end))
                     return
+            if self._insert_literal_nbsp(data.text()):
+                return
             return super().insertFromMimeData(data)
         from app.src.casecat.anchors import utf16_index
         job = self._native_source[1]
@@ -269,6 +306,20 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             QMessageBox.warning(self, 'Cannot paste native elements', str(exc))
             return
         self.apply_native_revision(revision, edit_range=(start, end))
+
+    def _insert_literal_nbsp(self, text):
+        if '\u00a0' not in text or self.isReadOnly():
+            return False
+        cursor = self.textCursor()
+        fmt = cursor.charFormat()
+        if not fmt.boolProperty(_HARD_SPACE_CONTROL):
+            return False
+        # Pasting or typing after a hard-space control inherits its format.
+        # The new nonbreaking space is literal input.
+        fmt.clearProperty(_HARD_SPACE_CONTROL)
+        cursor.insertText(text.replace('\r\n', '\n').replace('\r', '\n'), fmt)
+        self.setTextCursor(cursor)
+        return True
 
 
     def apply_native_revision(self, revision, position=None, *, edit_range=None):
@@ -552,6 +603,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
     def _presentation_text(self, text, prepared=None):
         self._paragraph_styles = {}
         self._page_breaks = frozenset()
+        self._space_controls = ()
         if self._native_source:
             bundle, job = self._native_source
             if job.text == text:
@@ -560,16 +612,42 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     display, styles, page_breaks = prepared if prepared is not None else presentation(job, bundle)
                 except ValueError:
                     display = None
-                if display is not None and display.replace('\u00a0', ' ') == text:
+                if display is not None and display.replace('\u00a0', ' ') == text.replace('\u00a0', ' '):
                     self._paragraph_styles = styles
                     self._page_breaks = page_breaks
+                    self._space_controls = tuple((job.revision.utf16_offset(m.end()), text[m.start()] == ' ')
+                                                 for m in re.finditer('\u00a0', display))
                     return display.replace('-', '\u2011')
         return text.replace('-', '\u2011')
 
     def toPlainText(self):
-        # Same-width nonbreaking hyphens prevent Qt-only wrap opportunities.
-        # They occupy one cursor position and never enter native stored text.
-        return super().toPlainText().replace('\u2011', '-')
+        plain = super().toPlainText().replace('\u2011', '-')
+        raw = self.document().toRawText()
+        if '\u00a0' not in raw:
+            return plain
+        # QTextDocument.toPlainText replaces literal NBSPs as well as visual
+        # hard spaces. The native control flag follows its character through
+        # edits and undo, including when preceding text changes length.
+        result = list(plain)
+        cursor = QTextCursor(self.document())
+        previous = qt_offset = 0
+        for match in re.finditer('\u00a0', raw):
+            qt_offset += len(raw[previous:match.end()].encode('utf-16-le')) // 2
+            previous = match.end()
+            cursor.setPosition(qt_offset)
+            if not cursor.charFormat().boolProperty(_HARD_SPACE_CONTROL):
+                result[match.start()] = '\u00a0'
+        return ''.join(result)
+
+    def _apply_space_controls(self):
+        cursor = QTextCursor(self.document())
+        for end, control in getattr(self, '_space_controls', ()):
+            cursor.setPosition(end)
+            if cursor.charFormat().boolProperty(_HARD_SPACE_CONTROL) != control:
+                cursor.setPosition(end - 1, QTextCursor.KeepAnchor)
+                fmt = QTextCharFormat()
+                fmt.setProperty(_HARD_SPACE_CONTROL, control)
+                cursor.mergeCharFormat(fmt)
 
     def _after_set_plaintext(self):
         document = self.document()
@@ -588,6 +666,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         block.setLineHeight(self._line_height, QTextBlockFormat.FixedHeight.value)
         cursor.setBlockFormat(block)
         self._apply_paragraph_styles()
+        self._apply_space_controls()
         cursor.endEditBlock()
         document.setPageSize(QSizeF(self._page_width, self._page_height))
         self._align_page_top()
@@ -614,6 +693,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 offset += width
             self._apply_caption_tables()
             self._apply_paragraph_styles()
+            self._apply_space_controls()
             self._align_page_top()
             cursor.endEditBlock()
 
@@ -657,6 +737,11 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
 
     def _apply_paragraph_styles(self, positions=None):
         cursor = QTextCursor(self.document())
+        end_cover = getattr(self._paragraph_styles, 'cover_length', 0)
+        if positions and end_cover and any(pos <= end_cover for pos, _ in positions):
+            # Reflowing a title paragraph can move a later automatic page
+            # break. Restore the source break policies before measuring it.
+            positions = None
         if positions is None:
             positions, offset, qt_offset = [], 0, 0
             for text in self.toPlainText().split('\n'):
@@ -673,7 +758,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 scale = self._twip_scale
                 paragraph.setLeftMargin(style.left * scale - self._left)
                 paragraph.setRightMargin((self._native_layout.width - style.right) * scale - self._right)
-                text = cursor.block().text()
+                paragraph.setTabPositions(_tab_positions((stop - style.left) * scale for stop in style.tab_stops))
                 prefix = style.prefix_length
                 paragraph.setTextIndent((style.first - style.left) * scale -
                                         QFontMetricsF(self.font()).horizontalAdvance(' ' * prefix))
@@ -685,6 +770,10 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 font.setUnderline(style.underline)
                 paragraph.setLineHeight(self._line_height * (0.5 if style.spacing == 1 else 1),
                                         QTextBlockFormat.FixedHeight.value)
+                before, after = getattr(self._paragraph_styles, 'grid_margins', {}).get(position, (0, 0))
+                leading = _half_line_leading(self.font(), self._line_height) if before or after else 0
+                paragraph.setTopMargin(before * leading)
+                paragraph.setBottomMargin(after * leading)
                 if paragraph != cursor.blockFormat():
                     cursor.setBlockFormat(paragraph)
                 char_format.setFont(font)
@@ -711,11 +800,34 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
         frame = self.document().rootFrame()
         fmt = frame.frameFormat()
         fmt.setTopMargin(self._top - leading)
-        fmt.setBottomMargin(self._bottom + leading)
+        tables = getattr(self._paragraph_styles, 'caption_tables', ())
+        tabbed_cover = getattr(self._paragraph_styles, 'cover_length', 0) and not tables
+        # A classic cover can use the half-line below numbered line 25.
+        fmt.setBottomMargin(self._bottom if tabbed_cover else self._bottom + leading)
         if fmt != frame.frameFormat():
             frame.setFrameFormat(fmt)
         doc_layout = self.document().documentLayout()
-        for page, table in enumerate(getattr(self._paragraph_styles, 'caption_tables', ())):
+        if tabbed_cover:
+            # At an automatic break Qt aligns a single-spaced first line to
+            # the frame edge, above the full-line baseline. An explicit Qt
+            # break preserves the measured leading at that paragraph.
+            end = self._native_source[1].revision.utf16_offset(self._paragraph_styles.cover_length)
+            block = self.document().begin()
+            while block.isValid() and block.position() < end:
+                bounds = doc_layout.blockBoundingRect(block)
+                layout = block.layout()
+                if layout.lineCount():
+                    y = bounds.top() + layout.lineAt(0).y()
+                    page = int(y // self._page_height)
+                    delta = page * self._page_height + self._top - y
+                    if page and delta > 1:
+                        cursor = QTextCursor(block)
+                        fmt = cursor.blockFormat()
+                        fmt.setPageBreakPolicy(QTextFormat.PageBreak_AlwaysBefore)
+                        fmt.setTopMargin(fmt.topMargin() + delta)
+                        cursor.setBlockFormat(fmt)
+                block = block.next()
+        for page, table in enumerate(tables):
             cursor = QTextCursor(self.document())
             cursor.setPosition(table.start + 1)
             qt_table = cursor.currentTable()
@@ -733,9 +845,9 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                 qt_table.setFormat(fmt)
 
     def number_at_y(self, page, y, sequential):
-        if getattr(self._paragraph_styles, 'caption_tables', ()):
-            return max(1, min(self.lines_per_page,
-                              round((y - page * self._page_height - self._top) / self._line_height) + 1))
+        if getattr(self._paragraph_styles, 'cover_length', 0):
+            half_lines = round(2 * (y - page * self._page_height - self._top) / self._line_height)
+            return max(1, min(self.lines_per_page, 1 + (half_lines + 1) // 2))
         return sequential
 
     def _page_blocks(self, pages):
@@ -836,7 +948,7 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
                     painter.setPen(foreground.color())
                     painter.drawText(QPointF(x, y+line.ascent()), '-')
         painter.setPen(QColor('#8a8f98'))
-        fixed_gutter = bool(getattr(self._paragraph_styles, 'caption_tables', ()))
+        fixed_gutter = bool(getattr(self._paragraph_styles, 'cover_length', 0))
         lines = [] if fixed_gutter else self.page_lines(pages)
         for line in lines:
             if scroll_y - self._line_height <= line.y <= scroll_y + self.viewport().height():

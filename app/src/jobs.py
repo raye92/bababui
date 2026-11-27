@@ -10,7 +10,7 @@ import wave
 from PySide6.QtCore import QObject, QThread, Signal
 
 from app.src.audio_pipeline import AudioPipeline, check_wav_digest, wav_sha256
-from app.src.vocabulary_reconciliation import normalized_vocabulary
+from app.src.vocabulary_reconciliation import normalized_vocabulary, preserve_notice_spellings
 from app.src.ai_review import AssistedReview, review_edits
 from app.src.casecat.timing import AudioMap
 from app.src.processing import ProcessingClient, APP_DIR
@@ -138,6 +138,9 @@ class ProcessingWorker(QThread):
                 raw = transcription.text if transcription else self._saved_text(report)
                 report('Formatting transcript...')
                 result = processor.complete(raw, request.prompt)
+                if request.vocabulary and request.original is not None:
+                    testimony = request.original.text[request.body_start:]
+                    result = preserve_notice_spellings(testimony, result, request.vocabulary)
             warnings = list(transcription.warnings) if transcription else []
             alignment = None
             if transcription and request.job is not None:

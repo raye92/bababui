@@ -7,12 +7,13 @@ import xml.etree.ElementTree as ET
 from .anchors import AnchoredSpan, Revision
 from .rendering import TextRenderer, render_record
 from .elements import NativeElement, examination_paragraphs, field_name, with_byline_symbols
-from .caption import CAPTION_NAMES, cover_end, is_cell
+from .caption import CAPTION_NAMES, cover_bounds, is_cell
 
 
 RENDERING_NOTICE = ('CaseCAT native editing. New wording uses source passage timing until audio is aligned. '
                     'unsupported native structures are rejected during export.')
 NO_WAV_NOTICE = 'This job has no WAV. Transcript editing is available; audio processing is disabled.'
+TEXT_PROJECTION_VERSION = 3
 
 
 def u32(data, offset):
@@ -90,7 +91,7 @@ class NativeJob:
         return with_byline_symbols(self.revision.elements, self.examination_styles)
 
 
-def load_job(bundle, key, *, legacy_projection=False):
+def load_job(bundle, key, *, legacy_projection=False, projection_version=TEXT_PROJECTION_VERSION):
     if key not in bundle.jobs:
         raise ValueError('The selected job is not present in this archive.')
     native = bundle.read(bundle.member(key + '.sgngl'))
@@ -127,8 +128,10 @@ def load_job(bundle, key, *, legacy_projection=False):
     differing_clock_offset = None
     original_strokes = {notes[i:i + 8] for i in range(640, len(notes), 8)}
     stroke_clocks = []
-    end_cover = cover_end(native)
-    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=legacy_projection)
+    if legacy_projection:
+        projection_version = 1
+    end_cover, table_captions = cover_bounds(native, legacy=projection_version < 3)
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=bool(end_cover), legacy_projection=projection_version == 1)
     from .field_table import field_texts
     has_fields = any(raw[:2] == b'\x15\x07' for _, raw in records(native, start, start + length))
     try:
@@ -210,7 +213,7 @@ def load_job(bundle, key, *, legacy_projection=False):
         if op == 0x15 and raw[1] == 7:
             elements.append(NativeElement(position + before, position + after, 'field',
                                           raw.hex(), field_name(raw), offset, value,
-                                          bool(end_cover) and label in CAPTION_NAMES, renderer.uppercase))
+                                          table_captions and label in CAPTION_NAMES, renderer.uppercase))
         elif op == 0x16 and int.from_bytes(raw[1:], 'little') in (2, 3, 4):
             prefix = content[-1]
             elements.append(NativeElement(position + before + int(prefix.startswith('\n')),

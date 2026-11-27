@@ -26,6 +26,8 @@ class ParagraphStyles(dict):
     def __init__(self):
         super().__init__()
         self.caption_tables = []
+        self.cover_length = 0
+        self.grid_margins = {}
 
 
 def prepare_editor_presentation(job, bundle):
@@ -102,10 +104,16 @@ def _presentation(job, groups):
         hard, paragraphs, page_breaks, offset = set(), {}, [], 0
         for token in group:
             if end_cover and token.offset < end_cover and source == target:
+                styles.cover_length = cursor + offset + len(token.text)
                 if token.raw == b'\x12\x09' and single_start is None:
                     single_start = cursor + offset
                 elif token.raw == b'\x12\x89' and single_start is not None:
-                    singles.append((single_start, cursor + offset))
+                    stop = cursor + offset
+                    # A spacing-off symbol at the end of an empty paragraph
+                    # leaves that blank return single spaced.
+                    if text[stop - 1:stop + 1] == '\n\n':
+                        stop += 1
+                    singles.append((single_start, stop))
                     single_start = None
                 if is_cell(token.raw):
                     left, right = struct.unpack_from('<HH', token.raw, 9)
@@ -172,6 +180,8 @@ def _presentation(job, groups):
                 breaks.add(cursor + mapped)
         result.append(''.join(display))
         cursor += len(target)
+    if single_start is not None:
+        singles.append((single_start, styles.cover_length))
     if definitions:
         current = definitions[0]
         for group in groups:
@@ -216,4 +226,18 @@ def _presentation(job, groups):
         index = bisect_left(starts, position)
         if 0 < index < len(starts) and starts[index] < len(text):
             page_starts.add(starts[index])
+    if styles.cover_length and definitions:
+        # A native row starts at the same baseline for either pitch. Qt adds
+        # a pitch-dependent amount of leading above each block's glyphs.
+        for previous, current in zip(starts, starts[1:]):
+            if previous >= styles.cover_length:
+                break
+            prior = styles[0 if current in page_starts else previous]
+            following = styles[current]
+            change = int(prior.spacing != 1) - int(following.spacing != 1)
+            if change:
+                styles.grid_margins[current] = (change, 0)
+                if current not in page_starts:
+                    top, _ = styles.grid_margins.get(previous, (0, 0))
+                    styles.grid_margins[previous] = (top, change)
     return ''.join(result), styles, frozenset(page_starts)

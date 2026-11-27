@@ -29,8 +29,10 @@ class TextRenderer:
         if raw in (b'\x12\x8e', b'\x12\x0e'):
             self.capitalize = raw[1] == 0x0e
             self.after_punctuation = False
-        if self.cover_tables and raw in (b'\x12\x08', b'\x12\x88'):
-            self.uppercase = raw[1] == 8
+        if raw == b'\x12\x88':
+            self.uppercase = False
+        elif self.cover_tables and raw == b'\x12\x08':
+            self.uppercase = True
         if raw in CONFLICT_STARTS and not self.legacy_projection:
             self.conflict_choice = 1
         elif raw == b'\x03':

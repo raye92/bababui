@@ -5,7 +5,8 @@ import re
 import struct
 import textwrap
 
-from .caption import BODY_DIVIDER, TABLE_END, TABLE_START, caption_value, cell, has_captions
+from .caption import (BODY_DIVIDER, TABLE_END, TABLE_START, caption_value, cell, cover_end,
+                      has_captions, reporter_divider_end)
 from .codec import records, u32
 from .field_table import field_record, field_texts, read_fields, replace_section, rewrite_fields
 from .fields import update_speaker_xml
@@ -16,6 +17,8 @@ from .structure import relocate, rendering_settings
 
 BOARD = "WORKERS' COMPENSATION APPEALS BOARD"
 RULE = '~' * 30
+SINGLE_ON = b'\x12\x09'
+SINGLE_OFF = b'\x12\x89'
 OATH = ('having been first duly sworn, was', 'examined and testified as follows:')
 REPORTER = ('MR. REPORTER:  My name is Matthew Bui.  I am a California Certified Shorthand '
             'Reporter, CSR No. 14977.  Stating a license number will ensure parties know '
@@ -59,14 +62,18 @@ def _appearance_rows(details, *, references):
             values[name] = value
             entries[attr] = (field_record(name) if references else _text(value)) if value else b''
         if rows:
-            rows.append(b'')
-        rows.extend((b'FOR THE APPLICANT:' if person.side == 'Applicant' else b'FOR THE DEFENDANTS:',
-                     entries['firm'], b'(Zoom videoconference)'))
+            rows.extend((b'', b'', b''))
+        rows.extend((b'FOR THE APPLICANT:' if person.side == 'Applicant' else b'FOR THE DEFENDANTS:', b''))
+        if entries['firm']:
+            rows.append(entries['firm'])
+        rows.append(b'\t(Zoom videoconference)')
         attorney = b', '.join(x for x in (entries['attorney'], entries['title']) if x)
+        separator = b' ' if person.address.rstrip().endswith(',') else b', '
+        street = separator.join(x for x in (entries['address'], entries['suite']) if x)
         city = b', '.join(x for x in (entries['city'], entries['state']) if x)
         city = b' '.join(x for x in (city, entries['zip_code']) if x)
-        rows.extend(x for x in ((b'BY:  ' + attorney) if attorney else b'',
-                               entries['address'], entries['suite'], city, entries['phone'], entries['email']) if x)
+        rows.extend(x for x in ((b'\tBY:  ' + attorney) if attorney else b'',
+                               street, city, entries['phone'], entries['email']) if x)
     return rows, values
 
 
@@ -134,92 +141,90 @@ def _supply_styles(native):
 def _caption(details, left, right):
     numbers = details.case_numbers or ('',)
     longest = max(map(len, numbers))
-    label = b'CASE NO.:' + b' ' * min(2, max(0, 16 - longest))
-    column = min(34, max(31, 56 - len(label) - longest))
+    label = b'CASE NO.:' + (b' ' if longest < 16 else b'')
+    column = min(35, 56 - len(label) - longest)
     split = left + round((right - left) * column / 57)
     plaintiff, defendant = field_record('PLAINTIFF'), field_record('DEFENDANT')
     # Ordinary fields and CATalyst cell bounds keep the two columns independent.
     # The half-line returns reproduce the caption's single-spaced continuations.
-    left_cell = (b'\x12\x09' + plaintiff + b',' + _p(9) + _p(9, '               Applicant,') +
-                 _p(9) + _p(9, b'          \x12\x8evs.') + _p(9) + _p(9, defendant + b',') +
-                 _p(9) + _p(9, '               Defendants.') + _p(9, RULE))
+    left_cell = (SINGLE_ON + plaintiff + b',' + _p(9) + _p(9, b'\t\t\t\tApplicant,') +
+                 _p(9) + _p(9, b' \t\t\x12\x8evs.') + _p(9) + _p(9, defendant + b',') +
+                 _p(9) + _p(9, b' \t  \t\tDefendants.') + _p(9) + _p(9, RULE))
     right_cell = label + _text(numbers[0])
     for number in numbers[1:]:
         right_cell += _p(9, b' ' * len(label) + _text(number))
-    header = (_p(7, BOARD) + _p(7, 'STATE OF CALIFORNIA') + _p() + TABLE_START +
-              cell(left, split) + left_cell + cell(split, right) + right_cell + TABLE_END + b'\x12\x89')
-    rows = 8 + sum(caption_value(name, value).count('\n') + 1 for name, value in
+    header = (_p() + TABLE_START + cell(left, split) + left_cell +
+              cell(split, right) + right_cell + TABLE_END + SINGLE_OFF)
+    rows = 9 + sum(caption_value(name, value).count('\n') + 1 for name, value in
                    (('PLAINTIFF', details.plaintiff), ('DEFENDANT', details.defendant)))
     return header, max(rows, len(numbers))
 
 
 def _cover_pages(details, layout, pages, index_footer):
     caption, caption_rows = _caption(details, layout.paragraphs[7].left, layout.paragraphs[7].right)
+    heading = _p(7, BOARD) + _p(7, 'STATE OF CALIFORNIA')
     deponent, date = field_record('DEPONENT'), field_record(DEPOSITION_DATE)
-    # The first two sheets have the same heading and caption. Allow additional
-    # names to consume blank space before the centered title and recital.
-    gap = _p(9) * max(1, 19 - caption_rows)
-    page1 = (caption + gap + _p(7, 'DEPOSITION OF') + _p(7, deponent) +
-             _p(7, '(PARTICIPANTS REMOTE), CALIFORNIA') + _p(7, b'\x12\x08' + date + b'\x12\x88') +
-             _p() * 3 + _p(8, 'REPORTED BY:  Matthew Bui, CSR NO. 14977') +
-             _p(8, b'FILE NO.:  ' + _text(details.file_number)))
+    # The title follows the rule by four numbered lines. Each additional
+    # caption half-line uses one blank before the footer on lines 24 and 25.
+    footer_gap = _p(9) * (25 - caption_rows)
+    page1 = (heading + caption + _p(9) * 8 + _p(7, 'DEPOSITION OF') + _p(7, deponent) +
+             _p(7, '(PARTICIPANTS REMOTE), CALIFORNIA') + _p(7, b'\x12\x08' + date + b'\x12\x88 ') +
+             footer_gap + _p(9, 'REPORTED BY:  Matthew Bui, CSR NO. 14977') +
+             _p(9) + _p(9, b'FILE NO.:  ' + _text(details.file_number)))
     party = {'Applicant': 'Applicant', 'Defendant': 'Defendants'}.get(details.taking_side, '')
-    page2 = (caption + gap + _p(8, b'          Deposition of ' + deponent + b', taken on') +
-             _p() + _p(8, b'\x12\x8ebehalf of the ' + _text(party) + b', at (PARTICIPANTS REMOTE),') +
-             _p() + _p(8, b'California, commencing at ' + _text(details.time) + b', ' + field_record(WEEKDAY) + b',') +
-             _p() + _p(8, date + b', before Matthew Bui, CSR No. 14977.'))
+    page2 = (heading + b' ' + caption + _p(9) * 7 + _p(8, b'\t\t\tDeposition of ' + deponent + b', taken on') +
+             _p(8, b'\x12\x8ebehalf of the ' + _text(party) + b', at (PARTICIPANTS REMOTE),') +
+             _p(8, b'California, commencing at ' + _text(details.time) + b', ' + field_record(WEEKDAY) + b',') +
+             _p(8, date + b', before Matthew Bui, CSR No. 14977.'))
     appearance_rows, values = _appearance_rows(details, references=True)
-    plain_rows, _ = _appearance_rows(details, references=False)
-    count = sum(max(1, len(textwrap.wrap(row.decode('cp1252'), 51))) for row in plain_rows)
-    spacing = 8 if count <= 22 else 9
-    page3 = _p(7, 'A P P E A R A N C E S:') + _p()
-    for row in appearance_rows:
-        prefix = b'' if not row or row.startswith(b'FOR THE ') else b'     '
-        page3 += _p(spacing, prefix + b'\x12\x8e' + row)
-    single = any(raw in (b'\x09', b'\x0a') for _, raw in records(index_footer, 0, len(index_footer)))
-    istyle = 9 if single else 8
-    page4 = (_p(7, (b'\x12\x09' if single else b'') + b'I N D E X') + _p(istyle) +
-             _p(istyle, b'WITNESS:  ' + deponent) + _p(istyle) +
-             _p(istyle, 'EXAMINATION                                         PAGE'))
+    page3 = (_p(7, SINGLE_ON + b' A P P E A R A N C E S:') + _p(9) +
+             b''.join(_p(9, b'\x12\x8e' + row) for row in appearance_rows) + SINGLE_OFF)
+    page4 = (_p(7, SINGLE_ON + b'I N D E X') + _p(9) +
+             _p(9, b'WITNESS:  ' + deponent) + _p(9) + _p(9, b'EXAMINATION' + b'\t' * 8 + b'PAGE'))
     for index in range(max(2, len(details.speakers))):
         name = f'EZ SPEAKER {index + 1:02}'
         value = details.speakers[index] if index < len(details.speakers) else ''
         manual = pages[index] if index < len(pages) else ''
         if manual and not re.fullmatch(r'[\d ,\-\u2013]+', manual):
             raise ValueError('An index page entry must contain page numbers.')
-        label = b'     BY ' + field_record(name)
-        pad = max(2, 52 - 8 - len(value or f'[!{name}]'))
-        page4 += _p(istyle, label + b' ' * pad + _text(manual))
-    page4 += _p(istyle) + (index_footer or
-              (_p(7, 'E X H I B I T S') + _p(8, '  NUMBER            DESCRIPTION                     PAGE') +
-               _p(7, '(NONE)') + _p() + _p(7, 'INSTRUCTIONS NOT TO ANSWER:') + _p(7, 'PAGE             LINE') +
-               _p(7, '(NONE)') + _p() + _p(7, 'INFORMATION REQUESTED:') + _p(7, 'PAGE             LINE') +
-               _p(7, '(NONE)')))
-    if single and not page4.endswith(b'\x12\x89'):
-        page4 += b'\x12\x89'
-    page5 = (_p(7, deponent + b',') + _p(8, b'               \x12\x8e' + _text(OATH[0])) +
-             _p(8, b'               \x12\x8e' + _text(OATH[1])) + _p() +
-             _p(8, b'          ' + _text(REPORTER)) + BODY_DIVIDER)
+        # The scoped ruler's next tab after column 45 begins PAGE. Align
+        # single page numbers to its right and leave room for longer lists.
+        used = 8 + len(value or f'[!{name}]')
+        target = max(used + 1, 54 - len(manual))
+        tabs = max(0, (min(target, 50) // 5) - (used // 5))
+        pad = target - ((used // 5 + tabs) * 5 if tabs else used)
+        page4 += _p(9) + _p(9, b'\t\tBY ' + field_record(name) + b'\t' * tabs + b' ' * pad + _text(manual))
+    page4 += _p(9) * 3 + (index_footer or
+              (_p(7, 'E X H I B I T S') + _p(9) + _p(9, b'  NUMBER\t\t         DESCRIPTION\t\t     PAGE') +
+               _p(9) + _p(7, ' (NONE)') + _p(9) * 5 + _p(7, 'INSTRUCTIONS NOT TO ANSWER:') +
+               _p(9) + _p(7, 'PAGE             LINE') + _p(9) + _p(7, '(NONE)') +
+               _p(9) * 5 + _p(7, 'INFORMATION REQUESTED:  ') + _p(9) + _p(7, 'PAGE             LINE') +
+               _p(9) + _p(7, '(NONE)')))
+    if not page4.endswith(SINGLE_OFF):
+        page4 += SINGLE_OFF
+    page5 = (_p(7, deponent + b',') + _p(8, b'\x12\x8e\t\t\t' + _text(OATH[0])) +
+             _p(8, b'\x12\x8e\t\t\t' + _text(OATH[1])) + _p() +
+             _p(8, b'\t\t' + _text(REPORTER)) + BODY_DIVIDER)
     values.update(PLAINTIFF=details.plaintiff, DEFENDANT=details.defendant, DEPONENT=details.deponent)
     values.update({WEEKDAY: details.weekday, DEPOSITION_DATE: details.date})
     values.update({f'EZ SPEAKER {i:02}': name for i, name in enumerate(details.speakers, 1)})
-    return b'\x0c'.join((page1, page2, page3, page4, page5)), values
+    return [page1, page2, page3, page4, page5], values
 
 
 def _body_offset(job):
     """Find the reporter's final layout control, even inside a stroke group."""
+    start, size = struct.unpack_from('<II', job.native_bytes, 532)
+    boundary = cover_end(job.native_bytes)
+    if boundary is not None:
+        return boundary - start
     text = job.baseline.text
     if BOARD not in text[:100]:
         return 0
     if BOARD not in text[100:4500] or 'I N D E X' not in text[:12000]:
         return 0
-    start, size = struct.unpack_from('<II', job.native_bytes, 532)
-    end = start + size
-    reporter = job.native_bytes.find(b'Stating a license number', start, min(end, start + 25000))
-    if reporter >= 0:
-        divider = job.native_bytes.find(BODY_DIVIDER, reporter, min(end, reporter + 1300))
-        if divider >= 0:
-            return divider + len(BODY_DIVIDER) - start
+    divider_end = reporter_divider_end(job.native_bytes, start, start + size)
+    if divider_end is not None:
+        return divider_end - start
     raise ValueError('The existing cover has no recognizable end after the reporter declaration.')
 
 
@@ -227,7 +232,7 @@ def _project_prefix(native, cut, speakers, all_caps):
     """Return the old/new logical body position and formatted cover lines."""
     if not cut:
         return 0, ''
-    renderer = TextRenderer(all_caps=all_caps, cover_tables=has_captions(native))
+    renderer = TextRenderer(all_caps=all_caps, cover_tables=True)
     start, size = struct.unpack_from('<II', native, 532)
     text, pos = [], 0
     for offset, raw in records(native, start, start + size):
@@ -249,13 +254,14 @@ def _get_match(pattern, text, flags=0):
     return match[1].strip() if match else ''
 
 
-def _index_footer(native, cut):
-    """Retain every record from the exhibits heading through the index footer."""
+def _index_sections(native, cut):
+    """Locate the index page, its exhibits, and the following oath page."""
     start = u32(native, 532)
-    paragraph = start
+    paragraph = page_start = start
     letters = bytearray()
     begin = None
     index = False
+    single = page_single = False
     for offset, raw in records(native, start, start + cut):
         if raw[0] == 22 or raw == b'\x0c':
             heading = bytes(letters).replace(b' ', b'').upper()
@@ -263,13 +269,28 @@ def _index_footer(native, cut):
                 index = True
             elif index and heading == b'EXHIBITS' and begin is None:
                 begin = paragraph
-            if raw == b'\x0c' and begin is not None:
-                return begin - start, offset - start
+            if raw == b'\x0c':
+                if begin is not None:
+                    return page_start - start, begin - start, offset - start, page_single
+                page_start = offset + 1
+                page_single = single
             paragraph = offset
             letters.clear()
+        elif raw in (SINGLE_ON, SINGLE_OFF):
+            single = raw == SINGLE_ON
         elif raw[0] >= 32:
             letters.extend(raw)
-    return 0, 0
+    return 0, 0, 0, False
+
+
+def _cover_fields(stream):
+    return {raw[10:-1].decode('cp1252') for _, raw in records(stream, 0, len(stream))
+            if raw[:2] == b'\x15\x07'}
+
+
+def _associations(native, start, end):
+    return b''.join(raw for _, raw in records(native, start, end)
+                    if raw[0] == 0x13 or raw[:2] == b'\x15\x08')
 
 
 def _case_numbers(text, table):
@@ -286,10 +307,26 @@ def _case_numbers(text, table):
                 break
             result.append(row.strip())
         return tuple(x for x in result if x)
-    # Scoped captions use tabs to stack docket numbers, including civil IDs.
-    line = after[1].split('\n')[0]
-    return tuple(dict.fromkeys(re.findall(r'(?<![\w-])(?=[\w-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+)*(?![\w-])',
-                                          line, re.I)))
+    # A scoped caption interleaves the two columns. Only read later IDs
+    # to the right of a tab stop or a padded column boundary.
+    numbers = []
+    for index, row in enumerate(after[1].splitlines()):
+        columns = re.split(r'\t+| {4,}', row)
+        for column in (columns if index == 0 else columns[1:]):
+            words = re.findall(r'[^\s,;/()]+', column)
+            if words and all(re.fullmatch(r'(?=[\w-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+)*', word, re.I)
+                             for word in words):
+                numbers.extend(words)
+    return tuple(dict.fromkeys(numbers))
+
+
+def _party_name(caption, pattern):
+    match = re.search(pattern, caption, re.I | re.S | re.M)
+    if not match:
+        return ''
+    left = (re.split(r'\t| {4,}|\bCASE NO\.\s*:', row, maxsplit=1, flags=re.I)[0].strip()
+            for row in match[1].splitlines())
+    return re.sub(r'(?<=/)\s+', '', ' '.join(part for part in left if part)).rstrip(', ')
 
 
 def _parse_appearances(page, fields):
@@ -334,19 +371,19 @@ def existing_cover(bundle, job):
     pos, text = _project_prefix(job.native_bytes, cut, speakers, caps)
     fields = field_texts(job.native_bytes)
     caption = text.partition(RULE)[0]
-    plaintiff = _get_match(r'STATE OF CALIFORNIA\s+([^,\t\n]+),', caption)
-    defendant = _get_match(r'\bvs\.\s+(.*?)\s+Defendants?\.', caption, re.I | re.S)
-    defendant = re.sub(r'(?<=/)\s+', '', ' '.join(defendant.split())).rstrip(', ')
+    plaintiff = (_party_name(caption, r'STATE OF CALIFORNIA(.*?)^[ \t]*Applicants?,') or
+                 _get_match(r'STATE OF CALIFORNIA\s+([^\t\n]+),', caption, re.I))
+    defendant = _party_name(caption, r'\bvs\.(.*?)\s+Defendants?\.')
     parts = text.split('\f')
     appearance_page = next((p for p in parts if 'A P P E A R A N C E S:' in p), '')
     index_page = next((p for p in parts if 'I N D E X' in p), '').partition('E X H I B I T S')[0]
     index_rows = re.findall(r'(?im)^[ \t]*BY[ \t]+([^\n\f]*)', index_page)
     pages = tuple(_get_match(r'(\d+(?:\s*[,–-]\s*\d+)*)\s*$', row) for row in index_rows)
+    tables = has_captions(job.native_bytes)
     values = dict(
         plaintiff=fields.get('PLAINTIFF') or plaintiff, defendant=fields.get('DEFENDANT') or defendant,
         deponent=re.sub(r'[\x00-\x1f]', '', fields.get('DEPONENT', '')),
-        case_numbers=_case_numbers(parts[0] if has_captions(job.native_bytes) else caption,
-                                   has_captions(job.native_bytes)),
+        case_numbers=_case_numbers(parts[0] if tables else caption, tables),
         file_number=_get_match(r'FILE NO\.\s*:\s*([^\n\t\f]+)', text),
         taking_side=_get_match(r'behalf of the (Applicant|Defendant)', text, re.I).title(),
         time=_get_match(r'commencing at (\d{1,2}:\d{2}\s*[ap]\.?m\.?)', text, re.I),
@@ -363,19 +400,37 @@ def build_cover(bundle, job, details, *, index_pages=None):
     original = job.native_bytes
     start, length = struct.unpack_from('<II', original, 532)
     cut = _body_offset(job)
-    _, existing_pages, old_pos = existing_cover(bundle, job) if cut else ({}, (), 0)
+    known, existing_pages, old_pos = existing_cover(bundle, job) if cut else ({}, (), 0)
     pages = existing_pages if index_pages is None else tuple(index_pages)
     native = _supply_styles(original)
-    begin, end = _index_footer(original, cut)
+    index, begin, end, single = _index_sections(original, cut)
     footer = original[start + begin:start + end]
-    header, values = _cover_pages(details, read_layouts(native)[0], pages, footer)
+    cover_pages, values = _cover_pages(details, read_layouts(native)[0], pages, footer)
     for value in values.values():
         _text(value)
+    keep_from = begin if end else cut
+    if end:
+        index_page = original[start + index:start + end]
+        speakers = details.speakers + ('',) * max(0, 2 - len(details.speakers))
+        index_fields = {'DEPONENT', *(f'EZ SPEAKER {i:02}' for i in range(1, len(speakers) + 1))}
+        # An existing scoped index already contains the correct tab stops and
+        # examiner references. Preserve additions such as a remote-witness note.
+        if (known['speakers'] == speakers and pages == existing_pages and
+                index_fields <= _cover_fields(index_page)):
+            cover_pages[3] = (SINGLE_ON if single else b'') + index_page
+            if not index_page.endswith(SINGLE_OFF):
+                cover_pages[3] += SINGLE_OFF
+            keep_from = index
+        oath = original[start + end + 1:start + cut]
+        if 'DEPONENT' in _cover_fields(oath):
+            cover_pages[4] = oath
+        else:
+            cover_pages[4] = _associations(original, start + end + 1, start + cut) + cover_pages[4]
+    header = b'\x0c'.join(cover_pages)
     identifiers = {entry.name.encode('cp1252'): entry.identifier for entry in read_fields(native)}
     header = b''.join((raw[:6] + identifiers.get(raw[10:-1], raw[6:10]) + raw[10:]
                        if raw[:2] == b'\x15\x07' else raw) for _, raw in records(header, 0, len(header)))
-    retained = b''.join(raw for offset, raw in records(original, start, start + cut)
-                        if not begin <= offset - start < end and (raw[0] == 0x13 or raw[:2] == b'\x15\x08'))
+    retained = _associations(original, start, start + keep_from)
     body = original[start + cut:start + length]
     # A literal-first job needs a paragraph boundary at the end of the cover.
     # A native paragraph-first job already owns its paragraph, style and label.

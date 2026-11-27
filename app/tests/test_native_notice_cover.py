@@ -3,6 +3,8 @@ from dataclasses import replace
 from pathlib import Path
 import struct
 
+import pytest
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtGui import QFont, QFontDatabase
@@ -99,6 +101,52 @@ def test_replacing_cover_keeps_manual_index_and_does_not_duplicate_body_heading(
     assert updated.text.count("WORKERS' COMPENSATION APPEALS BOARD") == 2
     assert native_cover().existing_cover(new_bundle, updated)[1] == ('5,  32', '17', '')
     assert 'BY MS. THIRD' in updated.text[:new_body]
+
+
+@pytest.mark.parametrize(('before', 'after'), [
+    ('proceeding.\n\n', 'proceeding.\n'),
+    ('Stating a license number', 'Giving a license number'),
+    ("WORKERS' COMPENSATION APPEALS BOARD", 'WORKERS COMPENSATION APPEALS BOARD'),
+], ids=['remove-blank-before-testimony', 'edit-reporter-declaration', 'edit-board-heading'])
+def test_edited_notice_cover_round_trips_with_its_testimony_boundary(tmp_path, before, after):
+    _, _, bundle, job, _, body = covered(field_files(), details())
+    revision = job.revision.revise(job.text.replace(before, after, 1))
+    target = tmp_path / 'reviewed_AI.zip'
+    archive.export_zip(bundle, job.with_revision(revision), target, ai_copy=True)
+
+    exported = archive.inspect_archive(target)
+    restored = codec.load_job(exported, exported.jobs[0])
+    assert restored.text == revision.text
+    assert restored.notes_bytes == job.notes_bytes
+    assert exported.read(restored.audio_member) == bundle.read(job.audio_member)
+    _, _, restored_body = native_cover().existing_cover(exported, restored)
+    assert restored.text[restored_body:] == job.text[body:]
+
+
+def test_an_earlier_alignment_on_the_oath_page_does_not_end_the_cover():
+    from app.src.casecat.caption import BODY_DIVIDER, LEFT_JUSTIFY, cover_end
+    from app.src.casecat.structure import relocate
+    _, _, _, job, _, _ = covered(field_files(), details())
+    native = job.native_bytes
+    start, length = struct.unpack_from('<II', native, 532)
+    stream = native[start:start + length]
+    # Left-justify the oath, and remove the blank paragraph after the declaration.
+    oath = stream.index(b'having been first duly sworn')
+    updated = (stream[:oath] + LEFT_JUSTIFY + stream[oath:]).replace(BODY_DIVIDER, LEFT_JUSTIFY)
+    edited = relocate(native, updated, [(0, 0, length, len(updated))])
+    assert cover_end(edited) == start + updated.rindex(LEFT_JUSTIFY) + len(LEFT_JUSTIFY)
+
+
+def test_ordinary_two_column_tables_do_not_turn_testimony_into_a_notice_cover():
+    from app.src.casecat.caption import LEFT_JUSTIFY, TABLE_END, TABLE_START, cell, cover_end
+    from app.src.casecat.structure import relocate
+    files = field_files()
+    native = files['jobs/example.sgngl']
+    start, length = struct.unpack_from('<II', native, 532)
+    table = TABLE_START + cell(100, 500) + b'Item' + cell(500, 900) + b'Count' + TABLE_END
+    pages = b'\x0c'.join((table, table, b'Three', b'Four', LEFT_JUSTIFY + b'Five'))
+    with_tables = relocate(native, pages + native[start:start + length], [(0, len(pages), length, length)])
+    assert cover_end(with_tables) is None
 
 
 def test_editor_places_both_captions_index_and_body_on_template_pages():
