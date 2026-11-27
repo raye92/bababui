@@ -138,10 +138,14 @@ def _supply_styles(native):
     return bytes(result)
 
 
-def _caption(details, left, right):
+def _caption(details, left, right, source_caption):
     numbers = details.case_numbers or ('',)
     longest = max(map(len, numbers))
-    label = b'CASE NO.:' + (b' ' if longest < 16 else b'')
+    gap = re.search(r'\bCASE NO\.:( *)(?=\S)', source_caption, re.I)
+    padding = gap[1][:2] if gap else ' '
+    label = b'CASE NO.:' + (padding.encode('ascii') if longest < 16 else b'')
+    role = re.search(r'^[ \t]*(Defendants?\.)[ \t]*$', source_caption, re.I | re.M)
+    defendant_role = _text(role[1]) if role else b'Defendants.'
     column = min(35, 56 - len(label) - longest)
     split = left + round((right - left) * column / 57)
     plaintiff, defendant = field_record('PLAINTIFF'), field_record('DEFENDANT')
@@ -149,7 +153,7 @@ def _caption(details, left, right):
     # The half-line returns reproduce the caption's single-spaced continuations.
     left_cell = (SINGLE_ON + plaintiff + b',' + _p(9) + _p(9, b'\t\t\t\tApplicant,') +
                  _p(9) + _p(9, b' \t\t\x12\x8evs.') + _p(9) + _p(9, defendant + b',') +
-                 _p(9) + _p(9, b' \t  \t\tDefendants.') + _p(9) + _p(9, RULE))
+                 _p(9) + _p(9, b' \t  \t\t' + defendant_role) + _p(9) + _p(9, RULE))
     right_cell = label + _text(numbers[0])
     for number in numbers[1:]:
         right_cell += _p(9, b' ' * len(label) + _text(number))
@@ -160,19 +164,22 @@ def _caption(details, left, right):
     return header, max(rows, len(numbers))
 
 
-def _cover_pages(details, layout, pages, index_footer):
-    caption, caption_rows = _caption(details, layout.paragraphs[7].left, layout.paragraphs[7].right)
+def _cover_pages(details, layout, pages, index_footer, source_caption):
+    caption, caption_rows = _caption(details, layout.paragraphs[7].left, layout.paragraphs[7].right, source_caption)
     heading = _p(7, BOARD) + _p(7, 'STATE OF CALIFORNIA')
     deponent, date = field_record('DEPONENT'), field_record(DEPOSITION_DATE)
-    # The title follows the rule by four numbered lines. Each additional
-    # caption half-line uses one blank before the footer on lines 24 and 25.
-    footer_gap = _p(9) * (25 - caption_rows)
-    page1 = (heading + caption + _p(9) * 8 + _p(7, 'DEPOSITION OF') + _p(7, deponent) +
+    # CATalyst resumes on a whole line after a table. If the rule falls
+    # halfway between numbers, its title belongs one numbered line lower.
+    title_returns = 6 if caption_rows % 2 == 0 else 4
+    title_line = 8 + caption_rows // 2
+    footer_gap = _p(9) * (2 * (24 - title_line - 4))
+    page1 = (heading + caption + _p(9) * title_returns + _p(7, 'DEPOSITION OF') + _p(7, deponent) +
              _p(7, '(PARTICIPANTS REMOTE), CALIFORNIA') + _p(7, b'\x12\x08' + date + b'\x12\x88 ') +
              footer_gap + _p(9, 'REPORTED BY:  Matthew Bui, CSR NO. 14977') +
              _p(9) + _p(9, b'FILE NO.:  ' + _text(details.file_number)))
     party = {'Applicant': 'Applicant', 'Defendant': 'Defendants'}.get(details.taking_side, '')
-    page2 = (heading + b' ' + caption + _p(9) * 7 + _p(8, b'\t\t\tDeposition of ' + deponent + b', taken on') +
+    page2 = (heading + b' ' + caption + _p(9) * (title_returns - 2) +
+             _p(8, b'\t\t\tDeposition of ' + deponent + b', taken on') +
              _p(8, b'\x12\x8ebehalf of the ' + _text(party) + b', at (PARTICIPANTS REMOTE),') +
              _p(8, b'California, commencing at ' + _text(details.time) + b', ' + field_record(WEEKDAY) + b',') +
              _p(8, date + b', before Matthew Bui, CSR No. 14977.'))
@@ -405,7 +412,8 @@ def build_cover(bundle, job, details, *, index_pages=None):
     native = _supply_styles(original)
     index, begin, end, single = _index_sections(original, cut)
     footer = original[start + begin:start + end]
-    cover_pages, values = _cover_pages(details, read_layouts(native)[0], pages, footer)
+    source_caption = job.baseline.text[:old_pos].partition('DEPOSITION OF')[0]
+    cover_pages, values = _cover_pages(details, read_layouts(native)[0], pages, footer, source_caption)
     for value in values.values():
         _text(value)
     keep_from = begin if end else cut

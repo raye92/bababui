@@ -840,8 +840,29 @@ class NativeTranscriptEditor(_NativeTransactions, QTextEdit):
             y = doc_layout.blockBoundingRect(block).top() + block.layout().lineAt(0).y()
             target = self._top + page * self._page_height + 3 * self._line_height
             fmt = qt_table.format()
+            # CATalyst resumes on a numbered line after the tallest cell.
+            # Qt starts the next block on the cell's last half-line instead.
+            last_y = y
+            for column in range(qt_table.columns()):
+                last = qt_table.cellAt(0, column).lastCursorPosition().block()
+                lines = last.layout()
+                baseline = doc_layout.blockBoundingRect(last).top() + lines.lineAt(lines.lineCount() - 1).y()
+                last_y = max(last_y, baseline)
+            cell_half_lines = round(2 * (last_y - y) / self._line_height)
+            after = qt_table.lastCursorPosition().block().next()
+            half_returns = 0
+            while after.isValid() and not after.text() and after.blockFormat().lineHeight() < self._line_height:
+                half_returns += 1
+                after = after.next()
+            if after.isValid() and after.layout().lineCount():
+                next_y = doc_layout.blockBoundingRect(after).top() + after.layout().lineAt(0).y()
+                numbered_lines = cell_half_lines // 2 + 2 + (half_returns + 1) // 2
+                adjustment = numbered_lines * self._line_height - (next_y - y)
+                if abs(adjustment) >= 0.5 and int(y // self._page_height) == int(next_y // self._page_height):
+                    fmt.setBottomMargin(max(0, fmt.bottomMargin() + adjustment))
             if abs(target - y) >= 0.5:
                 fmt.setTopMargin(max(0, fmt.topMargin() + target - y))
+            if fmt != qt_table.format():
                 qt_table.setFormat(fmt)
 
     def number_at_y(self, page, y, sequential):

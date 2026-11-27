@@ -134,7 +134,7 @@ def test_reapplying_preserves_the_reporters_index_and_oath_edits():
 
 @pytest.mark.parametrize(('plaintiff', 'defendant', 'title_line'), [
     ('ALEX EXAMPLE', 'SAMPLE COMPANY', 13),
-    ('ALEX EXAMPLE', 'A' * 24 + ' ' + 'B' * 12, 13.5),
+    ('ALEX EXAMPLE', 'A' * 24 + ' ' + 'B' * 12, 14),
     (' '.join(['A' * 24] * 7), ' '.join(['B' * 24] * 5), 18),
 ], ids=['one-row-parties', 'wrapped-defendant', 'longest-allowed-parties'])
 def test_title_follows_the_caption_and_footer_stays_on_lines_24_and_25(plaintiff, defendant, title_line):
@@ -158,8 +158,37 @@ def test_title_follows_the_caption_and_footer_stays_on_lines_24_and_25(plaintiff
             row = next(row for row in rows if label in row.text)
             assert row.page == 1
             assert row.y == pytest.approx(view._top + (line - 1) * view._line_height, abs=1)
+        recital = next(row for row in rows if 'Deposition of ' in row.text)
+        assert recital.page == 2
+        assert recital.y == pytest.approx(view._page_height + view._top + (title_line - 2) * view._line_height, abs=1)
         assert next(row.page for row in rows if row.position == body) == 5
     finally:
         view.close()
         if font_id >= 0:
             QFontDatabase.removeApplicationFont(font_id)
+
+
+@pytest.mark.parametrize(('defendant', 'title_returns', 'footer_returns'), [
+    ('SAMPLE COMPANY', 4, 14),
+    ('A' * 24 + ' ' + 'B' * 12, 6, 12),
+])
+def test_native_spacing_after_caption_keeps_the_file_number_on_page_one(defendant, title_returns, footer_returns):
+    # Measured in Case CATalyst Print Preview for single-line and wrapped parties.
+    notice = replace(sample_notice(), defendant=defendant)
+    _, _, _, job, _, _ = covered(field_files(), notice)
+    stream = job.native_bytes
+    after_table = cover.TABLE_END + cover.SINGLE_OFF
+    half = cover._p(9)
+    assert after_table + half * title_returns + cover._p(7, 'DEPOSITION OF') in stream
+    assert after_table + half * (title_returns - 2) + cover._p(8, b'\t\t\tDeposition of ') in stream
+    assert b'\x12\x88 ' + half * footer_returns + cover._p(9, 'REPORTED BY:') in stream
+
+
+def test_reapplying_a_notice_keeps_its_singular_role_and_docket_spacing():
+    notice = sample_notice()
+    files, _, bundle, job, _, _ = covered(field_files(), notice)
+    changed = job.baseline.revise(job.text.replace('Defendants.', 'Defendant.').replace('CASE NO.: ', 'CASE NO.:  '))
+    files[job.key + '.sgngl'] = serialize_candidate(job.with_revision(changed), bundle)
+    _, _, _, rebuilt, _, _ = covered(files, replace(notice, file_number='UPDATED'))
+    assert rebuilt.text.count('Defendant.') == 2
+    assert rebuilt.text.count('CASE NO.:  ADJ00000123') == 2
