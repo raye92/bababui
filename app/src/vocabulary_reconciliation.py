@@ -247,7 +247,7 @@ def _window_edits(words, tokens, selected, text, terms):
         if last - first + 1 != stop - i:
             continue
         span = words[tokens[first].word:tokens[last].word + 1]
-        if any(w.speaker != span[0].speaker for w in span):
+        if any(w.starts_turn or w.speaker != span[0].speaker for w in span[1:]):
             continue
         forms = tuple(spoken if form.isupper() and spoken[0].isupper() else form
                       for form, spoken in zip(forms, heard[begin:end]))

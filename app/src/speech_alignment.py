@@ -22,6 +22,15 @@ WAV_CHANGED = 'Audio alignment cleared because the WAV changed or is unavailable
 MATCH_WINDOW_MS = 15000
 
 
+@dataclass(frozen=True)
+class Word:
+    text: str
+    speaker: str | None
+    start: float | None
+    end: float | None
+    starts_turn: bool = False
+
+
 def _tokens(text, offset=0):
     for match in WORD.finditer(text, offset):
         yield match.start(), match.group().casefold().replace('’', '').replace("'", '')

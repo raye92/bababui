@@ -27,12 +27,12 @@ ZIP onto it. The editor uses the WAV in the job. You can also attach a WAV after
 import. Duplicating a tab keeps its transcript, pending revisions, audio, notice,
 and model settings.
 
-BABABUI uses Gemini 3.5 Transcribe for words and timestamps and Gemini 3.8 Flash
-for speaker labels across the whole recording. It saves the results in
-a folder named after the imported ZIP under `app/data/transcriptions/`. For
+BABABUI uses Gemini 3.8 Flash for the wording and speaker turns across the whole
+recording. Gemini 3.5 Transcribe supplies timestamps for matching words. The app
+saves the results in a folder named after the imported ZIP under `app/data/transcriptions/`. For
 `Hearing.zip`, `Hearing/Hearing.txt` contains the combined speaker transcript.
-`Hearing - chunk 1.json` contains Transcribe's words, timestamps and backup speaker
-labels. `Hearing - Flash speakers.txt` contains the independent Flash pass. Each full Transcribe
+`Hearing - chunk 1.json` contains Transcribe's words, timestamps and native speaker
+labels. `Hearing - Flash speakers.txt` contains the original Flash transcript. Each full Transcribe
 reply is saved as JSON, with its chunk, continuation, fallback, retry, timing
 clip, or vocabulary window identified in the filename.
 
@@ -70,13 +70,14 @@ that request once. If Gemini returns an incomplete timed transcript, the app
 retries the remainder once, starting one minute before the end of the last fully
 timed word. If it cannot resume, it requests the full chunk with speaker labels
 only and recovers word times from matching phrases in the earlier responses.
-At each join, the app uses word times and shared wording to remove repeated words.
-It then aligns each chunk with the full Flash pass. A returning speaker can match
-their earlier Flash ID wherever they speak again. If Flash skips words at a handoff,
-the app uses the local Transcribe tags, sentence endings and pauses to place the switch.
-If the wording differs but both chunks have timed words in the overlap, the app
-uses the midpoint as a fallback. Review the warnings and resulting transcript.
-Timestamps are used internally and do not appear in Incoming.
+The app stitches the Transcribe chunks using word times and shared wording. If
+the wording differs but both chunks have timed words in the overlap, it uses the
+midpoint as a fallback. A warning identifies uncertain joins in the timing source.
+The app keeps each Flash turn, including one-word interruptions, and copies a
+word's measured start and end when its wording aligns. Flash-only words stay in
+the transcript without timestamps. Transcribe-only words stay in the chunk files.
+Playback uses the timestamps internally. Older projects with only saved Transcribe
+data can still use that transcript offline.
 
 ## Notice PDFs
 
@@ -92,6 +93,7 @@ numbers and exhibit entries. The editor shows the cover's native tab stops and
 half-lines. In the standard five-page cover, testimony begins on page 5, line 11.
 The working project and session recovery retain the notice. Confirmed names help
 the audio model recognize participants, firms, the witness, and caption parties.
+The optional vocabulary pass checks name spellings after the timing match.
 Formatting also preserves a notice spelling when the same name appears in the
 corresponding passage of the original testimony.
 

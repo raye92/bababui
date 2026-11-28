@@ -2,6 +2,8 @@ import pytest
 
 from app.src import audio_pipeline as audio
 from app.src.audio_pipeline import Word
+from app.src.flash_speakers import align_flash_words
+from app.src.vocabulary_reconciliation import reconcile_vocabulary
 
 
 def words(text, speaker, start=0):
@@ -9,63 +11,50 @@ def words(text, speaker, start=0):
             for i, surface in enumerate(text.split())]
 
 
-def resolve(chunks, flash):
-    from app.src.flash_speakers import apply_flash_speakers
-    result = apply_flash_speakers(chunks, flash)
-    for original, labelled in zip(chunks, result, strict=True):
-        assert [(w.text, w.start, w.end) for w in labelled] == [
-            (w.text, w.start, w.end) for w in original]
-    return [[w.speaker for w in chunk] for chunk in result]
+def test_flash_supplies_words_turns_and_punctuation_and_transcribe_supplies_times():
+    native = words('Yes. Okay. Next question.', 'native')
+    flash = 'Speaker 2: YES!\nSpeaker 1: Next question?'
+    result, = align_flash_words([native], flash)
+    assert audio.render(result) == flash
+    assert [(w.text, w.start, w.end) for w in result] == [
+        ('YES!', 0, .5), ('Next', 2, 2.5), ('question?', 3, 3.5)]
 
 
-def test_returning_voice_is_resolved_outside_overlap_and_local_numbers_can_be_reused():
-    first = words('Morning counsel.', '1') + words('All set.', '2') + words('My oath.', '3')
-    second = words('Next question.', '1', 1800) + words('Yeah, again I remember.', '5', 1810)
-    flash = ('Speaker 1: Morning counsel.\nSpeaker 2: All set.\nSpeaker 3: My oath.\n'
-             'Speaker 2: Next question.\nSpeaker 3: Again I remember.')
-    assert resolve([first, second], flash) == [
-        ['Speaker 1'] * 2 + ['Speaker 2'] * 2 + ['Speaker 3'] * 2,
-        ['Speaker 2'] * 2 + ['Speaker 3'] * 4]
+def test_flash_only_interruption_and_unmatched_words_stay_untimed():
+    native = words('I recall the meeting.', 'other')
+    flash = 'Speaker 4: I\nSpeaker 7: Wait!\nSpeaker 4: recall the hearing.'
+    result, = align_flash_words([native], flash)
+    assert audio.render(result) == flash
+    assert [(w.start, w.end) for w in result] == [(0, .5), (None, None), (1, 1.5), (2, 2.5), (None, None)]
 
 
-def test_flash_switch_and_gap_inside_one_transcribe_turn():
-    source = words('the body parts. Well, that is correct.', '4')
-    flash = 'Speaker 2: The body\nSpeaker 1: That is correct.'
-    assert resolve([source], flash) == [['Speaker 2'] * 3 + ['Speaker 1'] * 4]
-    source = words('Yes. Okay. Doctor are you a practicing surgeon?', '4')
-    assert resolve([source], 'Speaker 3: Yes.\nSpeaker 1: Okay. Doctor, are you a practicing surgeon?') == [
-        ['Speaker 3'] + ['Speaker 1'] * 7]
+def test_compound_word_needs_a_complete_timed_match():
+    native = words('first L4 L5 then L3 L5 today', 'a')
+    result, = align_flash_words([native], 'Speaker 1: First L4-L5, then L4-L5 today.')
+    assert [(w.text, w.start, w.end) for w in result] == [
+        ('First', 0, .5), ('L4-L5,', 1, 2.5), ('then', 3, 3.5),
+        ('L4-L5', None, None), ('today.', 6, 6.5)]
 
 
-def test_backup_places_omitted_phrase_with_outgoing_speaker_and_keeps_wording():
-    source = words('You wrote letters to the judge claiming that', '5') + words('I object.', '2', 12)
-    flash = 'Speaker 1: You wrote letters.\nSpeaker 2: I object.'
-    assert resolve([source], flash) == [['Speaker 1'] * 8 + ['Speaker 2'] * 2]
-
-
-def test_flash_only_text_is_never_inserted_and_unlabelled_continuations_are_kept():
-    source = [Word('Dr.', None, None, None), Word('Lee,', None, None, None),
-              Word('do', None, 5, 5.1), Word('you?', None, 5.1, 5.3), Word('Yes.', None, 6, 6.2)]
-    flash = '**Speaker 2:** Doctor Lee,\n\nuh, do you?\n\n**Speaker 1:** Yes.'
-    assert resolve([source], flash) == [['Speaker 2'] * 4 + ['Speaker 1']]
+def test_explicit_turns_survive_legacy_untimed_records_and_notice_spelling():
+    native = [Word('They called Jack Son yesterday.', 'local', None, None)]
+    flash = '**Speaker 3:** They called Jack\n**Speaker 3:**\nSon yesterday.'
+    result, = align_flash_words([native], flash)
+    expected = 'Speaker 3: They called Jack\nSpeaker 3: Son yesterday.'
+    assert audio.render(result) == expected
+    assert all(w.start is None and w.end is None for w in result)
+    reconciled = reconcile_vocabulary(result, [(0, 20)] * len(result),
+                                      [(0, 20, 'They called Jackson yesterday.')], ('Jackson',))
+    assert audio.render(reconciled) == expected
 
 
 def test_unrelated_or_unlabelled_response_cannot_become_recording_speakers():
-    from app.src.flash_speakers import apply_flash_speakers
     for flash in ('no labels here', 'Speaker 1: Completely unrelated.'):
         with pytest.raises(ValueError, match='Flash'):
-            apply_flash_speakers([words('Original speech.', '1')], flash)
+            align_flash_words([words('Original speech.', '1')], flash)
     with pytest.raises(ValueError, match='Flash'):
-        apply_flash_speakers([words('The original witness discussed a procedure.', '1')],
+        align_flash_words([words('The original witness discussed a procedure.', '1')],
                              'Speaker 1: The default microphone only records static.')
-
-
-def test_an_untimed_legacy_turn_can_contain_a_flash_handoff():
-    from app.src.flash_speakers import apply_flash_speakers
-    old = Word('Yes.  Okay. Doctor are you ready?', 'local', None, None)
-    flash = 'Speaker 3: Yes.\nSpeaker 1: Okay. Doctor, are you ready?'
-    assert apply_flash_speakers([[old]], flash) == [[Word('Yes.', 'Speaker 3', None, None),
-        Word('Okay. Doctor are you ready?', 'Speaker 1', None, None)]]
 
 
 def test_failed_flash_reuses_native_words_and_only_publishes_a_matched_pass(tmp_path, monkeypatch):
@@ -127,13 +116,15 @@ def test_desktop_requests_one_flash_pass_per_recording_and_reuses_it(tmp_path, m
         calls.append(('flash', duration))
         return ('Speaker 1: I am here.\nSpeaker 3: Doctor is ready.\n'
                 'Speaker 2: one two three four five six seven eight nine ten\n'
-                'Speaker 3: Yes.\nSpeaker 1: Okay. We can resume.')
+                'Speaker 3: Yes.\nSpeaker 1: We may resume.')
     monkeypatch.setattr(audio.AudioPipeline, '_request_flash', flash, raising=False)
     cache = tmp_path / 'cache'
     output = RunOutput.create(tmp_path, 'run')
     pipeline = audio.AudioPipeline('fake', cache, output=output)
     result = pipeline.run(wav)
-    assert result.text.endswith('Speaker 3: Yes.\nSpeaker 1: Okay. We can resume.')
+    assert result.text.endswith('Speaker 3: Yes.\nSpeaker 1: We may resume.')
+    assert [(w.text, w.start) for w in result.words[-4:]] == [
+        ('Yes.', 1810), ('We', 1812), ('may', None), ('resume.', 1814)]
     assert not any('Unmatched speaker' in warning for warning in result.warnings)
     assert calls == ['chunk 1', 'chunk 2', ('flash', 1850)]
     assert pipeline.run(wav) == result

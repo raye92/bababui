@@ -13,8 +13,8 @@ import shutil
 import tempfile
 import time
 
-from app.src.speech_alignment import recover_word_times
-from app.src.flash_speakers import apply_flash_speakers
+from app.src.flash_speakers import align_flash_words
+from app.src.speech_alignment import Word, recover_word_times
 from app.src.transcription_output import OutputError, SegmentOutput
 from app.src.vocabulary_reconciliation import normalized_vocabulary, reconcile_vocabulary
 from shared import media
@@ -38,14 +38,6 @@ CHUNK_STEP = CHUNK_SECONDS - OVERLAP_SECONDS
 MAX_DURATION = CHUNK_SECONDS + 3 * CHUNK_STEP
 VOCABULARY_SECONDS = 60 * 60
 TIMING_CLIP_SECONDS = 5 * 60
-
-
-@dataclass(frozen=True)
-class Word:
-    text: str
-    speaker: str | None
-    start: float | None
-    end: float | None
 
 
 @dataclass(frozen=True)
@@ -144,7 +136,7 @@ def render(words):
     turns = []
     previous = None
     for word in words:
-        if not turns or word.speaker != previous:
+        if not turns or word.starts_turn or word.speaker != previous:
             turns.append(f'{word.speaker or "Unknown speaker"}: {word.text}')
             previous = word.speaker
         else:
@@ -585,7 +577,8 @@ class TranscribePipeline:
                 else:
                     review_path.unlink(missing_ok=True)
             segment.cache_responses(cached)
-            save_json(cached, [asdict(w) for w in words])
+            # Keep the native cache readable by both merge strategies.
+            save_json(cached, [dict(text=w.text, speaker=w.speaker, start=w.start, end=w.end) for w in words])
         if self.output and (cache_hit or usable):
             self.output.copy(f' - {label}.json', cached)
         if continuation_reviews is not None:
@@ -645,7 +638,7 @@ class TranscribePipeline:
             chunks.append(words)
             if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
-        progress('Matching speakers and joining transcript...')
+        progress('Joining transcription chunks...')
         retained, warnings = self._join_recording(chunks, continuation_reviews, path, plan[-1][1],
                                                   directory, progress, digest)
         words = tuple(chain.from_iterable(retained))
@@ -667,7 +660,7 @@ class TranscribePipeline:
 
 
 class AudioPipeline(TranscribePipeline):
-    """Desktop transcription using one Flash speaker roster for the entire WAV."""
+    """Use the Flash transcript and align its words to the native recording times."""
 
     def _request_flash(self, path, duration, progress):
         with tempfile.TemporaryDirectory(prefix='bababui-speakers-') as temporary:
@@ -685,14 +678,14 @@ class AudioPipeline(TranscribePipeline):
         if cache_hit:
             text = cached.read_text(encoding='utf-8')
         else:
-            progress('Identifying speakers with Flash across the full recording...')
+            progress('Transcribing the full recording with Flash...')
             text = self._request_flash(path, duration, progress)
-        progress('Matching recording-wide speakers to Transcribe words...')
+        progress('Matching Transcribe timestamps to Flash words...')
         retained, warnings = _stitched_chunks(chunks, reviews, report_unmatched=False)
-        labelled = apply_flash_speakers(retained, text)
+        timed = align_flash_words(retained, text)
         check_wav_digest(path, digest)
         if not cache_hit:
             atomic_bytes(cached, text.encode('utf-8'))
         if self.output:
             self.output.copy(' - Flash speakers.txt', cached)
-        return labelled, warnings
+        return timed, [f'Transcribe timing source: {warning}' for warning in warnings]

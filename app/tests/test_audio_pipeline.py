@@ -186,12 +186,14 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
                                      output=output)
             result = pipeline.run(wav)
             assert result.text == 'Speaker 1: Hello there.' and not result.warnings
-            assert result.words == (Word('Hello', 'Speaker 1', 0, .5), Word('there.', 'Speaker 1', .5, 1))
+            assert result.words == (Word('Hello', 'Speaker 1', 0, .5, starts_turn=True),
+                                    Word('there.', 'Speaker 1', .5, 1))
             assert result.wav_sha256 == hashlib.sha256(b'wav').hexdigest()
             payload = json.loads((output.directory / f'{version} - chunk 1 - response.json').read_bytes())
             assert payload == reply
             words = json.loads((output.directory / f'{version} - chunk 1.json').read_bytes())
             assert words[0]['start'] == 0 and words[1]['text'] == 'there.'
+            assert set(words[0]) == {'text', 'speaker', 'start', 'end'}
     assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
     assert len(requests) == 2
     assert requests[0]['store'] is True
