@@ -65,7 +65,7 @@ class SettingsPage(QScrollArea):
         self.processing_context.setTextFormat(Qt.PlainText)
         self.processing_context.setWordWrap(True)
         model_form.addRow('', self.processing_context)
-        model_form.addRow('Transcription model:', QLabel('Gemini 3.5 Transcribe'))
+        model_form.addRow('Transcription models:', QLabel('Gemini 3.5 Transcribe + Gemini 3.8 Flash'))
         options.addWidget(models)
         notices = QGroupBox('Notice PDFs')
         notice_options = QVBoxLayout(notices)

@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from app.src.speech_alignment import recover_word_times
+from app.src.flash_speakers import apply_flash_speakers
 from app.src.transcription_output import OutputError, SegmentOutput
 from app.src.vocabulary_reconciliation import normalized_vocabulary, reconcile_vocabulary
 from shared import media
@@ -22,6 +23,14 @@ from shared.storage import atomic_bytes, atomic_copy, file_lock
 
 
 AUDIO_MODEL = 'gemini-3.5-transcribe'
+FLASH_MODEL = 'gemini-3.8-flash'
+FLASH_SPEAKER_PROMPT = (
+    'Transcribe the complete recording in order. Start each speaker turn on a new line with '
+    'Speaker 1:, Speaker 2:, and so on. Give each voice one ID for the entire recording. '
+    'A returning speaker keeps their original ID even after a long absence. Listen for changes '
+    'between attorneys and witnesses, brief answers, interruptions and objections. Let the voices '
+    'determine the turns. Include the spoken words verbatim. Return only the labelled transcript.'
+)
 CHUNK_SECONDS = 30 * 60
 OVERLAP_SECONDS = 60
 OVERLAP_DRIFT_SECONDS = 10
@@ -180,10 +189,10 @@ class _OverlapReview:
     cut: float | None = None
     untimed: bool = False
 
-    def warnings(self, chunk_number, *, labels=None, offset=0):
+    def warnings(self, chunk_number, *, labels=None, offset=0, report_unmatched=True):
         speakers = self.unmatched if labels is None else [labels[s] for s in self.unmatched if s in labels]
         warnings = [f'Unmatched speaker in chunk {chunk_number} assigned {s}; review the identity.'
-                    for s in speakers]
+                    for s in speakers if report_unmatched]
         if self.cut is not None:
             minutes, seconds = divmod(int(offset + self.cut), 60)
             warnings.append(f'Uncertain overlap alignment: joined at {minutes}:{seconds:02d}. Review for missing or repeated words.')
@@ -199,11 +208,12 @@ class _ResumedWords(list[Word]):
         self.review = review
 
 
-def _stitched_chunks(chunks, continuation_reviews=()):
+def _stitched_chunks(chunks, continuation_reviews=(), *, report_unmatched=True):
     tail, labels = _number_speakers(chunks[0])
     next_label = count(len(labels) + 1)
     combined = []
-    warnings = continuation_reviews[0].warnings(1, labels=labels) if continuation_reviews else []
+    warnings = (continuation_reviews[0].warnings(1, labels=labels, report_unmatched=report_unmatched)
+                if continuation_reviews else [])
     for index, chunk in enumerate(chunks[1:], 1):
         start = index * CHUNK_STEP
         incoming = _shift_words(chunk, start)
@@ -211,9 +221,10 @@ def _stitched_chunks(chunks, continuation_reviews=()):
         review = _OverlapReview()
         kept, tail, labels = _join_overlap(tail, incoming, start, start + OVERLAP_SECONDS, next_label, review)
         combined.append(kept)
-        warnings.extend(review.warnings(index + 1))
+        warnings.extend(review.warnings(index + 1, report_unmatched=report_unmatched))
         if continuation_reviews:
-            warnings.extend(continuation_reviews[index].warnings(index + 1, labels=labels, offset=start))
+            warnings.extend(continuation_reviews[index].warnings(index + 1, labels=labels, offset=start,
+                                                                 report_unmatched=report_unmatched))
     combined.append(tail)
     return combined, list(dict.fromkeys(warnings))
 
@@ -328,7 +339,8 @@ def save_json(path, data):
     temporary.replace(path)
 
 
-class AudioPipeline:
+class TranscribePipeline:
+    """Collect and stitch the native Transcribe words, timestamps and backup speaker labels."""
     def __init__(self, key, cache, sdk=None, *, output=None, legacy_cache=None, cache_mode='reuse'):
         # Interactions retries 429 internally even with attempts=1 unless it is excluded.
         self.client = GeminiTranscriber(key, sdk, retry_options={
@@ -634,7 +646,8 @@ class AudioPipeline:
             if not any(w.start is not None for w in words):
                 timing_warnings.append(f'No word timestamps for chunk {i+1}.')
         progress('Matching speakers and joining transcript...')
-        retained, warnings = _stitched_chunks(chunks, continuation_reviews)
+        retained, warnings = self._join_recording(chunks, continuation_reviews, path, plan[-1][1],
+                                                  directory, progress, digest)
         words = tuple(chain.from_iterable(retained))
         if vocabulary:
             windows, vocabulary_warnings = self._vocabulary_windows(path, plan[-1][1], progress, digest, vocabulary)
@@ -648,3 +661,38 @@ class AudioPipeline:
             raise ValueError('Transcription returned no usable text.')
         check_wav_digest(path, digest)
         return Transcription(text, words, tuple(timing_warnings + warnings), int(plan[-1][1] * 1000), digest)
+
+    def _join_recording(self, chunks, reviews, path, duration, directory, progress, digest):
+        return _stitched_chunks(chunks, reviews)
+
+
+class AudioPipeline(TranscribePipeline):
+    """Desktop transcription using one Flash speaker roster for the entire WAV."""
+
+    def _request_flash(self, path, duration, progress):
+        with tempfile.TemporaryDirectory(prefix='bababui-speakers-') as temporary:
+            prepared = Path(temporary) / 'recording.wav'
+            media.prepare(path, {'start': 0, 'end': duration}, prepared)
+            return self.client.transcribe(prepared, FLASH_MODEL, None, progress,
+                                          speaker_prompt=FLASH_SPEAKER_PROMPT, max_output_tokens=65536, store=False)
+
+    def _join_recording(self, chunks, reviews, path, duration, directory, progress, digest):
+        cached = directory / 'flash-speakers-v1.txt'
+        cache_hit = self.cache_mode in ('reuse', 'saved') and cached.is_file()
+        if self.cache_mode == 'saved' and not cache_hit:
+            # Formatting an older saved project is an offline operation.
+            return super()._join_recording(chunks, reviews, path, duration, directory, progress, digest)
+        if cache_hit:
+            text = cached.read_text(encoding='utf-8')
+        else:
+            progress('Identifying speakers with Flash across the full recording...')
+            text = self._request_flash(path, duration, progress)
+        progress('Matching recording-wide speakers to Transcribe words...')
+        retained, warnings = _stitched_chunks(chunks, reviews, report_unmatched=False)
+        labelled = apply_flash_speakers(retained, text)
+        check_wav_digest(path, digest)
+        if not cache_hit:
+            atomic_bytes(cached, text.encode('utf-8'))
+        if self.output:
+            self.output.copy(' - Flash speakers.txt', cached)
+        return labelled, warnings

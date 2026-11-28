@@ -166,8 +166,11 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
 
     def transport(request):
         requests.append(json.loads(request.content))
+        if requests[-1]['model'] == 'gemini-3.8-flash':
+            return httpx.Response(200, json={'status': 'completed', 'steps': [{'type': 'model_output',
+                'content': [{'type': 'text', 'text': 'Speaker 1: Hello there.'}]}]})
         return httpx.Response(200, json=reply)
-    files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'))
+    files = NS(upload=lambda **kw: NS(name='files/test', uri='uri', state='ACTIVE'), delete=lambda **kw: None)
     wav = tmp_path / 'source.wav'
     wav.write_bytes(b'wav')
     directory = tmp_path/'cache'/AUDIO_MODEL/'overlap-v1'/hashlib.sha256(b'wav').hexdigest()
@@ -190,10 +193,16 @@ def test_real_sdk_contract_and_cache(tmp_path, monkeypatch):
             words = json.loads((output.directory / f'{version} - chunk 1.json').read_bytes())
             assert words[0]['start'] == 0 and words[1]['text'] == 'there.'
     assert (directory/'state.json').read_text(encoding='utf-8') == '{"remote": "files/old"}'
-    assert len(requests) == 1
+    assert len(requests) == 2
     assert requests[0]['store'] is True
     assert requests[0]['generation_config']['transcription_config']['mode'] == {
         'type': 'verbatim', 'diarization_mode': 'speaker', 'timestamp_granularities': ['word']}
+    flash = requests[1]
+    assert flash['store'] is False
+    content = flash['input'][0]['content']
+    assert [item['type'] for item in content] == ['text', 'audio']
+    assert 'Hello there' not in content[0]['text']
+    assert flash['generation_config']['max_output_tokens'] == 65536
 
 
 def test_clean_rerun_discards_only_this_recordings_caches(tmp_path, monkeypatch):
@@ -212,6 +221,9 @@ def test_clean_rerun_discards_only_this_recordings_caches(tmp_path, monkeypatch)
         def transcribe_segment(self, path, progress, *, vocabulary=(), segment=None):
             calls.append(vocabulary)
             return [Word('Testimony', 'a', 0, 1)]
+
+        def _request_flash(self, path, duration, progress):
+            return 'Speaker 1: Testimony'
 
     pipeline = Pipeline('fake', cache, legacy_cache=legacy)
     for recording, name in ((wav, 'Jones'), (wav, 'Lee'), (other, 'Jones')):
@@ -272,7 +284,7 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
     import httpx
     from google import genai
     from app.src.transcription_output import RunOutput
-    from app.src.audio_pipeline import AudioPipeline, media
+    from app.src.audio_pipeline import TranscribePipeline, media
 
     requests, uploads, waits, progress = [], [], [], []
     prior_chunks = len(transcript) - 1
@@ -304,7 +316,7 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
             'attempts': 1, 'http_status_codes': [503]},
             'client_args': {'transport': httpx.MockTransport(transport)}}) as sdk:
         output = RunOutput.create(tmp_path / 'runs', 'Hearing')
-        pipeline = AudioPipeline('fake', tmp_path / 'cache',
+        pipeline = TranscribePipeline('fake', tmp_path / 'cache',
                                  NS(files=NS(upload=upload), interactions=sdk.interactions), output=output)
         if statuses[-1] == 200:
             result = pipeline.run(wav, progress.append)
@@ -329,7 +341,7 @@ def test_later_chunk_rate_limit_waits_then_retries_same_upload(tmp_path, monkeyp
 
 
 def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(tmp_path, monkeypatch):
-    from app.src.audio_pipeline import AudioPipeline, media
+    from app.src.audio_pipeline import TranscribePipeline, media
 
     overlap = 'Please read the signed agreement to the witness again.'
     untimed = f'We started today. {overlap}'
@@ -371,7 +383,7 @@ def test_incomplete_chunk_retries_without_timestamps_then_next_chunk_uses_them(t
     monkeypatch.setattr(media, 'probe', lambda _: 2942)
     monkeypatch.setattr(media, 'prepare', lambda path, clip, destination: prepared.append(clip))
     sdk = NS(files=NS(upload=upload), interactions=raw_interactions(create))
-    pipeline = AudioPipeline('fake', tmp_path/'cache', sdk)
+    pipeline = TranscribePipeline('fake', tmp_path/'cache', sdk)
 
     result = pipeline.run(wav)
 
@@ -400,7 +412,7 @@ def test_unmatched_untimed_overlap_keeps_text_from_both_chunks():
 @pytest.mark.parametrize('whole_turns', [False, True], ids=['words', 'speaker-turns'])
 def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_path, monkeypatch, whole_turns):
     from dataclasses import asdict
-    from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, media, save_json
+    from app.src.audio_pipeline import AUDIO_MODEL, TranscribePipeline, media, save_json
 
     wav = tmp_path / 'old.wav'
     wav.write_bytes(b'recording')
@@ -414,7 +426,7 @@ def test_recovers_word_times_from_short_clips_for_a_cached_untimed_chunk(tmp_pat
     clips = []
     monkeypatch.setattr(media, 'probe', lambda _: 360)
     monkeypatch.setattr(media, 'prepare', lambda path, segment, dest: clips.append(segment))
-    pipeline = AudioPipeline('fake', cache, legacy_cache=tmp_path / 'legacy')
+    pipeline = TranscribePipeline('fake', cache, legacy_cache=tmp_path / 'legacy')
 
     def transcribe(path, progress, *, timing_only, segment):
         assert timing_only
@@ -453,13 +465,13 @@ def test_concurrent_cache_use_is_rejected(tmp_path, monkeypatch):
 
 
 def test_partial_run_reuses_first_chunk(tmp_path, monkeypatch):
-    from app.src.audio_pipeline import AudioPipeline, media
+    from app.src.audio_pipeline import TranscribePipeline, media
     wav = tmp_path/'input.wav'
     wav.write_bytes(b'wav')
     monkeypatch.setattr(media, 'probe', lambda _: 3540)
     prepared = []
     monkeypatch.setattr(media, 'prepare', lambda source, segment, dest: prepared.append(segment))
-    pipeline = AudioPipeline('fake', tmp_path/'cache')
+    pipeline = TranscribePipeline('fake', tmp_path/'cache')
     attempts = []
     def transcribe(path, progress=lambda message: None, *, segment):
         attempts.append(path)

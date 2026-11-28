@@ -8,7 +8,7 @@ import httpx
 from google import genai
 from PySide6.QtCore import Qt
 
-from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, Word, media, render
+from app.src.audio_pipeline import AUDIO_MODEL, AudioPipeline, TranscribePipeline, Word, media, render
 from app.src.jobs import ProcessingWorker, Request, TranscriptionCoordinator
 
 
@@ -150,7 +150,7 @@ def test_long_recording_reuses_base_and_successful_vocabulary_after_optional_fai
             return NS(files=NS(upload=upload), interactions=sdk.interactions)
 
         monkeypatch.setattr(genai, 'Client', client)
-        pipeline = AudioPipeline('fake', tmp_path / 'cache')
+        pipeline = TranscribePipeline('fake', tmp_path / 'cache')
         messages = []
         partial = pipeline.run(wav, messages.append, vocabulary=('Smythe',))
         assert 'We called Smythe yesterday.' in partial.text and 'Smyth answered' in partial.text
@@ -177,11 +177,15 @@ def test_two_tabs_with_different_names_share_base_calls_and_format_their_own_raw
     monkeypatch.setattr(media, 'probe', lambda _: 30)
     monkeypatch.setattr(media, 'prepare', lambda *args: None)
     entered, release, waiting = Event(), Event(), Event()
-    calls, formatted, errors = [], [], []
+    calls, flash_calls, formatted, errors = [], [], [], []
 
     class Pipeline(AudioPipeline):
         def __init__(self, *args, **kwargs):
             super().__init__('fake', tmp_path / 'cache', **kwargs)
+
+        def _request_flash(self, path, duration, progress):
+            flash_calls.append(path)
+            return 'Speaker 1: They called Smith yesterday.'
 
         def transcribe_segment(self, path, progress, *, vocabulary=(), segment=None):
             calls.append(vocabulary)
@@ -221,6 +225,7 @@ def test_two_tabs_with_different_names_share_base_calls_and_format_their_own_raw
         second.result(5)
     assert not errors
     assert len(calls) == 3 and calls.count(()) == 1
+    assert flash_calls == [wav]
     assert sorted(formatted) == [('Smith', 'Speaker 1: They called Smith yesterday.'),
                                  ('Smythe', 'Speaker 1: They called Smythe yesterday.')]
     assert {w.output.path('.txt').read_text(encoding='utf-8') for w in workers} == {text for _, text in formatted}

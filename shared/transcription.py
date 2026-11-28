@@ -69,14 +69,16 @@ class GeminiTranscriber:
             if getattr(exc, "code", None) != 404:
                 raise ValueError("Could not delete a remote audio segment.") from None
 
-    def transcribe(self, path, model, remote, warning):
+    def transcribe(self, path, model, remote, warning, *, speaker_prompt=None, max_output_tokens=None, store=True):
         sdk, uploaded = self.client(), None
         remote_name = "files/" + uuid.uuid4().hex
-        remote(remote_name)
+        if remote is not None:
+            remote(remote_name)
         try:
             uploaded = sdk.files.upload(file=str(path), config={"mime_type": "audio/wav", "name": remote_name})
             remote_name = uploaded.name
-            remote(uploaded.name)
+            if remote is not None:
+                remote(uploaded.name)
             deadline = time.monotonic() + 300
             while str(getattr(uploaded.state, "value", uploaded.state)).upper() == "PROCESSING":
                 if time.monotonic() > deadline:
@@ -86,15 +88,17 @@ class GeminiTranscriber:
             if str(getattr(uploaded.state, "value", uploaded.state)).upper() not in ("ACTIVE", "NONE"):
                 raise ValueError("Audio upload processing failed.")
             audio = {"type": "audio", "uri": uploaded.uri, "mime_type": "audio/wav"}
-            kwargs = {"model": model, "input": [audio], "store": True}
+            kwargs = {"model": model, "input": [audio], "store": store}
             if model == DEFAULT_AUDIO_MODEL:
                 kwargs["generation_config"] = {"transcription_config": {
                     "mode": {"type": "verbatim", "diarization_mode": "speaker"}}}
             else:
-                kwargs["input"].insert(0, {"type": "text", "text":
+                kwargs["input"].insert(0, {"type": "text", "text": speaker_prompt or (
                     "Transcribe all spoken words verbatim, including repetitions and false starts. "
                     "Label each speaker turn as Speaker 1, Speaker 2, etc., using consistent labels within this recording. "
-                    "Do not guess speaker names. Return only the complete transcript with speaker labels. No summary or timestamps."})
+                    "Do not guess speaker names. Return only the complete transcript with speaker labels. No summary or timestamps.")})
+            if max_output_tokens is not None:
+                kwargs.setdefault("generation_config", {})["max_output_tokens"] = max_output_tokens
             started = time.perf_counter()
             try:
                 response = sdk.interactions.create(**kwargs, automatic_continuation=False, timeout=1800)
@@ -113,6 +117,8 @@ class GeminiTranscriber:
             if remote_name:
                 try:
                     self.delete(remote_name)
-                    remote(None)
+                    if remote is not None:
+                        remote(None)
                 except Exception:
-                    warning("Remote audio cleanup failed; it will be retried on the next explicit transcription action.")
+                    warning("Could not delete the temporary audio upload." if remote is None else
+                            "Remote audio cleanup failed; it will be retried on the next explicit transcription action.")

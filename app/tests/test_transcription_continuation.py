@@ -5,7 +5,7 @@ from app.tests.audio_responses import raw_interactions
 
 import pytest
 
-from app.src.audio_pipeline import AudioPipeline, Word, media
+from app.src.audio_pipeline import TranscribePipeline, Word, media
 
 
 def passage(text, speaker, start):
@@ -60,7 +60,7 @@ def recording(tmp_path, monkeypatch):
         monkeypatch.setattr(media, 'prepare', prepare)
         monkeypatch.setattr(media, 'probe', duration_of)
         sdk = NS(files=NS(upload=upload), interactions=raw_interactions(create))
-        return AudioPipeline('fake', tmp_path / 'cache', sdk), wav, requests
+        return TranscribePipeline('fake', tmp_path / 'cache', sdk), wav, requests
     return setup
 
 

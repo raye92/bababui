@@ -311,6 +311,9 @@ def test_worker_delivers_timing_with_incoming_review(tmp_path, monkeypatch, reco
         def __init__(self, *args, output=None, legacy_cache=None):
             super().__init__('fake', tmp_path / 'cache', output=output)
 
+        def _request_flash(self, path, duration, progress):
+            return 'Speaker 1: Alpha beta gamma.'
+
         def transcribe_segment(self, path, progress, *, timing_only=False, segment=None):
             words = ('Alpha', 'beta', 'gamma.')
             if recording == 'no timestamps' or (not timing_only and recording != 'timed original'):

@@ -27,10 +27,12 @@ ZIP onto it. The editor uses the WAV in the job. You can also attach a WAV after
 import. Duplicating a tab keeps its transcript, pending revisions, audio, notice,
 and model settings.
 
-BABABUI transcribes the WAV with Gemini 3.5 Transcribe and saves the results in
+BABABUI uses Gemini 3.5 Transcribe for words and timestamps and Gemini 3.8 Flash
+for speaker labels across the whole recording. It saves the results in
 a folder named after the imported ZIP under `app/data/transcriptions/`. For
 `Hearing.zip`, `Hearing/Hearing.txt` contains the combined speaker transcript.
-`Hearing - chunk 1.json` contains parsed words and timestamps. Each full Gemini
+`Hearing - chunk 1.json` contains Transcribe's words, timestamps and backup speaker
+labels. `Hearing - Flash speakers.txt` contains the independent Flash pass. Each full Transcribe
 reply is saved as JSON, with its chunk, continuation, fallback, retry, timing
 clip, or vocabulary window identified in the filename.
 
@@ -58,18 +60,20 @@ by default. It clears the recording's cached files and runs all three steps.
 - **Automated review** applies the enabled edit rules to Incoming and uses the
   AI review model when enabled in Settings.
 
-WAVs can be up to 1 hour 57 minutes long. Speaker labels and word timing use up
+WAVs can be up to 1 hour 57 minutes long. Transcribe uses up
 to four 30-minute chunks starting at minutes 0, 29, 58, and 87. With confirmed
 notice names, custom vocabulary uses up to two independent 60-minute chunks,
 starting at minutes 0 and 59. A 60-minute recording needs one vocabulary
 request. Both schedules overlap by one minute.
-If a transcription request returns HTTP 429, the app waits 60 seconds and retries
+If a Transcribe inference request returns HTTP 429, the app waits 60 seconds and retries
 that request once. If Gemini returns an incomplete timed transcript, the app
 retries the remainder once, starting one minute before the end of the last fully
 timed word. If it cannot resume, it requests the full chunk with speaker labels
 only and recovers word times from matching phrases in the earlier responses.
-At each join, the app uses word times and shared wording to match speakers and
-remove repeated words. An unmatched speaker receives a new label.
+At each join, the app uses word times and shared wording to remove repeated words.
+It then aligns each chunk with the full Flash pass. A returning speaker can match
+their earlier Flash ID wherever they speak again. If Flash skips words at a handoff,
+the app uses the local Transcribe tags, sentence endings and pauses to place the switch.
 If the wording differs but both chunks have timed words in the overlap, the app
 uses the midpoint as a fallback. Review the warnings and resulting transcript.
 Timestamps are used internally and do not appear in Incoming.
@@ -92,8 +96,8 @@ Formatting also preserves a notice spelling when the same name appears in the
 corresponding passage of the original testimony.
 
 Each tab remembers its processing model: Gemini 4 Argon (default), Gemini 3.8
-Flash, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. The transcription model
-is Gemini 3.5 Transcribe. Manual contains Strip Formatting, Apply Standards,
+Flash, DeepSeek V4 (`deepseek-flash`), or DeepSeek V4 Pro. Every new transcription
+uses both Transcribe and Flash. Manual contains Strip Formatting, Apply Standards,
 Insert Sample, and Batch Strip.
 Batch Strip lets you choose a folder and writes results into its `stripped`
 subfolder. It starts from the selected document's folder when available.
