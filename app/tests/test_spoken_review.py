@@ -130,6 +130,18 @@ def test_long_transcript_compares_character_edits_in_passages(monkeypatch, stage
     assert old == new
 
 
+def test_long_proposal_and_review_keep_all_independent_word_changes():
+    lines = [f'MS. DAY:  Did you inspect loading bay {i} before the shipment arrived?' for i in range(600)]
+    original = revision('\n'.join(lines))
+    target = original.text.replace('inspect', 'examine').replace('before', 'after').replace('shipment', 'delivery')
+    incoming = propose(original, target)
+    assert incoming.text == target
+    edits = build_review(original, incoming).edits
+    expected = [[('inspect', 'examine')], [('before', 'after')], [('shipment', 'delivery')]]
+    assert excerpts(edits) == expected * len(lines)
+    assert_replay(original.text, target, edits)
+
+
 def test_rejecting_realigned_label_keeps_the_destination_stroke_order():
     from types import SimpleNamespace
     from app.src.casecat.anchors import AnchoredSpan, Revision

@@ -36,10 +36,11 @@
    approximate departure/return matches and subsequent corroborating testimony.
    Excluded text is audited and restored by Undo. Ambiguous intervals stay pending.
 """
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
+from itertools import chain
 import re
 
 from app.src.casecat.elements import NativeElement, speaker_number
@@ -354,9 +355,12 @@ def index_speaker_fields(revision):
                  and e.kind == 'field' and speaker_number(e.name) and e.value)
 
 
-def _label_pattern(index_fields):
-    values = dict.fromkeys(e.value for e in index_fields or () if e.value)
-    names = [re.escape(value) for value in values if not LABEL.fullmatch(value + ':')]
+def _label_pattern(fields, revision=None):
+    if revision is not None:
+        speakers = (e for e in revision.elements if e.kind == 'field' and speaker_number(e.name))
+        fields = chain(speakers, fields or ())
+    values = dict.fromkeys(e.value.strip().removesuffix(':').rstrip() for e in fields or () if e.value)
+    names = [re.escape(value) for value in values if value and not LABEL.fullmatch(value + ':')]
     return re.compile(_LABEL_PATTERN % '|'.join((_NAME_PATTERN, *names)), re.I) if names else LABEL
 
 
@@ -379,6 +383,57 @@ def _speaker_choices(paragraphs, fields, index_fields=()):
 
 def _field_ranges(revision):
     return {(e.start, e.end): e for e in revision.elements if e.kind == 'field'}
+
+
+def _proposed_name_part(name, target, start, end):
+    """Project the part of a turn label supplied by the native field."""
+    if target is None:
+        return None
+    prefix, suffix = name[:start], name[end:]
+    if len(target) >= len(prefix) + len(suffix) and target.startswith(prefix) and target.endswith(suffix):
+        return target[len(prefix):len(target) - len(suffix)]
+    if target.startswith(name[:end]) or target.endswith(name[start:]):
+        return name[start:end]  # Only the literal text outside the field changed.
+    return None
+
+
+def _attribution_fields(old, proposed, fields, choices, *, mapping_voices, has_index):
+    """Separate per-turn assignments before a text edit can rename a shared field."""
+    starts = [p[0] for p in old]
+    detached = set()
+    ranges = {}
+    changes = {}
+    for field in fields.values():
+        i = bisect_right(starts, field.start) - 1
+        offset, line, label, _ = old[i]
+        if not label:
+            continue
+        a, b = _label_range(old[i])
+        # Some native speakers include the colon and its following spaces.
+        label_end = offset + len(line) - len(line[label.end():].lstrip(' \t'))
+        if not (field.start < b and a < field.end <= label_end):
+            continue
+        ranges[field] = (a, b)
+        if mapping_voices and (a, b) == (field.start, field.end):
+            detached.add(field)
+            continue
+        target = proposed.get(i)
+        start, end = max(field.start, a) - a, min(field.end, b) - a
+        name = label['name']
+        value = _proposed_name_part(name, target, start, end)
+        if value == name[start:end]:
+            continue
+        if mapping_voices or has_index or target is None or speaker_name_key(target) in choices:
+            value = None
+        changes.setdefault(field.name, []).append((field, value))
+
+    for occurrences in changes.values():
+        values = {value for _, value in occurrences}
+        # Only a single new name can be a linked rename. Known speakers,
+        # unpaired turns, and different proposed names are local assignments.
+        if len(values) > 1 or None in values:
+            detached.update(field for field, _ in occurrences)
+    return {field: ranges[field] for field in detached}
 
 
 def _review_turn_pairs(old, new):
@@ -442,7 +497,7 @@ def speaker_replacements(original, incoming):
 def speaker_choices(original):
     """Offer labels used in testimony and the confirmed examiner index."""
     indexed = index_speaker_fields(original)
-    paragraphs = _paragraphs(original.text, labels=_label_pattern(indexed))
+    paragraphs = _paragraphs(original.text, labels=_label_pattern(indexed, original))
     return {key: choice for key, choice in
             _speaker_choices(paragraphs, _field_ranges(original), indexed).items()
             if choice.selectable}
@@ -484,9 +539,9 @@ def _restore_trailing(original, text, *, labels=LABEL):
 def prepare(original, text, *, evidence=None, overrides=None, index_fields=None, normalize_continuations=None):
     """Return a structured proposal and JSON-safe, frozen speaker evidence."""
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    labels = _label_pattern(index_fields)
-    old, new, pairs = aligned_paragraphs(original.text, text, labels=labels)
     fields = _field_ranges(original)
+    labels = _label_pattern(index_fields, original)
+    old, new, pairs = aligned_paragraphs(original.text, text, labels=labels)
     choices = _speaker_choices(old, fields, index_fields)
     paired = {j: i for i, j in pairs}
     if evidence is None:
@@ -523,6 +578,7 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None,
         evidence = {'speakers': summaries, 'occurrences': occurrences}
     mappings = {key: value['mapped'] for key, value in evidence['speakers'].items()}
     mappings.update(overrides or {})
+    names = {j: p[2]['name'] for j, p in enumerate(new) if p[2]}
     edits = []
     for j, paragraph in enumerate(new):
         label = paragraph[2]
@@ -533,30 +589,17 @@ def prepare(original, text, *, evidence=None, overrides=None, index_fields=None,
                 raise ValueError('Choose an existing speaker label.')
             prior = old[paired[j]][2] if j in paired else None
             display = prior['name'] if prior and speaker_name_key(prior['name']) == key else choice.name
+            names[j] = display
             edits.append((*_label_range(paragraph), display))
     for a, b, name in reversed(edits):
         text = text[:a] + name + text[b:]
     text = _restore_trailing(original, text, labels=labels)
-    # Do not let whole-text revision treat attribution changes as global renames.
-    if evidence['occurrences']:
-        # Unpaired paragraphs can move across token alignment blocks too.
-        # No speaker occurrence may be interpreted as a global definition edit
-        # while resolving generic AI labels.
-        attribution_paragraphs = old
-    elif index_fields is not None:
-        # A changed or unpaired speaker is an attribution to review at this
-        # occurrence. The shared native definition also names a cover examiner.
-        unchanged = {i for i, j in pairs if old[i][2] and new[j][2] and old[i][2]['name'] == new[j][2]['name']}
-        attribution_paragraphs = [paragraph for i, paragraph in enumerate(old) if i not in unchanged]
-    else:
-        attribution_paragraphs = [old[i] for i, j in pairs if new[j][2] and (
-            GENERIC.fullmatch(new[j][2]['name']) or (speaker_name_key(new[j][2]['name']) in choices
-            and old[i][2] and old[i][2]['name'] != new[j][2]['name']))]
-    speaker_elements = {fields[_label_range(p)] for p in attribution_paragraphs
-                        if p[2] and _label_range(p) in fields}
-    base = replace(original, elements=tuple(e for e in original.elements if e not in speaker_elements))
+    proposed = {i: names[j] for i, j in pairs if j in names}
+    speaker_elements = _attribution_fields(old, proposed, fields, choices,
+                                           mapping_voices=bool(evidence['occurrences']), has_index=index_fields is not None)
     from app.src.suggestions import propose
-    revision = propose(base, text, normalize_continuations=normalize_continuations, labels=labels)
+    revision = propose(original, text, normalize_continuations=normalize_continuations, labels=labels,
+                       attribution_fields=speaker_elements)
     _, projected, projected_pairs = aligned_paragraphs(original.text, revision.text, labels=labels)
     aligned_sources = {j: old[i] for i,j in projected_pairs}
     values = field_values(original)
@@ -605,7 +648,7 @@ def begin_review(state, text, *, exclude_off_record=True, index_fields=None, nor
             and incoming.definitions == state.original.definitions):
         incoming = state.original
     # Normalization changes label lengths, not paragraph order.
-    labels = _label_pattern(index_fields)
+    labels = _label_pattern(index_fields, state.original)
     raw_paragraphs = _paragraphs(text, labels=labels)
     new_paragraphs = _paragraphs(incoming.text, labels=labels)
     locations = []

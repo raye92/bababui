@@ -7,6 +7,8 @@ The port retains the original scoring and tie-breaking behavior.
 """
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import lru_cache
+from math import isqrt
 import struct
 
 
@@ -143,7 +145,7 @@ class Diff:
         return result
 
 
-def dynamic_programming(sequence1, sequence2, equality_score=None, check_timeout=None):
+def dynamic_programming(sequence1, sequence2, equality_score=None):
     """Upstream weighted LCS, including its consecutive-match bonus and ties."""
     n, m = sequence1.length, sequence2.length
     if not n or not m:
@@ -155,8 +157,6 @@ def dynamic_programming(sequence1, sequence2, equality_score=None, check_timeout
     directions = bytearray(n * m)
     previous_scores, previous_runs = [0] * m, [0] * m
     for i in range(n):
-        if check_timeout:
-            check_timeout()
         scores, runs = [0] * m, [0] * m
         base = i * m
         for j in range(m):
@@ -209,7 +209,88 @@ class _Snake:
     length: int
 
 
-def myers(sequence1, sequence2, check_timeout=None):
+def _insertion_diffs(shorter, longer, start):
+    """Return the greedy Myers path if every edit is an insertion."""
+    extra = len(longer) - len(shorter)
+    j = start
+    result = []
+    for i in range(start, len(shorter)):
+        if shorter[i] != longer[j]:
+            try:
+                match = longer.index(shorter[i], j + 1, i + extra + 1)
+            except ValueError:
+                return None
+            result.append(Diff(Range(i, i), Range(j, match)))
+            j = match
+        j += 1
+    if j < len(longer):
+        result.append(Diff(Range(len(shorter), len(shorter)), Range(j, len(longer))))
+    return result
+
+
+def _bit_lcs_diffs(a, b):
+    """Trace the same shortest edit path using bit-parallel longest common subsequences."""
+    positions = {}
+    for j, value in enumerate(b):
+        positions.setdefault(value, []).append(j)
+
+    # A transcript can have thousands of distinct line IDs. Keep their positions
+    # sparse and cache only recently used masks. Character masks usually all fit.
+    @lru_cache(maxsize=128)
+    def matches(value):
+        offsets = positions.get(value)
+        if not offsets:
+            return 0
+        bits = bytearray(offsets[-1] // 8 + 1)
+        for j in offsets:
+            bits[j // 8] |= 1 << (j % 8)
+        return int.from_bytes(bits, 'little')
+
+    def next_row(row, value):
+        # Bit j marks an increase in LCS length at column j+1. Subtraction
+        # selects the first available match for each successive prefix length.
+        candidates = row | matches(value)
+        return candidates & ~(candidates - ((row << 1) | 1))
+
+    # Save every sqrt(n)-th row. During traceback reconstruct just one block
+    # at a time, so even a complete rewrite needs no full traceback matrix.
+    block_size = isqrt(len(a))
+    checkpoints = []
+    row = 0
+    for start in range(0, len(a), block_size):
+        checkpoints.append(row)
+        for value in a[start:start + block_size]:
+            row = next_row(row, value)
+
+    score = row.bit_count()
+    end_a, end_b = len(a), len(b)
+    j = end_b
+    result = []
+    while checkpoints and score:
+        start = (len(checkpoints) - 1) * block_size
+        rows = [checkpoints.pop()]
+        for value in a[start:start + block_size]:
+            rows.append(next_row(rows[-1], value))
+        for i in range(len(rows) - 1, 0, -1):
+            # Myers prefers an insertion, then a deletion, then a match when
+            # tracing equally short paths backwards. Skip all trailing inserts.
+            j = (rows[i] & ((1 << j) - 1)).bit_length()
+            if (rows[i - 1] & ((1 << j) - 1)).bit_count() == score:
+                continue
+            if start + i != end_a or j != end_b:
+                result.append(Diff(Range(start + i, end_a), Range(j, end_b)))
+            end_a, end_b = start + i - 1, j - 1
+            j -= 1
+            score -= 1
+            if not score:
+                break
+    if end_a or end_b:
+        result.append(Diff(Range(0, end_a), Range(0, end_b)))
+    result.reverse()
+    return result
+
+
+def myers(sequence1, sequence2):
     """Upstream Myers implementation with the same diagonal/path tie choices."""
     n, m = sequence1.length, sequence2.length
     if not n or not m:
@@ -223,14 +304,23 @@ def myers(sequence1, sequence2, check_timeout=None):
         return x
 
     initial = snake(0, 0)
+    if initial == n or initial == m:
+        return [] if n == m else [Diff(Range(initial, n), Range(initial, m))]
+    if n != m:
+        inserts = _insertion_diffs(a, b, initial) if n < m else _insertion_diffs(b, a, initial)
+        if inserts is not None:
+            return inserts if n < m else [change.swap() for change in inserts]
+    # Myers is cheap for small edit distances. Bound its diagonal search to
+    # about eight states per input element before switching to the dense solver.
+    max_distance = 4 * isqrt(n + m)
     furthest = {0: initial}
     paths = {0: _Snake(None, 0, 0, initial) if initial else None}
     distance = 0
     complete = False
     while not complete:
         distance += 1
-        if check_timeout:
-            check_timeout()
+        if distance > max_distance:
+            return [change.delta(initial) for change in _bit_lcs_diffs(a[initial:], b[initial:])]
         lower = -min(distance, m + distance % 2)
         upper = min(distance, n + distance % 2)
         for diagonal in range(lower, upper+1, 2):

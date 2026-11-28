@@ -124,6 +124,62 @@ def test_whole_text_proposal_renames_the_field_without_flattening():
     assert len([e for e in revision.elements if e.kind == 'field']) == 2
 
 
+@pytest.mark.parametrize(('first_name', 'value'), [
+    ('MS. NORTH', 'MS. OLD'), ('MS. OLDER', 'MS. OLD'), ('MS. OLDER', 'MS. OLD:'),
+])
+def test_conflicting_speaker_proposals_can_be_reviewed_and_exported_individually(tmp_path, first_name, value):
+    from app.src.casecat.project import NativeState
+    from app.src.notice_review import begin_document_review
+    from app.src.review_editing import resolve_review
+    from app.src.review_model import build_review
+
+    words = (*FIELD_WORDS, b'\x16\x04\x00' + FIELD + b': All done.')
+    if value.endswith(':'):
+        words = tuple(word.replace(FIELD + b':', FIELD) for word in words)
+    bundle = archive.inspect_archive(zip_bytes(field_files(value, words=words)))
+    state = NativeState.load(bundle, bundle.jobs[0])
+    original = state.original
+    first_turn = original.text.replace('MS. OLD:', first_name + ':', 1)
+    target = first_turn.replace('MS. OLD:', 'MS. WEST:', 1)
+    begin_document_review(state, target)
+    assert state.incoming.text == target
+    assert state.incoming.definitions == original.definitions
+    assert [e.value for e in state.incoming.elements if e.kind == 'field'] == [value]
+
+    model = build_review(original, state.incoming)
+    assert len(model.edits) == 2 and all(not e.field for e in model.edits)
+    model, review = resolve_review(model, state.review, 0, True)
+    model, _ = resolve_review(model, review, 0, False)
+    path = tmp_path / 'reviewed.zip'
+    archive.export_zip(bundle, state.job.with_revision(model.original), path)
+    restored = codec.load_job(archive.inspect_archive(path), state.job.key)
+    assert restored.text == first_turn
+    assert native_stream(restored).count(FIELD) == 2
+    assert restored.revision.definitions == original.definitions
+
+
+@pytest.mark.parametrize(('value', 'prefix', 'delimiter'), [('MS. OLD:', b'', b''), ('OLD', b'MS. ', b':')])
+def test_splitting_testimony_keeps_its_native_speaker_references(tmp_path, value, prefix, delimiter):
+    from app.src.casecat.project import NativeState
+    from app.src.notice_review import begin_document_review
+    from app.src.review_model import build_review
+    from app.src.suggestions import resolve_all
+
+    label = b'\x16\x04\x00' + prefix + FIELD + delimiter
+    words = (label + b' First sentence. Second sentence.', label + b' Other testimony.')
+    bundle = archive.inspect_archive(zip_bytes(field_files(value, words=words)))
+    state = NativeState.load(bundle, bundle.jobs[0])
+    target = state.original.text.replace(' Second sentence.', '\nSecond sentence.')
+    begin_document_review(state, target)
+    model = build_review(state.original, state.incoming)
+    accepted, _ = resolve_all(state.original, state.incoming, model.ranges, True)
+    path = tmp_path / 'split.zip'
+    archive.export_zip(bundle, state.job.with_revision(accepted), path)
+    restored = codec.load_job(archive.inspect_archive(path), state.job.key)
+    assert restored.text == target
+    assert native_stream(restored).count(FIELD) == 2
+
+
 def test_project_reload_retains_independent_speaker_values(tmp_path, monkeypatch):
     from app.src import documents
     monkeypatch.setattr(documents, 'NATIVE_ASSET_DIR', tmp_path/'assets')

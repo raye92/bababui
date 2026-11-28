@@ -5,7 +5,6 @@ Only the options used by transcript review are implemented: whitespace counts,
 no move detection, and no subword extension. Display hunks are not decisions.
 """
 from math import log
-from time import monotonic
 
 from app.src.diff_sequences import Range, Diff, LineSequence, CharSequence, dynamic_programming, myers, js_trim
 from app.src.diff_heuristics import (
@@ -34,10 +33,10 @@ def _slice_ranges(diff, original, incoming):
     raise ValueError('Invalid advanced diff line ranges.')
 
 
-def _refine(original, incoming, diff, check_timeout):
+def _refine(original, incoming, diff):
     left_range, right_range = _slice_ranges(diff, original, incoming)
     left, right = CharSequence(original, left_range), CharSequence(incoming, right_range)
-    changes = dynamic_programming(left, right, check_timeout=check_timeout) if left.length + right.length < 500 else myers(left, right, check_timeout=check_timeout)
+    changes = dynamic_programming(left, right) if left.length + right.length < 500 else myers(left, right)
     changes = optimize_sequence_diffs(left, right, changes)
     changes = extend_diffs_to_entire_word_if_appropriate(left, right, changes, lambda seq, pos: seq.find_word_containing(pos))
     changes = remove_short_matches(left, right, changes)
@@ -50,10 +49,6 @@ def _refine(original, incoming, diff, check_timeout):
 
 def compute_inner_changes(original, incoming):
     """Return paired, zero-based UTF-16 ranges from the advanced diff pipeline."""
-    deadline = monotonic() + 30
-    def check_timeout():
-        if monotonic() >= deadline:
-            raise TimeoutError('Advanced diff exceeded its computation limit.')
     if len(original) <= 1 and original == incoming:
         return ()
     if original == ('',) or incoming == ('',):
@@ -66,7 +61,7 @@ def compute_inner_changes(original, incoming):
     exact_scores = [1 + log(1 + _width(line)) if line else 0.1 for line in incoming]
     def equality_score(i, j):
         return exact_scores[j] if original[i] == incoming[j] else 0.99
-    changes = dynamic_programming(left, right, equality_score, check_timeout=check_timeout) if left.length + right.length < 1700 else myers(left, right, check_timeout=check_timeout)
+    changes = dynamic_programming(left, right, equality_score) if left.length + right.length < 1700 else myers(left, right)
     changes = optimize_sequence_diffs(left, right, changes)
     changes = remove_very_short_matching_lines_between_diffs(left, right, changes)
     mappings = []
@@ -76,8 +71,8 @@ def compute_inner_changes(original, incoming):
         for offset in range(change.seq1_range.start-last_a):
             i, j = last_a+offset, last_b+offset
             if original[i] != incoming[j]:
-                mappings.extend(_refine(original, incoming, Diff(Range(i, i+1), Range(j, j+1)), check_timeout))
+                mappings.extend(_refine(original, incoming, Diff(Range(i, i+1), Range(j, j+1))))
         if change.seq1_range.start < len(original) or change.seq2_range.start < len(incoming):
-            mappings.extend(_refine(original, incoming, change, check_timeout))
+            mappings.extend(_refine(original, incoming, change))
         last_a, last_b = change.seq1_range.end_exclusive, change.seq2_range.end_exclusive
     return tuple(mappings)

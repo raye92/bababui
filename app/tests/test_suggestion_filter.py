@@ -144,3 +144,39 @@ def test_speaker_override_can_use_literal_label_but_not_cover_field():
     override_speaker(state, 'SPEAKER 1', 'THE WITNESS')
     assert state.incoming.text == original.text
     assert state.incoming.elements == original.elements
+
+
+def test_bare_native_name_keeps_review_locations_and_can_be_overridden():
+    from types import SimpleNamespace
+    from app.src.suggestion_filter import begin_review, override_speaker
+
+    original = Revision((AnchoredSpan('root', (), (), ''),))
+    for i in range(3):
+        original = original.insert_field(len(original.text), 'EZ SPEAKER 01', 'RIVERA')
+        original = original._replace(len(original.text), len(original.text), f': Passage number {i}.\n')
+    state = SimpleNamespace(original=original)
+    generic = original.text.replace('RIVERA:', 'SPEAKER 3:')
+    begin_review(state, generic)
+    assert state.incoming == original
+    assert len(state.review['locations']) == 3
+    override_speaker(state, 'SPEAKER 3', None)
+    assert state.incoming.text == generic
+    override_speaker(state, 'SPEAKER 3', 'RIVERA')
+    assert state.incoming.text == original.text
+    assert state.incoming.elements == original.elements
+
+
+def test_literal_titles_keep_their_shared_native_surname():
+    from app.src.suggestion_filter import prepare
+
+    original = Revision((AnchoredSpan('root', (), (), ''),))
+    for i, title in enumerate(['MS. ', 'MS. ', 'DR. ', 'DR. ']):
+        original = original._replace(len(original.text), len(original.text), title)
+        original = original.insert_field(len(original.text), 'EZ SPEAKER 01', 'RIVERA')
+        original = original._replace(len(original.text), len(original.text), f': Passage number {i}.\n')
+    generic = original.text.replace('MS. RIVERA:', 'SPEAKER 1:').replace('DR. RIVERA:', 'SPEAKER 2:')
+    mapped, _ = prepare(original, generic)
+    assert mapped == original
+    renamed, _ = prepare(original, original.text.replace('RIVERA', 'VARGAS'))
+    assert dict(renamed.definitions)['EZ SPEAKER 01'] == 'VARGAS'
+    assert [e.value for e in renamed.elements if e.kind == 'field'] == ['VARGAS'] * 4

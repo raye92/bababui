@@ -20,8 +20,8 @@ class DiffError(ValueError):
 def _diff_lines(original, incoming):
     try:
         return compute_inner_changes(original or ('',), incoming or ('',))
-    except (TimeoutError, MemoryError) as error:
-        raise DiffError(f'Advanced diff failed: {error}') from error
+    except MemoryError as error:
+        raise DiffError('Not enough memory to compare the transcripts.') from error
 
 
 def _normalized(text):
@@ -45,28 +45,37 @@ def _line_starts(text):
     return [0] + [match.end() for match in re.finditer('\n', text)]
 
 
-def _position(lines, starts, row, column, *, end=False):
-    line = lines[row]
-    units = 0
-    for index, char in enumerate(line):
-        if units == column:
-            return starts[row] + index
-        width = 2 if ord(char) > 0xffff else 1
-        if units < column < units + width:
-            return starts[row] + index + int(end)
-        units += width
-    if units != column:
-        raise DiffError('advanced diff returned an invalid UTF-16 column.')
-    return starts[row] + len(line)
+def _position_map(text, lines):
+    starts = _line_starts(text)
+    # Index only the second UTF-16 unit of each supplementary character.
+    # Multiple edits on a long line can then share the same column map.
+    second_units = {}
+    for row, line in enumerate(lines):
+        if not line.isascii():
+            pairs = re.finditer(r'[\U00010000-\U0010ffff]', line)
+            second_units[row] = tuple(match.start() + i + 1 for i, match in enumerate(pairs))
+
+    def position(row, column, *, end=False):
+        extra = second_units.get(row, ())
+        if not 0 <= column <= len(lines[row]) + len(extra):
+            raise DiffError('advanced diff returned an invalid UTF-16 column.')
+        count = bisect_right(extra, column)
+        offset = starts[row] + column - count
+        if end and count and extra[count - 1] == column:
+            offset += 1
+        return offset
+
+    return position
 
 
 def _normalized_edits(a, b):
     left, right = a.split('\n'), b.split('\n')
-    starts_a, starts_b = _line_starts(a), _line_starts(b)
+    original_position = _position_map(a, left)
+    incoming_position = _position_map(b, right)
     edits = []
     for ar, ac, br, bc, cr, cc, dr, dc in _diff_lines(tuple(left), tuple(right)):
-        span = (_position(left, starts_a, ar, ac), _position(left, starts_a, br, bc, end=True),
-                _position(right, starts_b, cr, cc), _position(right, starts_b, dr, dc, end=True))
+        span = (original_position(ar, ac), original_position(br, bc, end=True),
+                incoming_position(cr, cc), incoming_position(dr, dc, end=True))
         # JavaScript can locate a change between the two UTF-16 units of one
         # Unicode character. Expand only those overlapping character atoms.
         if edits and (span[0] < edits[-1][1] or span[2] < edits[-1][3]):

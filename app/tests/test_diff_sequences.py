@@ -38,3 +38,20 @@ def test_character_sequence_matches_pinned_upstream(case):
 def test_diff_inverse_preserves_empty_equal_gaps_and_final_delta():
     changes = [Diff(Range(0, 1), Range(0, 2)), Diff(Range(3, 3), Range(4, 6))]
     assert tuples(Diff.invert(changes, 5)) == [[0, 0, 0, 0], [1, 3, 2, 4], [3, 5, 6, 8]]
+
+
+def test_long_paste_and_deletion_follow_the_first_matching_character():
+    tail = ' identical text.' * 8000
+    short, long = 'AB' + tail, 'X' * 600 + 'AAB' + tail
+    a = CharSequence([short], (0, 0, 0, len(short)))
+    b = CharSequence([long], (0, 0, 0, len(long)))
+    assert tuples(myers(a, b)) == [[0, 0, 0, 600], [1, 1, 601, 602]]
+    assert tuples(myers(b, a)) == [[0, 600, 0, 0], [601, 602, 1, 1]]
+
+
+def test_large_rewrite_keeps_myers_tie_between_repeated_matches():
+    old = 'ab' * 150
+    new = 'X' * 152 + 'ba' * 150 + 'Z' * 152
+    a = CharSequence([old], (0, 0, 0, len(old)))
+    b = CharSequence([new], (0, 0, 0, len(new)))
+    assert tuples(myers(a, b)) == [[0, 1, 0, 152], [300, 300, 451, 604]]

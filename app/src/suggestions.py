@@ -226,7 +226,26 @@ def _prepare_continuations(original, old, new, candidates, sources, labels):
     return inherited
 
 
-def propose(original, text, *, normalize_continuations=None, labels=None):
+def _detach_changed_attributions(original, text, edits, fields, labels):
+    """Keep native references when a split or join copied the entire speaker label."""
+    ends = [b for _, b, _, _ in edits]
+    detached = set(fields)
+    for field, (a, b) in fields.items():
+        start, end = min(a, field.start), max(b + 1, field.end)  # include the colon
+        i = bisect_right(ends, start)
+        if i < len(edits) and edits[i][0] < end:
+            continue
+        destination = a + (edits[i - 1][3] - ends[i - 1] if i else 0)
+        line = text.rfind('\n', 0, destination) + 1
+        label = labels.match(text[line:destination + b - a + 1])
+        if label and line + label.start('name') == destination:
+            detached.remove(field)
+    if not detached:
+        return original
+    return replace(original, elements=tuple(e for e in original.elements if e not in detached))
+
+
+def propose(original, text, *, normalize_continuations=None, labels=None, attribution_fields=None):
     """Keep existing paragraph indentation and generated Q/A label spacing."""
     from app.src.suggestion_filter import LABEL
     from shared.transcript_formatting import TranscriptFormatter
@@ -268,6 +287,8 @@ def propose(original, text, *, normalize_continuations=None, labels=None):
         continuations = _prepare_continuations(original, old, new, continuations, sources, labels)
     text = '\n'.join(new)
     raw = text_edits(original.text, text, labels=labels)
+    if attribution_fields:
+        original = _detach_changed_attributions(original, text, raw, attribution_fields, labels)
     revision = original.revise(text, edits=raw)
     if continuations:
         revision = normalize_continuations(revision, continuations)
