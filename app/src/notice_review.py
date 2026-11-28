@@ -5,7 +5,7 @@ import re
 from types import SimpleNamespace
 
 from app.src.casecat.anchors import Revision
-from app.src.casecat.elements import BYLINE_STYLE, CENTERED_STYLE, examination_style
+from app.src.casecat.elements import CENTERED_STYLE, examination_style
 
 
 def split_revision(revision, start):
@@ -123,20 +123,21 @@ def response_body(prefix, text):
 
 
 def _format_examinations(text):
-    """Put the numbered blank line in the proposal before speaker offsets are recorded."""
+    """Space examination headings before speaker offsets are recorded."""
     lines = []
+    after_heading = False
     for line in text.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        if after_heading and not line.strip():
+            continue
         stripped = line.lstrip(' \t')
         style = examination_style(stripped)
-        if style:
-            line = stripped
-        if style == BYLINE_STYLE:
-            last = len(lines)
-            while last and not lines[last - 1].strip():
-                last -= 1
-            if last and examination_style(lines[last - 1]) == CENTERED_STYLE:
-                lines[last:] = ['']
-        lines.append(line)
+        after_heading = style == CENTERED_STYLE
+        if after_heading:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            if lines:
+                lines.append('')
+        lines.append(stripped if style else line)
     return '\n'.join(lines)
 
 

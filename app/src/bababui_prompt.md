@@ -277,6 +277,7 @@ BY SPEAKER 1:
      A    Yes.
      SPEAKER 1:  I have no further questions.
      SPEAKER 3:  I have a few questions.
+
 EXAMINATION
 BY SPEAKER 3:
      Q    Doctor, did you review the prior medical records?
@@ -285,6 +286,7 @@ BY SPEAKER 3:
      A    No.
      SPEAKER 3:  Nothing further.
      SPEAKER 1:  Just a few follow-up questions.
+
 FURTHER EXAMINATION
 BY SPEAKER 1:
      Q    Doctor, you testified that the prior records did not change your opinions; correct?

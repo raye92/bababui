@@ -22,12 +22,12 @@ def deposition(words):
 
 
 @pytest.mark.parametrize('heading, gap', [('EXAMINATION', '\n'), ('FURTHER EXAMINATION', '\n\n')])
-def test_review_exports_exam_with_one_blank_line_and_linked_byline(tmp_path, heading, gap):
+def test_review_exports_exam_with_blank_before_heading_and_linked_byline(tmp_path, heading, gap):
     colloquy = b'\x16\x04\x00'
     doc = deposition((b'First. ', b'Back on the record.' + colloquy + b'WITNESS:  Fine.'
                       + colloquy + FIELD + b': ', b'Next question.'))
     proposal = f'First. Back on the record.\n{heading}{gap}BY MS. OLD:\n     Q    Next question?'
-    expected = f'First. Back on the record.\n{heading}\n\nBY MS. OLD:\n     Q    Next question?'
+    expected = f'First. Back on the record.\n\n{heading}\nBY MS. OLD:\n     Q    Next question?'
     state = doc.native
     begin_document_review(state, proposal)
 
@@ -44,10 +44,17 @@ def test_review_exports_exam_with_one_blank_line_and_linked_byline(tmp_path, hea
 
     assert restored.text == expected
     stream = native_stream(restored)
-    assert [raw[1] for _, raw in codec.records(stream, 0, len(stream)) if raw[0] == 0x16] == [7, 255, 5, 2]
+    assert [raw[1] for _, raw in codec.records(stream, 0, len(stream)) if raw[0] == 0x16] == [255, 7, 5, 2]
     assert b'\x16\x05\x00' + ORPHAN + b'BY ' + FIELD in stream
     assert restored.stroke_clocks == state.job.stroke_clocks
     assert restored.notes_bytes == state.job.notes_bytes
+
+
+@pytest.mark.parametrize('prefix, expected_prefix', [('\r\n', ''), ('Before.\r\n \r\n\r\n', 'Before.\n\n')])
+def test_review_normalizes_existing_blanks_around_heading(prefix, expected_prefix):
+    state = deposition((b'Before.',)).native
+    begin_document_review(state, prefix + 'EXAMINATION\r\n\t\r\n\r\nBY COUNSEL:\r\n     Q    Next?')
+    assert state.incoming.text == expected_prefix + 'EXAMINATION\nBY COUNSEL:\n     Q    Next?'
 
 
 def test_resumed_examination_uses_flush_byline_without_adding_a_heading_or_blank(tmp_path):
